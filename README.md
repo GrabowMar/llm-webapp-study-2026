@@ -7,7 +7,8 @@ static and dynamic analyzers.
 
 The platform that generated and analyzed the apps is
 [AutoLLM_Code_Analyzer_rework](https://github.com/GrabowMar/AutoLLM_Code_Analyzer_rework)
-(commit `900cc95`). This repository holds the data only.
+(commit `900cc95`; `findings.csv` and `tables/` use the counting corrections of its pull request #145).
+This repository holds the data only.
 
 ## Design
 
@@ -45,9 +46,9 @@ These counts can be recomputed from `evaluations.csv` (`outcome`, `truncated`).
 - **GPT-6.1 Sol covers 17 of the 30 tasks.** That arm was stopped early for cost.
 - **Model and route are confounded.** The three routes do not support the same request options.
 - **Security findings are unverified tool output.** No injection vulnerability was confirmed by
-  hand in any app. The ZAP SQL injection alerts that were checked were false positives, and most
-  Wapiti `sql` / `file` / `exec` rows are plain HTTP 500 responses filed under the attack module
-  that triggered them. Several high-volume static rules (for example bandit `B608`) were false
+  hand in any app. The ZAP SQL injection alerts that were checked were false positives. Wapiti rows
+  with rule `internal-server-error` are plain HTTP 500 responses an attack payload provoked: a
+  robustness signal, not a vulnerability. Several high-volume static rules (for example bandit `B608`) were false
   positives in every sample inspected. Treat counts as analyzer output, not as vulnerabilities.
 - **Dynamic scans cover only apps that started** (278 of 285), over plain HTTP in a test
   deployment, so "HTTP only" and missing-header findings describe the deployment as much as the app.
@@ -105,6 +106,12 @@ is the label the tool itself printed.
 - **Findings are the latest result of each tool for each app**, which is what the tables count.
   Earlier pilot and superseded analysis runs are not included.
 - **Evaluations are the one in effect** for each run (suite `eval-v2@2`).
+- **Revision of 2026-11-13.** Two counting rules were corrected after the first publication and
+  `findings.csv` and `tables/` were regenerated; nothing else changed. (1) The 13 Wapiti server-error
+  rows carried the attack module (`sql`, `file`, `exec`) as their rule id and are now
+  `internal-server-error`, which merges them into one runtime issue class per app (5 apps, 1–2 fewer
+  runtime issues each; the module of each row is in the previous revision of `findings.csv`). (2) Seven duplicated blocks that exist only between app code and a test or
+  scratch script were counted as app-code issues and are now counted with the test code (3 apps).
 - **One third-party email address** printed by a package tool in one transcript was replaced with
   `redacted@example.com`. Nothing else was altered.
 

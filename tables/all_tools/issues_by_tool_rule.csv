@@ -91,6 +91,7 @@ eslint-react,react/no-danger,xss-dangerous-html,security,,Dangerous property 'da
 codeql,py/polynomial-redos,redos,security,CWE-1333,Polynomial regular expression used on uncontrolled data,14,14,14,"{""warning"": 14}",high,0,14,0,0,0
 zap,10055,cwe-693,security,CWE-693,CSP: Failure to Define Directive with No Fallback,14,8,8,"{""Medium"": 14}",medium,0,0,14,0,0
 codeql,py/unused-local-variable,unused-variable,quality,CWE-563,Unused local variable,13,10,10,"{""recommendation"": 13}",info,0,0,0,0,13
+wapiti,internal-server-error,wapiti:internal-server-error,reliability,,Internal Server Error: The server responded with a 500 HTTP error code while attempting to inject a payload in the parameter page,13,6,6,"{""3"": 13}",medium,0,0,13,0,0
 bandit,B201,flask-debug,security,CWE-94,"A Flask app appears to be run with debug=True, which exposes the Werkzeug debugger and allows the execution of arbitrary code.",12,12,12,"{""HIGH"": 12}",high,0,12,0,0,0
 codeql,py/flask-debug,flask-debug,security,CWE-215,Flask app is run in debug mode,12,12,12,"{""error"": 12}",high,0,12,0,0,0
 semgrep,python.flask.security.audit.debug-enabled.debug-enabled,flask-debug,security,CWE-489,"Detected Flask app with debug=True. Do not deploy to production with this flag enabled as it will leak sensitive information. Instead, consider using Flask configuration variables or setting 'debug' u",12,12,12,"{""WARNING"": 12}",medium,0,0,12,0,0
@@ -134,8 +135,6 @@ pylint,comparison-with-itself,pylint:comparison-with-itself,quality,,Redundant c
 pylint,inconsistent-return-statements,pylint:inconsistent-return-statements,quality,,"Either all return statements in a function should return an expression, or none of them should.",5,4,4,"{""refactor"": 5}",low,0,0,0,5,0
 pylint,wrong-import-order,pylint:wrong-import-order,quality,,"standard import ""importlib"" should be placed before third party import ""app""",5,4,4,"{""convention"": 5}",low,0,0,0,5,0
 ruff,E702,ruff:E702,quality,,Multiple statements on one line (semicolon),5,4,4,"{""unrated"": 5}",low,0,0,0,5,0
-wapiti,file,wapiti:file,reliability,,Internal Server Error: The server responded with a 500 HTTP error code while attempting to inject a payload in the parameter page,5,5,5,"{""3"": 5}",medium,0,0,5,0,0
-wapiti,sql,sql-injection,security,CWE-89,Internal Server Error: The server responded with a 500 HTTP error code while attempting to inject a payload in the parameter page,5,5,5,"{""3"": 4, ""4"": 1}",critical,1,0,4,0,0
 bandit,B603,shell-injection,security,CWE-78,subprocess call - check for execution of untrusted input.,4,4,4,"{""LOW"": 4}",low,0,0,0,4,0
 codeql,py/mixed-returns,codeql:py/mixed-returns,quality,,Explicit returns mixed with implicit (fall through) returns,4,4,4,"{""recommendation"": 4}",info,0,0,0,0,4
 codeql,py/path-injection,path-traversal,security,CWE-22,Uncontrolled data used in path expression,4,4,4,"{""error"": 4}",high,0,4,0,0,0
@@ -155,7 +154,6 @@ radon,CC-E,high-complexity,performance,,function 'main' has cyclomatic complexit
 ruff,E401,ruff:E401,quality,,Multiple imports on one line,4,4,4,"{""unrated"": 4}",low,0,0,0,4,0
 ruff,F541,ruff:F541,quality,,f-string without any placeholders,4,3,3,"{""unrated"": 4}",medium,0,0,4,0,0
 semgrep,python.flask.security.audit.directly-returned-format-string.directly-returned-format-string,cwe-79,security,CWE-79,Detected Flask route directly returning a formatted string. This is subject to cross-site scripting if user input can reach the string. Consider using the template engine instead and rendering pages w,4,2,2,"{""WARNING"": 4}",medium,0,0,4,0,0
-wapiti,exec,wapiti:exec,reliability,,Internal Server Error: The server responded with a 500 HTTP error code while attempting to inject a payload in the parameter page,4,4,4,"{""3"": 4}",medium,0,0,4,0,0
 zap,40018,sql-injection,security,CWE-89,SQL Injection,4,4,4,"{""High"": 4}",high,0,4,0,0,0
 codeql,py/uninitialized-local-variable,codeql:py/uninitialized-local-variable,quality,,Potentially uninitialized local variable,3,3,3,"{""error"": 3}",medium,0,0,3,0,0
 eslint-sonarjs,sonarjs/no-all-duplicated-branches,eslint-sonarjs:sonarjs/no-all-duplicated-branches,quality,,"This conditional operation returns the same value whether the condition is ""true"" or ""false"".",3,3,3,"{""error"": 3}",high,0,3,0,0,0
@@ -603,5 +601,6 @@ trivy,GHSA-c6gr-qvv4-5v3f,vulnerable-dependency:dompurify,dependency,,dompurify 
 trivy,GHSA-mrv2-3pqr-j5jr,vulnerable-dependency:dompurify,dependency,,dompurify 3.3.1: GHSA-mrv2-3pqr-j5jr — DOMPurify IN_PLACE: hook that removes a parent or sibling leaves the detached subtree's event handlers armed (incomplete fix for GHSA-p98j-92pf-mc4p),1,1,1,"{""HIGH"": 1}",high,0,1,0,0,0
 trivy,GHSA-pxh4-856f-4h89,vulnerable-dependency:pyjwt,dependency,,pyjwt 2.10.1: GHSA-pxh4-856f-4h89 — PyJWT: HS256/384/512 verify accepts empty HMAC key via oct JWK (PyJWK/PyJWKClient) enabling token forgery,1,1,1,"{""HIGH"": 1}",high,0,1,0,0,0
 vulture,unsatisfiable-'ternary',vulture:unsatisfiable-'ternary',quality,,unsatisfiable 'ternary' condition,1,1,1,"{""unrated"": 1}",low,0,0,0,1,0
+wapiti,sql,sql-injection,security,CWE-89,SQL Injection: SQL Injection via injection in the parameter encoded,1,1,1,"{""4"": 1}",critical,1,0,0,0,0
 zap,10062,cwe-359,security,CWE-359,PII Disclosure,1,1,1,"{""High"": 1}",high,0,1,0,0,0
 zap,30002,cwe-134,security,CWE-134,Format String Error,1,1,1,"{""Medium"": 1}",medium,0,0,1,0,0
