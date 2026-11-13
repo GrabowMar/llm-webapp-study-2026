@@ -1,0 +1,834 @@
+{
+ "adherence": {
+  "checker_version": 1,
+  "detected": {
+   "auth": {
+    "confidence": "medium",
+    "evidence": [
+     "runtime:login:bearer",
+     "runtime:tester"
+    ],
+    "value": "bearer"
+   },
+   "backend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:backend/requirements.txt:flask",
+     "import:backend/app.py:flask"
+    ],
+    "value": "flask"
+   },
+   "database": {
+    "confidence": "medium",
+    "evidence": [
+     "import:backend/app.py:sqlite3"
+    ],
+    "value": "sqlite"
+   },
+   "frontend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:frontend/package.json:react",
+     "import:frontend/src/App.tsx:react"
+    ],
+    "value": "react"
+   },
+   "styling": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:tailwindcss",
+     "classes:share=0.99"
+    ],
+    "value": "tailwind"
+   }
+  },
+  "deviations": [],
+  "hallucinated": [],
+  "packages": [
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "flask",
+    "pinned": true,
+    "version": "3.1.3"
+   },
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "gunicorn",
+    "pinned": true,
+    "version": "26.2.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@tailwindcss/vite",
+    "pinned": true,
+    "version": "4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react-dom",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "tailwindcss",
+    "pinned": true,
+    "version": "4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@vitejs/plugin-react",
+    "pinned": true,
+    "version": "6.2.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "vite",
+    "pinned": true,
+    "version": "8.3.5"
+   }
+  ],
+  "sbom_blob": "4074e82b38f9fe8b58cd142300fa75959a2c637cc1f7f63f880d6256204f3587",
+  "status": "compliant",
+  "style_metrics": {
+   "component_library_imports": {},
+   "css_files": 1,
+   "css_modules": 0,
+   "tailwind_class_share": 0.9946
+  },
+  "unpinned": []
+ },
+ "created_at": "2026-11-11T16:55:03.493349+00:00",
+ "eval_level": "security",
+ "eval_suite": "eval-v2@2",
+ "id": 1093,
+ "mode": "full",
+ "result": {
+  "auth_mode": "contract_bearer",
+  "checks": [
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "health",
+    "ms": 10,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "index_served",
+    "ms": 49,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "spa_fallback",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.register",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "auth.register.ok",
+    "ms": 101,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.login",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "auth.login.ok",
+    "ms": 120,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "base64.encode",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "base64.encode.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "base64.decode",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "base64.decode.ok",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "conversions.create",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "conversions.create.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "conversions.create",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "conversions.create.anon_401",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "conversions.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "conversions.list.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "conversions.list",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "conversions.list.anon_401",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "pagination",
+    "endpoint": "conversions.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "conversions.list.page_size",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "conversions.delete",
+    "expected": {
+     "status": [
+      204
+     ]
+    },
+    "id": "conversions.delete.ok",
+    "ms": 2,
+    "note": "status 200",
+    "observed": {
+     "body": "{\"status\":\"ok\"}\n",
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "auth",
+    "endpoint": "conversions.delete",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "conversions.delete.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "ownership",
+    "endpoint": "conversions.delete",
+    "expected": {
+     "status": [
+      404
+     ]
+    },
+    "id": "conversions.delete.other_user",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 404
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "base64.encode",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "base64.roundtrip.unicode",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "acceptance",
+    "stated_in": [
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "base64.decode",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "base64.decode.no_padding",
+    "ms": 0,
+    "note": "status 400",
+    "observed": {
+     "body": "{\"error\":\"Invalid base64 input\"}\n",
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "acceptance",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "base64.encode",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "base64.encode.invalid.missing",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "base64.encode",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "base64.encode.invalid.too_long",
+    "ms": 1,
+    "note": "status 200",
+    "observed": {
+     "body": "{\"encoded\":\"eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5",
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "base64.decode",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "base64.decode.invalid.missing",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "base64.decode",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "base64.decode.invalid.too_long",
+    "ms": 2,
+    "note": "status 200",
+    "observed": {
+     "body": "{\"text\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+     "status": 200
+    },
+    "overlay": true,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "conversions.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "conversions.create.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "conversions.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "conversions.create.invalid.enum",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   }
+  ],
+  "compiler_version": 2,
+  "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+  "flaky_checks": [],
+  "measured": true,
+  "metrics": {
+   "agent_checks": 20,
+   "agent_pass_rate": 0.8,
+   "agent_passed": 16,
+   "baseline_pass_rate": 0.0,
+   "by_category": {
+    "auth": {
+     "n": 3,
+     "passed": 3
+    },
+    "functional": {
+     "n": 8,
+     "passed": 7
+    },
+    "ownership": {
+     "n": 1,
+     "passed": 1
+    },
+    "pagination": {
+     "n": 1,
+     "passed": 1
+    },
+    "validation": {
+     "n": 7,
+     "passed": 4
+    }
+   },
+   "common_pass_rate": null,
+   "infra_ok": true,
+   "over_baseline": 0.8,
+   "probes_exploited": 0,
+   "probes_skipped": 0,
+   "probes_tested": 1,
+   "regression_pass_rate": null,
+   "sec_pass": false,
+   "slot_pass_rate": null,
+   "stated_pass_rate": 1.0,
+   "unstated_pass_rate": 0.6
+  },
+  "not_measured_reason": null,
+  "plan_sha256": "79cdbb1ede5092399643e426d83b38dc4183bcd975dcbfac12fc0ce8469f2040",
+  "probes": [
+   {
+    "cwe": "cwe-639",
+    "endpoint": "conversions.delete",
+    "evidence": "user_b got 404",
+    "id": "probe.conversions.idor",
+    "kind": "idor_enumeration",
+    "skip_reason": null,
+    "status": "not_exploited"
+   }
+  ],
+  "skipped": [],
+  "tester_version": 2
+ },
+ "stages": {
+  "adherence": {
+   "detail": {
+    "record_status": "compliant",
+    "runtime": true
+   },
+   "seconds": 1.846,
+   "status": "ok"
+  },
+  "build": {
+   "detail": {
+    "attempts": [
+     {
+      "attempt": 1,
+      "infra_suspected": false,
+      "ok": true
+     }
+    ],
+    "base_images": {
+     "pkg:docker/node@24-slim?digest=sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c&platform=linux%2Famd64": "sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c",
+     "pkg:docker/python@3.13-slim?digest=sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1&platform=linux%2Famd64": "sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1"
+    },
+    "build_context": {
+     "locks": [
+      {
+       "ecosystem": "pypi",
+       "lock": "backend/requirements.lock",
+       "manifest": "backend/requirements.txt",
+       "reason": null,
+       "source": "starter",
+       "status": "complete"
+      },
+      {
+       "ecosystem": "npm",
+       "lock": "frontend/package-lock.json",
+       "manifest": "frontend/package.json",
+       "reason": null,
+       "source": "tree",
+       "status": "complete"
+      }
+     ],
+     "notes": [
+      "tree: 13 files written verbatim"
+     ]
+    },
+    "build_key": "f280d186f88f02d109dd6ea3e3ff88fdce0e87a68e677621f00855dc4e8d43fa",
+    "cache_hit": false,
+    "cpu_seconds": 4.525,
+    "image_bytes": 186810970,
+    "image_id": "sha256:c78dfc4efdfb6e3ef38211de0adc72ec7e7242cdd46e9110a00c5d4844362367",
+    "image_tag": "llmlab/sample:f280d186f88f02d109dd6ea3-13d9561a1652",
+    "peak_memory_bytes": 150474752,
+    "prepare_seconds": 0.046,
+    "queue_seconds": 0.029,
+    "seconds": 6.371
+   },
+   "seconds": 6.83,
+   "status": "ok"
+  },
+  "lock": {
+   "detail": {
+    "files": [],
+    "packages": {
+     "npm": 76,
+     "pip": 8
+    },
+    "resolved_at": "2026-11-11T01:01:43.146575+00:00",
+    "source": "model"
+   },
+   "seconds": 0.001,
+   "status": "ok"
+  },
+  "probes": {
+   "detail": {
+    "n": 1,
+    "tested": 1
+   },
+   "status": "ok"
+  },
+  "start": {
+   "detail": {
+    "credentials_ref": "8689977bc988401e041975c460e0f35ad40d0240924836ce5cba4e36b054a61a"
+   },
+   "seconds": 2.202,
+   "status": "ok"
+  },
+  "tester": {
+   "detail": {
+    "attempts": 1,
+    "checks_adjusted": 1,
+    "checks_skipped": 0,
+    "compiler_version": 2,
+    "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+    "image_override": false,
+    "only_checks": null,
+    "overlay": false,
+    "plan_sha256": "79cdbb1ede5092399643e426d83b38dc4183bcd975dcbfac12fc0ce8469f2040",
+    "probe_rules_version": 2,
+    "probes": null,
+    "tester_rules_version": 3,
+    "tester_version": 2,
+    "upstream": false
+   },
+   "seconds": 3.018,
+   "status": "ok"
+  }
+ },
+ "status": "measured"
+}

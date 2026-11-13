@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Helvetica Neue", "Arial", sans-serif;
+  --font-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", "Georgia", serif;
+  --color-paper: #faf9f6;
+  --color-ink: #292c25;
+  --color-muted: #77786e;
+  --color-rust: #a55336;
+  --color-rust-dark: #834029;
+  --color-line: #e3e2d9;
+}
+
+@layer base {
+  body {
+    @apply m-0 bg-paper font-sans text-ink antialiased;
+  }
+  button, a, input, select, textarea {
+    @apply outline-none focus-visible:ring-2 focus-visible:ring-rust focus-visible:ring-offset-4;
+  }
+  button, a {
+    -webkit-tap-highlight-color: transparent;
+  }
+  button {
+    @apply cursor-pointer disabled:cursor-not-allowed;
+  }
+  ::selection {
+    @apply bg-rust/20;
+  }
+}

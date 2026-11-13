@@ -1,0 +1,2270 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..04af43e
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,5 @@
++node_modules/
++frontend/dist/
++__pycache__/
++*.pyc
++data/
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..c8fc5ae 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,212 @@
+ """Flask entry point."""
+ 
++import math
++import os
++import secrets
++import sqlite3
++from datetime import datetime, timezone
++from functools import wraps
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.exceptions import HTTPException
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", Path.cwd() / "data"))
++DB_PATH = DATA_DIR / "app.db"
++
++MAX_LIMIT = 10000
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE,
++    password_hash TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS tokens (
++    token TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS sensors (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    name TEXT NOT NULL,
++    unit TEXT NOT NULL DEFAULT '',
++    location TEXT NOT NULL DEFAULT '',
++    owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    last_value REAL,
++    last_updated TEXT,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS readings (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    sensor_id INTEGER NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
++    value REAL NOT NULL,
++    recorded_at TEXT NOT NULL
++);
++CREATE INDEX IF NOT EXISTS idx_readings_sensor ON readings(sensor_id, id);
++CREATE INDEX IF NOT EXISTS idx_sensors_name ON sensors(name);
++"""
+ 
+ app = Flask(__name__, static_folder=None)
++app.json.sort_keys = False
++
++
++def now_iso() -> str:
++    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
++
++
++def connect() -> sqlite3.Connection:
++    conn = sqlite3.connect(DB_PATH, timeout=30)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    conn.execute("PRAGMA busy_timeout = 30000")
++    return conn
++
++
++def init_db() -> None:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = connect()
++    try:
++        conn.execute("PRAGMA journal_mode = WAL")
++        conn.executescript(SCHEMA)
++        conn.commit()
++    finally:
++        conn.close()
++
++
++def db() -> sqlite3.Connection:
++    if "db" not in g:
++        g.db = connect()
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc):
++    conn = g.pop("db", None)
++    if conn is not None:
++        conn.close()
++
++
++init_db()
++
++
++class ApiError(Exception):
++    def __init__(self, status: int, message: str):
++        super().__init__(message)
++        self.status = status
++        self.message = message
++
++
++@app.errorhandler(ApiError)
++def handle_api_error(err: ApiError):
++    return jsonify({"error": err.message}), err.status
++
++
++@app.errorhandler(HTTPException)
++def handle_http_error(err: HTTPException):
++    if request.path.startswith("/api"):
++        return jsonify({"error": err.description or err.name}), err.code
++    return err
++
++
++@app.errorhandler(Exception)
++def handle_unexpected(err: Exception):
++    if isinstance(err, HTTPException):
++        return handle_http_error(err)
++    app.logger.exception("Unhandled error")
++    return jsonify({"error": "Internal server error"}), 500
++
++
++def json_body() -> dict:
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        raise ApiError(400, "Request body must be a JSON object")
++    return data
++
++
++def current_user():
++    if "user" in g:
++        return g.user
++    g.user = None
++    header = request.headers.get("Authorization", "")
++    scheme, _, token = header.partition(" ")
++    token = token.strip()
++    if scheme.lower() == "bearer" and token:
++        row = db().execute(
++            "SELECT u.id, u.username FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?",
++            (token,),
++        ).fetchone()
++        if row is not None:
++            g.user = row
++    return g.user
++
++
++def login_required(fn):
++    @wraps(fn)
++    def wrapper(*args, **kwargs):
++        if current_user() is None:
++            raise ApiError(401, "Authentication required")
++        return fn(*args, **kwargs)
++
++    return wrapper
++
++
++def sensor_json(row) -> dict:
++    return {
++        "id": row["id"],
++        "name": row["name"],
++        "unit": row["unit"],
++        "location": row["location"],
++        "last_value": row["last_value"],
++        "last_updated": row["last_updated"],
++        "owner": row["owner"],
++    }
++
++
++def reading_json(row) -> dict:
++    return {
++        "id": row["id"],
++        "sensor_id": row["sensor_id"],
++        "value": row["value"],
++        "recorded_at": row["recorded_at"],
++    }
++
++
++SENSOR_SELECT = (
++    "SELECT s.id, s.name, s.unit, s.location, s.last_value, s.last_updated, "
++    "s.owner_id, u.username AS owner FROM sensors s JOIN users u ON u.id = s.owner_id"
++)
++
++
++def get_sensor_or_404(sensor_id: int):
++    row = db().execute(SENSOR_SELECT + " WHERE s.id = ?", (sensor_id,)).fetchone()
++    if row is None:
++        raise ApiError(404, "Sensor not found")
++    return row
++
++
++def require_owner(sensor) -> None:
++    if sensor["owner_id"] != current_user()["id"]:
++        raise ApiError(403, "You do not own this sensor")
++
++
++def text_field(data: dict, key: str, *, required: bool, max_len: int) -> str:
++    value = data.get(key)
++    if value is None:
++        if required:
++            raise ApiError(400, f"'{key}' is required")
++        return ""
++    if not isinstance(value, str):
++        raise ApiError(400, f"'{key}' must be a string")
++    value = value.strip()
++    if required and not value:
++        raise ApiError(400, f"'{key}' must not be empty")
++    if len(value) > max_len:
++        raise ApiError(400, f"'{key}' must be at most {max_len} characters")
++    return value
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +214,170 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++def credentials() -> tuple[str, str]:
++    data = json_body()
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not username.strip():
++        raise ApiError(400, "'username' is required")
++    if not isinstance(password, str) or not password:
++        raise ApiError(400, "'password' is required")
++    return username.strip(), password
++
++
++@app.post("/api/auth/register")
++def register():
++    username, password = credentials()
++    if len(username) > 64:
++        raise ApiError(400, "'username' must be at most 64 characters")
++    if len(password) > 1024:
++        raise ApiError(400, "'password' is too long")
++    conn = db()
++    try:
++        cur = conn.execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, generate_password_hash(password), now_iso()),
++        )
++        conn.commit()
++    except sqlite3.IntegrityError:
++        raise ApiError(409, "Username already taken")
++    return jsonify({"id": cur.lastrowid, "username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    username, password = credentials()
++    conn = db()
++    row = conn.execute(
++        "SELECT id, username, password_hash FROM users WHERE username = ?", (username,)
++    ).fetchone()
++    if row is None or not check_password_hash(row["password_hash"], password):
++        raise ApiError(401, "Invalid username or password")
++    token = secrets.token_urlsafe(32)
++    conn.execute(
++        "INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)",
++        (token, row["id"], now_iso()),
++    )
++    conn.commit()
++    return jsonify({"token": token, "username": row["username"]}), 200
++
++
++@app.post("/api/auth/logout")
++@login_required
++def logout():
++    _, _, token = request.headers.get("Authorization", "").partition(" ")
++    conn = db()
++    conn.execute("DELETE FROM tokens WHERE token = ?", (token.strip(),))
++    conn.commit()
++    return "", 204
++
++
++@app.get("/api/auth/me")
++@login_required
++def me():
++    user = current_user()
++    return {"id": user["id"], "username": user["username"]}
++
++
++@app.get("/api/sensors")
++def list_sensors():
++    rows = db().execute(SENSOR_SELECT + " ORDER BY s.name, s.id").fetchall()
++    return {"items": [sensor_json(r) for r in rows]}
++
++
++@app.post("/api/sensors")
++@login_required
++def create_sensor():
++    data = json_body()
++    name = text_field(data, "name", required=True, max_len=100)
++    unit = text_field(data, "unit", required=False, max_len=32)
++    location = text_field(data, "location", required=False, max_len=100)
++    conn = db()
++    cur = conn.execute(
++        "INSERT INTO sensors (name, unit, location, owner_id, created_at) VALUES (?, ?, ?, ?, ?)",
++        (name, unit, location, current_user()["id"], now_iso()),
++    )
++    conn.commit()
++    return jsonify(sensor_json(get_sensor_or_404(cur.lastrowid))), 201
++
++
++@app.get("/api/sensors/<int:sensor_id>")
++def get_sensor(sensor_id: int):
++    return sensor_json(get_sensor_or_404(sensor_id))
++
++
++@app.delete("/api/sensors/<int:sensor_id>")
++@login_required
++def delete_sensor(sensor_id: int):
++    sensor = get_sensor_or_404(sensor_id)
++    require_owner(sensor)
++    conn = db()
++    conn.execute("DELETE FROM readings WHERE sensor_id = ?", (sensor_id,))
++    conn.execute("DELETE FROM sensors WHERE id = ?", (sensor_id,))
++    conn.commit()
++    return "", 204
++
++
++@app.get("/api/sensors/<int:sensor_id>/readings")
++def list_readings(sensor_id: int):
++    get_sensor_or_404(sensor_id)
++    raw = request.args.get("limit")
++    limit = -1
++    if raw is not None and raw != "":
++        try:
++            limit = int(raw)
++        except ValueError:
++            raise ApiError(400, "'limit' must be an integer")
++        if limit < 0:
++            raise ApiError(400, "'limit' must not be negative")
++        limit = min(limit, MAX_LIMIT)
++    conn = db()
++    rows = conn.execute(
++        "SELECT id, sensor_id, value, recorded_at FROM readings WHERE sensor_id = ? "
++        "ORDER BY id DESC LIMIT ?",
++        (sensor_id, limit),
++    ).fetchall()
++    total = conn.execute(
++        "SELECT COUNT(*) FROM readings WHERE sensor_id = ?", (sensor_id,)
++    ).fetchone()[0]
++    return {"items": [reading_json(r) for r in rows], "total": total}
++
++
++@app.post("/api/sensors/<int:sensor_id>/readings")
++@login_required
++def create_reading(sensor_id: int):
++    sensor = get_sensor_or_404(sensor_id)
++    require_owner(sensor)
++    data = json_body()
++    value = data.get("value")
++    if isinstance(value, bool) or not isinstance(value, (int, float)):
++        raise ApiError(400, "'value' must be a number")
++    value = float(value)
++    if not math.isfinite(value):
++        raise ApiError(400, "'value' must be a finite number")
++    recorded_at = now_iso()
++    conn = db()
++    cur = conn.execute(
++        "INSERT INTO readings (sensor_id, value, recorded_at) VALUES (?, ?, ?)",
++        (sensor_id, value, recorded_at),
++    )
++    conn.execute(
++        "UPDATE sensors SET last_value = ?, last_updated = ? WHERE id = ?",
++        (value, recorded_at, sensor_id),
++    )
++    conn.commit()
++    return jsonify(
++        {"id": cur.lastrowid, "sensor_id": sensor_id, "value": value, "recorded_at": recorded_at}
++    ), 201
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
++    if path == "api" or path.startswith("api/"):
++        raise ApiError(404, "Not found")
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
++    if not (DIST / "index.html").is_file():
++        return "Frontend not built", 404
+     return send_from_directory(DIST, "index.html")
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..fc6a910 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Sensor Dashboard</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..08de16a 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,10 +10,65 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "4.3.5",
++        "@types/react": "19.3.0",
++        "@types/react-dom": "19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "4.3.5",
++        "typescript": "5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +359,376 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,6 +759,13 @@
+         }
+       }
+     },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +776,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +823,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1113,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -789,6 +1262,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1300,20 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..6b33596 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,20 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "vite build",
++    "typecheck": "tsc"
+   },
+   "dependencies": {
+     "react": "19.3.1",
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "4.3.5",
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "4.3.5",
++    "typescript": "5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..04d780c 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,72 @@
++import AuthPage from "./AuthPage";
++import { AuthProvider, useAuth } from "./auth";
++import Dashboard from "./Dashboard";
++import { Link, navigate, usePath } from "./router";
++import SensorPage from "./SensorPage";
++import { Button } from "./ui";
++
++function Header() {
++  const { username, logout } = useAuth();
++  return (
++    <header className="border-b border-slate-200 bg-white">
++      <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
++        <Link to="/" className="flex items-center gap-2 text-lg font-bold text-slate-900">
++          <span className="inline-block h-3 w-3 rounded-full bg-emerald-500" />
++          Sensor Dashboard
++        </Link>
++        <nav className="flex items-center gap-3 text-sm">
++          {username ? (
++            <>
++              <span className="text-slate-600">
++                Signed in as <span className="font-semibold text-slate-900">{username}</span>
++              </span>
++              <Button
++                variant="secondary"
++                onClick={async () => {
++                  await logout();
++                  navigate("/");
++                }}
++              >
++                Sign out
++              </Button>
++            </>
++          ) : (
++            <>
++              <Link to="/login" className="font-medium text-slate-700 hover:text-indigo-600">
++                Sign in
++              </Link>
++              <Link
++                to="/register"
++                className="rounded-md bg-indigo-600 px-3 py-2 font-semibold text-white shadow-sm hover:bg-indigo-500"
++              >
++                Register
++              </Link>
++            </>
++          )}
++        </nav>
++      </div>
++    </header>
++  );
++}
++
++function Routes() {
++  const path = usePath();
++  const sensorMatch = path.match(/^\/sensors\/(\d+)\/?$/);
++  if (path === "/login") return <AuthPage mode="login" />;
++  if (path === "/register") return <AuthPage mode="register" />;
++  if (sensorMatch) return <SensorPage key={sensorMatch[1]} id={Number(sensorMatch[1])} />;
++  return <Dashboard />;
++}
++
+ export default function App() {
+-  return <h1>App</h1>;
++  return (
++    <AuthProvider>
++      <div className="min-h-screen bg-slate-50 text-slate-900">
++        <Header />
++        <main className="mx-auto max-w-6xl px-4 py-8">
++          <Routes />
++        </main>
++      </div>
++    </AuthProvider>
++  );
+ }
+diff --git a/frontend/src/AuthPage.tsx b/frontend/src/AuthPage.tsx
+new file mode 100644
+index 0000000..5aeecd2
+--- /dev/null
++++ b/frontend/src/AuthPage.tsx
+@@ -0,0 +1,97 @@
++import { useState, type FormEvent } from "react";
++import { useAuth } from "./auth";
++import { navigate, Link } from "./router";
++import { Button, Card, ErrorMessage, Field, errorText } from "./ui";
++
++export default function AuthPage({ mode }: { mode: "login" | "register" }) {
++  const { login, register } = useAuth();
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [confirm, setConfirm] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++  const isRegister = mode === "register";
++
++  const submit = async (e: FormEvent) => {
++    e.preventDefault();
++    setError(null);
++    if (!username.trim() || !password) {
++      setError("Username and password are required");
++      return;
++    }
++    if (isRegister && password !== confirm) {
++      setError("Passwords do not match");
++      return;
++    }
++    setBusy(true);
++    try {
++      if (isRegister) await register(username.trim(), password);
++      else await login(username.trim(), password);
++      navigate("/");
++    } catch (err) {
++      setError(errorText(err));
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  return (
++    <div className="mx-auto max-w-sm">
++      <Card>
++        <h1 className="mb-4 text-xl font-semibold text-slate-900">{isRegister ? "Create an account" : "Sign in"}</h1>
++        <form onSubmit={submit} className="space-y-4">
++          <Field
++            label="Username"
++            name="username"
++            autoComplete="username"
++            value={username}
++            onChange={(e) => setUsername(e.target.value)}
++            required
++            autoFocus
++          />
++          <Field
++            label="Password"
++            name="password"
++            type="password"
++            autoComplete={isRegister ? "new-password" : "current-password"}
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            required
++          />
++          {isRegister && (
++            <Field
++              label="Confirm password"
++              name="confirm"
++              type="password"
++              autoComplete="new-password"
++              value={confirm}
++              onChange={(e) => setConfirm(e.target.value)}
++              required
++            />
++          )}
++          <ErrorMessage message={error} />
++          <Button type="submit" disabled={busy} className="w-full">
++            {busy ? "Please wait…" : isRegister ? "Register" : "Sign in"}
++          </Button>
++        </form>
++        <p className="mt-4 text-center text-sm text-slate-600">
++          {isRegister ? (
++            <>
++              Already have an account?{" "}
++              <Link to="/login" className="font-medium text-indigo-600 hover:text-indigo-500">
++                Sign in
++              </Link>
++            </>
++          ) : (
++            <>
++              No account yet?{" "}
++              <Link to="/register" className="font-medium text-indigo-600 hover:text-indigo-500">
++                Register
++              </Link>
++            </>
++          )}
++        </p>
++      </Card>
++    </div>
++  );
++}
+diff --git a/frontend/src/Dashboard.tsx b/frontend/src/Dashboard.tsx
+new file mode 100644
+index 0000000..81794e5
+--- /dev/null
++++ b/frontend/src/Dashboard.tsx
+@@ -0,0 +1,119 @@
++import { useCallback, useState } from "react";
++import { api, type Sensor } from "./api";
++import { useAuth } from "./auth";
++import { DeleteSensorButton } from "./DeleteSensorButton";
++import { NewSensorForm, ReadingForm } from "./forms";
++import { formatValue, timeAgo, useNow, usePolling } from "./hooks";
++import { Link, navigate } from "./router";
++import { Card, ErrorMessage, errorText } from "./ui";
++
++export const REFRESH_MS = 10_000;
++
++function SensorCard({ sensor, now, canDelete, onDeleted }: { sensor: Sensor; now: number; canDelete: boolean; onDeleted: () => void }) {
++  return (
++    <Card className="flex flex-col transition hover:shadow-md hover:ring-indigo-200">
++      <div className="flex items-start justify-between gap-2">
++        <div className="min-w-0">
++          <Link to={`/sensors/${sensor.id}`} className="block truncate text-base font-semibold text-slate-900 hover:text-indigo-600">
++            {sensor.name}
++          </Link>
++          <p className="truncate text-sm text-slate-500">{sensor.location || "No location"}</p>
++        </div>
++        <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{sensor.owner}</span>
++      </div>
++      <div className="mt-4 flex items-baseline gap-1">
++        <span className={`text-4xl font-bold tabular-nums ${sensor.last_value === null ? "text-slate-300" : "text-slate-900"}`}>
++          {formatValue(sensor.last_value)}
++        </span>
++        {sensor.unit && <span className="text-lg text-slate-500">{sensor.unit}</span>}
++      </div>
++      <p className="mt-1 text-xs text-slate-500" title={sensor.last_updated ?? undefined}>
++        {sensor.last_updated ? `Updated ${timeAgo(sensor.last_updated, now)}` : "No readings yet"}
++      </p>
++      <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
++        <Link to={`/sensors/${sensor.id}`} className="text-sm font-medium text-indigo-600 hover:text-indigo-500">
++          View history →
++        </Link>
++        {canDelete && <DeleteSensorButton sensor={sensor} onDeleted={onDeleted} compact />}
++      </div>
++    </Card>
++  );
++}
++
++export default function Dashboard() {
++  const { username } = useAuth();
++  const now = useNow(1000);
++  const [sensors, setSensors] = useState<Sensor[] | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [lastRefresh, setLastRefresh] = useState<number | null>(null);
++
++  const load = useCallback(() => {
++    api
++      .listSensors()
++      .then((res) => {
++        setSensors(res.items);
++        setError(null);
++        setLastRefresh(Date.now());
++      })
++      .catch((err) => setError(errorText(err)));
++  }, []);
++
++  usePolling(load, REFRESH_MS);
++
++  const mine = (sensors ?? []).filter((s) => s.owner === username);
++
++  return (
++    <div className="space-y-6">
++      <div className="flex flex-wrap items-end justify-between gap-2">
++        <div>
++          <h1 className="text-2xl font-bold text-slate-900">Sensors</h1>
++          <p className="text-sm text-slate-500">
++            Live values, refreshed every 10 seconds
++            {lastRefresh && ` · last refresh ${timeAgo(new Date(lastRefresh).toISOString(), now)}`}
++          </p>
++        </div>
++      </div>
++
++      <ErrorMessage message={error} />
++
++      {username && (
++        <div className="grid gap-4 md:grid-cols-2">
++          <Card>
++            <NewSensorForm
++              onCreated={(s) => {
++                load();
++                navigate(`/sensors/${s.id}`);
++              }}
++            />
++          </Card>
++          <Card>
++            <ReadingForm sensors={mine} onPosted={load} />
++          </Card>
++        </div>
++      )}
++
++      {sensors === null ? (
++        <p className="text-sm text-slate-500">Loading sensors…</p>
++      ) : sensors.length === 0 ? (
++        <Card className="text-center text-sm text-slate-500">
++          No sensors registered yet.
++          {!username && (
++            <>
++              {" "}
++              <Link to="/register" className="font-medium text-indigo-600">
++                Create an account
++              </Link>{" "}
++              to add one.
++            </>
++          )}
++        </Card>
++      ) : (
++        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
++          {sensors.map((s) => (
++            <SensorCard key={s.id} sensor={s} now={now} canDelete={s.owner === username} onDeleted={load} />
++          ))}
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/src/DeleteSensorButton.tsx b/frontend/src/DeleteSensorButton.tsx
+new file mode 100644
+index 0000000..30bbc54
+--- /dev/null
++++ b/frontend/src/DeleteSensorButton.tsx
+@@ -0,0 +1,77 @@
++import { useEffect, useRef, useState } from "react";
++import { api, type Sensor } from "./api";
++import { Button, ErrorMessage, errorText } from "./ui";
++
++export function DeleteSensorButton({
++  sensor,
++  onDeleted,
++  compact = false,
++}: {
++  sensor: Sensor;
++  onDeleted: () => void;
++  compact?: boolean;
++}) {
++  const [open, setOpen] = useState(false);
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const dialogRef = useRef<HTMLDialogElement>(null);
++
++  useEffect(() => {
++    const d = dialogRef.current;
++    if (!d) return;
++    if (open && !d.open) d.showModal();
++    if (!open && d.open) d.close();
++  }, [open]);
++
++  const confirm = async () => {
++    setBusy(true);
++    setError(null);
++    try {
++      await api.deleteSensor(sensor.id);
++      setOpen(false);
++      onDeleted();
++    } catch (err) {
++      setError(errorText(err));
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  return (
++    <>
++      {compact ? (
++        <button type="button" onClick={() => setOpen(true)} className="text-sm font-medium text-red-600 hover:text-red-500">
++          Delete
++        </button>
++      ) : (
++        <Button type="button" variant="danger" onClick={() => setOpen(true)}>
++          Delete sensor
++        </Button>
++      )}
++      <dialog
++        ref={dialogRef}
++        onClose={() => setOpen(false)}
++        className="m-auto w-full max-w-md rounded-xl p-0 shadow-xl backdrop:bg-slate-900/50"
++      >
++        <div className="p-6">
++          <h2 className="text-lg font-semibold text-slate-900">Delete sensor?</h2>
++          <p className="mt-2 text-sm text-slate-600">
++            This permanently deletes <span className="font-semibold">{sensor.name}</span> and all of its readings. This
++            cannot be undone.
++          </p>
++          <div className="mt-3">
++            <ErrorMessage message={error} />
++          </div>
++          <div className="mt-6 flex justify-end gap-2">
++            <Button type="button" variant="secondary" onClick={() => setOpen(false)} disabled={busy}>
++              Cancel
++            </Button>
++            <Button type="button" variant="danger" onClick={confirm} disabled={busy}>
++              {busy ? "Deleting…" : "Delete"}
++            </Button>
++          </div>
++        </div>
++      </dialog>
++    </>
++  );
++}
+diff --git a/frontend/src/LineChart.tsx b/frontend/src/LineChart.tsx
+new file mode 100644
+index 0000000..d40e2fb
+--- /dev/null
++++ b/frontend/src/LineChart.tsx
+@@ -0,0 +1,165 @@
++import { useMemo, useRef, useState, type MouseEvent } from "react";
++import type { Reading } from "./api";
++import { formatDateTime, formatValue } from "./hooks";
++
++const W = 720;
++const H = 280;
++const PAD = { top: 16, right: 20, bottom: 36, left: 56 };
++
++function niceTicks(min: number, max: number, count = 5): number[] {
++  if (min === max) {
++    const d = Math.abs(min) * 0.1 || 1;
++    min -= d;
++    max += d;
++  }
++  const raw = (max - min) / count;
++  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
++  const norm = raw / mag;
++  const step = (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
++  const start = Math.floor(min / step) * step;
++  const end = Math.ceil(max / step) * step;
++  const ticks: number[] = [];
++  for (let v = start; v <= end + step / 2; v += step) ticks.push(Number(v.toPrecision(12)));
++  return ticks;
++}
++
++function formatTime(t: number, spanMs: number): string {
++  const d = new Date(t);
++  if (spanMs > 2 * 24 * 3600 * 1000) return d.toLocaleDateString([], { month: "short", day: "numeric" });
++  if (spanMs > 3600 * 1000) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
++  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
++}
++
++export default function LineChart({ readings, unit }: { readings: Reading[]; unit: string }) {
++  const svgRef = useRef<SVGSVGElement>(null);
++  const [hover, setHover] = useState<number | null>(null);
++
++  const points = useMemo(
++    () =>
++      readings
++        .map((r) => ({ t: Date.parse(r.recorded_at), v: r.value, r }))
++        .filter((p) => !Number.isNaN(p.t))
++        .sort((a, b) => a.t - b.t || a.r.id - b.r.id),
++    [readings],
++  );
++
++  if (points.length === 0) {
++    return (
++      <div className="flex h-48 items-center justify-center rounded-lg border border-dashed border-slate-300 text-sm text-slate-500">
++        No readings yet
++      </div>
++    );
++  }
++
++  const values = points.map((p) => p.v);
++  const yTicks = niceTicks(Math.min(...values), Math.max(...values));
++  const yMin = yTicks[0];
++  const yMax = yTicks[yTicks.length - 1];
++  let tMin = points[0].t;
++  let tMax = points[points.length - 1].t;
++  if (tMin === tMax) {
++    tMin -= 30000;
++    tMax += 30000;
++  }
++  const iw = W - PAD.left - PAD.right;
++  const ih = H - PAD.top - PAD.bottom;
++  const x = (t: number) => PAD.left + ((t - tMin) / (tMax - tMin)) * iw;
++  const y = (v: number) => PAD.top + ih - ((v - yMin) / (yMax - yMin || 1)) * ih;
++
++  const path = points.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
++  const area = `${path} L${x(points[points.length - 1].t).toFixed(1)},${PAD.top + ih} L${x(points[0].t).toFixed(1)},${PAD.top + ih} Z`;
++  const xTickCount = Math.min(6, points.length > 1 ? 6 : 1);
++  const xTicks = Array.from({ length: xTickCount }, (_, i) =>
++    xTickCount === 1 ? (tMin + tMax) / 2 : tMin + ((tMax - tMin) * i) / (xTickCount - 1),
++  );
++
++  const onMove = (e: MouseEvent<SVGSVGElement>) => {
++    const svg = svgRef.current;
++    if (!svg) return;
++    const rect = svg.getBoundingClientRect();
++    const px = ((e.clientX - rect.left) / rect.width) * W;
++    let best = 0;
++    let bestD = Infinity;
++    points.forEach((p, i) => {
++      const d = Math.abs(x(p.t) - px);
++      if (d < bestD) {
++        bestD = d;
++        best = i;
++      }
++    });
++    setHover(best);
++  };
++
++  const hp = hover !== null ? points[hover] : null;
++
++  return (
++    <div className="relative">
++      <svg
++        ref={svgRef}
++        viewBox={`0 0 ${W} ${H}`}
++        className="h-auto w-full select-none"
++        onMouseMove={onMove}
++        onMouseLeave={() => setHover(null)}
++        role="img"
++        aria-label="Line chart of recent readings"
++      >
++        <defs>
++          <linearGradient id="area-fill" x1="0" x2="0" y1="0" y2="1">
++            <stop offset="0%" stopColor="rgb(79 70 229)" stopOpacity="0.25" />
++            <stop offset="100%" stopColor="rgb(79 70 229)" stopOpacity="0" />
++          </linearGradient>
++        </defs>
++        {yTicks.map((v) => (
++          <g key={v}>
++            <line x1={PAD.left} x2={W - PAD.right} y1={y(v)} y2={y(v)} className="stroke-slate-200" />
++            <text x={PAD.left - 8} y={y(v)} textAnchor="end" dominantBaseline="middle" className="fill-slate-500 text-[11px]">
++              {formatValue(v)}
++            </text>
++          </g>
++        ))}
++        {xTicks.map((t, i) => (
++          <text
++            key={i}
++            x={x(t)}
++            y={H - PAD.bottom + 18}
++            textAnchor={xTickCount === 1 ? "middle" : i === 0 ? "start" : i === xTickCount - 1 ? "end" : "middle"}
++            className="fill-slate-500 text-[11px]"
++          >
++            {formatTime(t, tMax - tMin)}
++          </text>
++        ))}
++        {unit && (
++          <text x={PAD.left} y={PAD.top - 4} className="fill-slate-400 text-[10px]">
++            {unit}
++          </text>
++        )}
++        <path d={area} fill="url(#area-fill)" />
++        <path d={path} fill="none" className="stroke-indigo-600" strokeWidth={2} strokeLinejoin="round" />
++        {points.length <= 60 &&
++          points.map((p) => (
++            <circle key={p.r.id} cx={x(p.t)} cy={y(p.v)} r={3} className="fill-white stroke-indigo-600" strokeWidth={1.5} />
++          ))}
++        {hp && (
++          <g>
++            <line x1={x(hp.t)} x2={x(hp.t)} y1={PAD.top} y2={PAD.top + ih} className="stroke-slate-400" strokeDasharray="4 3" />
++            <circle cx={x(hp.t)} cy={y(hp.v)} r={5} className="fill-indigo-600 stroke-white" strokeWidth={2} />
++          </g>
++        )}
++      </svg>
++      {hp && (
++        <div
++          className="pointer-events-none absolute top-2 rounded-md bg-slate-900 px-2 py-1 text-xs text-white shadow"
++          style={{
++            left: `${(x(hp.t) / W) * 100}%`,
++            transform: x(hp.t) > W / 2 ? "translateX(calc(-100% - 8px))" : "translateX(8px)",
++          }}
++        >
++          <div className="font-semibold">
++            {formatValue(hp.v)} {unit}
++          </div>
++          <div className="text-slate-300">{formatDateTime(hp.r.recorded_at)}</div>
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/src/SensorPage.tsx b/frontend/src/SensorPage.tsx
+new file mode 100644
+index 0000000..cd8ba25
+--- /dev/null
++++ b/frontend/src/SensorPage.tsx
+@@ -0,0 +1,158 @@
++import { useCallback, useState } from "react";
++import { api, ApiError, type Reading, type Sensor } from "./api";
++import { useAuth } from "./auth";
++import { REFRESH_MS } from "./Dashboard";
++import { DeleteSensorButton } from "./DeleteSensorButton";
++import { ReadingForm } from "./forms";
++import { formatDateTime, formatValue, timeAgo, useNow, usePolling } from "./hooks";
++import LineChart from "./LineChart";
++import { Link, navigate } from "./router";
++import { Card, ErrorMessage, errorText } from "./ui";
++
++const LIMIT_OPTIONS = [20, 50, 100, 500];
++
++export default function SensorPage({ id }: { id: number }) {
++  const { username } = useAuth();
++  const now = useNow(1000);
++  const [sensor, setSensor] = useState<Sensor | null>(null);
++  const [readings, setReadings] = useState<Reading[]>([]);
++  const [total, setTotal] = useState(0);
++  const [limit, setLimit] = useState(50);
++  const [error, setError] = useState<string | null>(null);
++  const [notFound, setNotFound] = useState(false);
++
++  const load = useCallback(() => {
++    Promise.all([api.getSensor(id), api.listReadings(id, limit)])
++      .then(([s, r]) => {
++        setSensor(s);
++        setReadings(r.items);
++        setTotal(r.total);
++        setError(null);
++      })
++      .catch((err) => {
++        if (err instanceof ApiError && err.status === 404) setNotFound(true);
++        else setError(errorText(err));
++      });
++  }, [id, limit]);
++
++  usePolling(load, REFRESH_MS);
++
++  if (notFound) {
++    return (
++      <Card className="text-center">
++        <p className="text-slate-700">Sensor not found.</p>
++        <Link to="/" className="mt-2 inline-block text-sm font-medium text-indigo-600">
++          ← Back to dashboard
++        </Link>
++      </Card>
++    );
++  }
++
++  if (!sensor) {
++    return (
++      <div className="space-y-4">
++        <ErrorMessage message={error} />
++        <p className="text-sm text-slate-500">Loading…</p>
++      </div>
++    );
++  }
++
++  const isOwner = sensor.owner === username;
++
++  return (
++    <div className="space-y-6">
++      <Link to="/" className="text-sm font-medium text-indigo-600 hover:text-indigo-500">
++        ← All sensors
++      </Link>
++      <div className="flex flex-wrap items-start justify-between gap-4">
++        <div>
++          <h1 className="text-2xl font-bold text-slate-900">{sensor.name}</h1>
++          <p className="text-sm text-slate-500">
++            {sensor.location || "No location"} · owned by {sensor.owner}
++          </p>
++        </div>
++        <div className="text-right">
++          <div className="flex items-baseline justify-end gap-1">
++            <span className="text-4xl font-bold tabular-nums text-slate-900">{formatValue(sensor.last_value)}</span>
++            {sensor.unit && <span className="text-lg text-slate-500">{sensor.unit}</span>}
++          </div>
++          <p className="text-xs text-slate-500">
++            {sensor.last_updated ? `Updated ${timeAgo(sensor.last_updated, now)}` : "No readings yet"}
++          </p>
++        </div>
++      </div>
++
++      <ErrorMessage message={error} />
++
++      <Card>
++        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
++          <h2 className="text-base font-semibold text-slate-900">Recent readings</h2>
++          <label className="flex items-center gap-2 text-sm text-slate-600">
++            Show last
++            <select
++              value={limit}
++              onChange={(e) => setLimit(Number(e.target.value))}
++              className="rounded-md border-0 py-1 pl-2 pr-7 text-sm ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-indigo-600"
++            >
++              {LIMIT_OPTIONS.map((n) => (
++                <option key={n} value={n}>
++                  {n}
++                </option>
++              ))}
++            </select>
++          </label>
++        </div>
++        <LineChart readings={readings} unit={sensor.unit} />
++      </Card>
++
++      {isOwner && (
++        <div className="grid gap-4 md:grid-cols-2">
++          <Card>
++            <ReadingForm sensors={[sensor]} fixedSensorId={sensor.id} onPosted={load} />
++          </Card>
++          <Card>
++            <h2 className="text-base font-semibold text-slate-900">Danger zone</h2>
++            <p className="mb-3 mt-1 text-sm text-slate-500">Deleting a sensor also removes all of its readings.</p>
++            <DeleteSensorButton sensor={sensor} onDeleted={() => navigate("/")} />
++          </Card>
++        </div>
++      )}
++
++      <Card className="overflow-hidden p-0">
++        <div className="flex items-center justify-between px-5 py-3">
++          <h2 className="text-base font-semibold text-slate-900">Readings</h2>
++          <span className="text-sm text-slate-500">
++            showing {readings.length} of {total}
++          </span>
++        </div>
++        {readings.length === 0 ? (
++          <p className="border-t border-slate-100 px-5 py-6 text-center text-sm text-slate-500">No readings yet.</p>
++        ) : (
++          <div className="max-h-[28rem] overflow-y-auto border-t border-slate-100">
++            <table className="min-w-full divide-y divide-slate-100 text-sm">
++              <thead className="sticky top-0 bg-slate-50">
++                <tr>
++                  <th className="px-5 py-2 text-left font-medium text-slate-600">Recorded at</th>
++                  <th className="px-5 py-2 text-right font-medium text-slate-600">Value</th>
++                </tr>
++              </thead>
++              <tbody className="divide-y divide-slate-100">
++                {readings.map((r) => (
++                  <tr key={r.id} className="hover:bg-slate-50">
++                    <td className="px-5 py-2 text-slate-700">
++                      {formatDateTime(r.recorded_at)}
++                      <span className="ml-2 text-xs text-slate-400">{timeAgo(r.recorded_at, now)}</span>
++                    </td>
++                    <td className="px-5 py-2 text-right tabular-nums text-slate-900">
++                      {formatValue(r.value)} {sensor.unit}
++                    </td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++        )}
++      </Card>
++    </div>
++  );
++}
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..fd2f9c5
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,80 @@
++export interface Sensor {
++  id: number;
++  name: string;
++  unit: string;
++  location: string;
++  last_value: number | null;
++  last_updated: string | null;
++  owner: string;
++}
++
++export interface Reading {
++  id: number;
++  sensor_id: number;
++  value: number;
++  recorded_at: string;
++}
++
++export class ApiError extends Error {
++  status: number;
++  constructor(status: number, message: string) {
++    super(message);
++    this.status = status;
++  }
++}
++
++const TOKEN_KEY = "sensor-dashboard-token";
++
++export function getToken(): string | null {
++  return localStorage.getItem(TOKEN_KEY);
++}
++
++export function setToken(token: string | null) {
++  if (token) localStorage.setItem(TOKEN_KEY, token);
++  else localStorage.removeItem(TOKEN_KEY);
++}
++
++async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
++  const headers: Record<string, string> = {};
++  const token = getToken();
++  if (token) headers.Authorization = `Bearer ${token}`;
++  if (body !== undefined) headers["Content-Type"] = "application/json";
++  const res = await fetch(`/api${path}`, {
++    method,
++    headers,
++    body: body !== undefined ? JSON.stringify(body) : undefined,
++  });
++  if (res.status === 204) return undefined as T;
++  let data: unknown = null;
++  try {
++    data = await res.json();
++  } catch {
++    data = null;
++  }
++  if (!res.ok) {
++    const message =
++      data && typeof data === "object" && "error" in data
++        ? String((data as { error: unknown }).error)
++        : `Request failed (${res.status})`;
++    throw new ApiError(res.status, message);
++  }
++  return data as T;
++}
++
++export const api = {
++  register: (username: string, password: string) =>
++    request<{ id: number; username: string }>("POST", "/auth/register", { username, password }),
++  login: (username: string, password: string) =>
++    request<{ token: string; username: string }>("POST", "/auth/login", { username, password }),
++  logout: () => request<void>("POST", "/auth/logout"),
++  me: () => request<{ id: number; username: string }>("GET", "/auth/me"),
++  listSensors: () => request<{ items: Sensor[] }>("GET", "/sensors"),
++  getSensor: (id: number) => request<Sensor>("GET", `/sensors/${id}`),
++  createSensor: (data: { name: string; unit: string; location: string }) =>
++    request<Sensor>("POST", "/sensors", data),
++  deleteSensor: (id: number) => request<void>("DELETE", `/sensors/${id}`),
++  listReadings: (id: number, limit = 50) =>
++    request<{ items: Reading[]; total: number }>("GET", `/sensors/${id}/readings?limit=${limit}`),
++  postReading: (id: number, value: number) =>
++    request<Reading>("POST", `/sensors/${id}/readings`, { value }),
++};
+diff --git a/frontend/src/auth.tsx b/frontend/src/auth.tsx
+new file mode 100644
+index 0000000..110e000
+--- /dev/null
++++ b/frontend/src/auth.tsx
+@@ -0,0 +1,81 @@
++import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
++import { api, ApiError, getToken, setToken } from "./api";
++
++interface AuthState {
++  username: string | null;
++  ready: boolean;
++  login: (username: string, password: string) => Promise<void>;
++  register: (username: string, password: string) => Promise<void>;
++  logout: () => Promise<void>;
++}
++
++const AuthContext = createContext<AuthState | null>(null);
++
++const USER_KEY = "sensor-dashboard-user";
++
++export function AuthProvider({ children }: { children: ReactNode }) {
++  const [username, setUsername] = useState<string | null>(() =>
++    getToken() ? localStorage.getItem(USER_KEY) : null,
++  );
++  const [ready, setReady] = useState(false);
++
++  useEffect(() => {
++    if (!getToken()) {
++      setReady(true);
++      return;
++    }
++    api
++      .me()
++      .then((u) => {
++        setUsername(u.username);
++        localStorage.setItem(USER_KEY, u.username);
++      })
++      .catch((err) => {
++        if (err instanceof ApiError && err.status === 401) {
++          setToken(null);
++          localStorage.removeItem(USER_KEY);
++          setUsername(null);
++        }
++      })
++      .finally(() => setReady(true));
++  }, []);
++
++  const login = useCallback(async (u: string, p: string) => {
++    const res = await api.login(u, p);
++    setToken(res.token);
++    const name = res.username ?? u.trim();
++    localStorage.setItem(USER_KEY, name);
++    setUsername(name);
++  }, []);
++
++  const register = useCallback(
++    async (u: string, p: string) => {
++      await api.register(u, p);
++      await login(u, p);
++    },
++    [login],
++  );
++
++  const logout = useCallback(async () => {
++    try {
++      await api.logout();
++    } catch {
++      /* token may already be invalid */
++    }
++    setToken(null);
++    localStorage.removeItem(USER_KEY);
++    setUsername(null);
++  }, []);
++
++  return (
++    <AuthContext.Provider value={{ username, ready, login, register, logout }}>
++      {children}
++    </AuthContext.Provider>
++  );
++}
++
++export function useAuth(): AuthState {
++  const ctx = useContext(AuthContext);
++  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
++  return ctx;
++}
+diff --git a/frontend/src/forms.tsx b/frontend/src/forms.tsx
+new file mode 100644
+index 0000000..58900bb
+--- /dev/null
++++ b/frontend/src/forms.tsx
+@@ -0,0 +1,140 @@
++import { useState, type FormEvent } from "react";
++import { api, type Sensor } from "./api";
++import { Button, ErrorMessage, Field, errorText } from "./ui";
++
++export function NewSensorForm({ onCreated }: { onCreated: (s: Sensor) => void }) {
++  const [name, setName] = useState("");
++  const [unit, setUnit] = useState("");
++  const [location, setLocation] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  const submit = async (e: FormEvent) => {
++    e.preventDefault();
++    if (!name.trim()) {
++      setError("Name is required");
++      return;
++    }
++    setBusy(true);
++    setError(null);
++    try {
++      const s = await api.createSensor({ name: name.trim(), unit: unit.trim(), location: location.trim() });
++      setName("");
++      setUnit("");
++      setLocation("");
++      onCreated(s);
++    } catch (err) {
++      setError(errorText(err));
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  return (
++    <form onSubmit={submit} className="space-y-3">
++      <h2 className="text-base font-semibold text-slate-900">Register a sensor</h2>
++      <Field label="Name" name="name" value={name} onChange={(e) => setName(e.target.value)} required placeholder="Living room temperature" />
++      <div className="grid grid-cols-2 gap-3">
++        <Field label="Unit" name="unit" value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="°C" />
++        <Field label="Location" name="location" value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Living room" />
++      </div>
++      <ErrorMessage message={error} />
++      <Button type="submit" disabled={busy}>
++        {busy ? "Saving…" : "Add sensor"}
++      </Button>
++    </form>
++  );
++}
++
++export function ReadingForm({
++  sensors,
++  fixedSensorId,
++  onPosted,
++}: {
++  sensors: Sensor[];
++  fixedSensorId?: number;
++  onPosted: () => void;
++}) {
++  const [sensorId, setSensorId] = useState<string>("");
++  const [value, setValue] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [success, setSuccess] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  const selected = fixedSensorId ?? (sensorId ? Number(sensorId) : sensors[0]?.id);
++  const selectedSensor = sensors.find((s) => s.id === selected);
++
++  const submit = async (e: FormEvent) => {
++    e.preventDefault();
++    setError(null);
++    setSuccess(null);
++    const num = Number(value);
++    if (value.trim() === "" || !Number.isFinite(num)) {
++      setError("Enter a numeric value");
++      return;
++    }
++    if (!selected) {
++      setError("Choose a sensor");
++      return;
++    }
++    setBusy(true);
++    try {
++      await api.postReading(selected, num);
++      setValue("");
++      setSuccess(`Recorded ${num}${selectedSensor?.unit ? ` ${selectedSensor.unit}` : ""}`);
++      onPosted();
++    } catch (err) {
++      setError(errorText(err));
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  if (sensors.length === 0 && fixedSensorId === undefined) {
++    return (
++      <div>
++        <h2 className="text-base font-semibold text-slate-900">Post a reading</h2>
++        <p className="mt-2 text-sm text-slate-500">Register a sensor first to post readings.</p>
++      </div>
++    );
++  }
++
++  return (
++    <form onSubmit={submit} className="space-y-3">
++      <h2 className="text-base font-semibold text-slate-900">Post a reading</h2>
++      {fixedSensorId === undefined && (
++        <label className="block">
++          <span className="block text-sm font-medium text-slate-700">Sensor</span>
++          <select
++            name="sensor"
++            value={selected ?? ""}
++            onChange={(e) => setSensorId(e.target.value)}
++            className="mt-1 block w-full rounded-md border-0 px-3 py-2 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm"
++          >
++            {sensors.map((s) => (
++              <option key={s.id} value={s.id}>
++                {s.name}
++                {s.location ? ` (${s.location})` : ""}
++              </option>
++            ))}
++          </select>
++        </label>
++      )}
++      <Field
++        label={`Value${selectedSensor?.unit ? ` (${selectedSensor.unit})` : ""}`}
++        name="value"
++        type="number"
++        step="any"
++        inputMode="decimal"
++        value={value}
++        onChange={(e) => setValue(e.target.value)}
++        required
++      />
++      <ErrorMessage message={error} />
++      {success && <p className="text-sm text-emerald-700">{success}</p>}
++      <Button type="submit" disabled={busy}>
++        {busy ? "Posting…" : "Post reading"}
++      </Button>
++    </form>
++  );
++}
+diff --git a/frontend/src/hooks.ts b/frontend/src/hooks.ts
+new file mode 100644
+index 0000000..d7f3871
+--- /dev/null
++++ b/frontend/src/hooks.ts
+@@ -0,0 +1,43 @@
++import { useEffect, useState } from "react";
++
++export function useNow(intervalMs = 1000): number {
++  const [now, setNow] = useState(() => Date.now());
++  useEffect(() => {
++    const id = setInterval(() => setNow(Date.now()), intervalMs);
++    return () => clearInterval(id);
++  }, [intervalMs]);
++  return now;
++}
++
++export function usePolling(fn: () => void, intervalMs: number) {
++  useEffect(() => {
++    fn();
++    const id = setInterval(fn, intervalMs);
++    return () => clearInterval(id);
++  }, [fn, intervalMs]);
++}
++
++export function timeAgo(iso: string | null, now: number): string {
++  if (!iso) return "never";
++  const then = Date.parse(iso);
++  if (Number.isNaN(then)) return "unknown";
++  const s = Math.max(0, Math.round((now - then) / 1000));
++  if (s < 5) return "just now";
++  if (s < 60) return `${s} seconds ago`;
++  const m = Math.floor(s / 60);
++  if (m < 60) return m === 1 ? "1 minute ago" : `${m} minutes ago`;
++  const h = Math.floor(m / 60);
++  if (h < 24) return h === 1 ? "1 hour ago" : `${h} hours ago`;
++  const d = Math.floor(h / 24);
++  return d === 1 ? "1 day ago" : `${d} days ago`;
++}
++
++export function formatValue(v: number | null): string {
++  if (v === null || v === undefined) return "—";
++  return Number.isInteger(v) ? String(v) : String(Math.round(v * 1000) / 1000);
++}
++
++export function formatDateTime(iso: string): string {
++  const d = new Date(iso);
++  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..c2a145c 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
++import { StrictMode } from "react";
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <StrictMode>
++    <App />
++  </StrictMode>,
++);
+diff --git a/frontend/src/router.tsx b/frontend/src/router.tsx
+new file mode 100644
+index 0000000..4c17008
+--- /dev/null
++++ b/frontend/src/router.tsx
+@@ -0,0 +1,45 @@
++import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
++
++const listeners = new Set<() => void>();
++
++export function navigate(to: string) {
++  if (to === window.location.pathname) return;
++  window.history.pushState(null, "", to);
++  listeners.forEach((l) => l());
++  window.scrollTo(0, 0);
++}
++
++export function usePath(): string {
++  const [path, setPath] = useState(window.location.pathname);
++  useEffect(() => {
++    const update = () => setPath(window.location.pathname);
++    listeners.add(update);
++    window.addEventListener("popstate", update);
++    return () => {
++      listeners.delete(update);
++      window.removeEventListener("popstate", update);
++    };
++  }, []);
++  return path;
++}
++
++export function Link({
++  to,
++  className,
++  children,
++}: {
++  to: string;
++  className?: string;
++  children: ReactNode;
++}) {
++  const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
++    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
++    e.preventDefault();
++    navigate(to);
++  };
++  return (
++    <a href={to} onClick={onClick} className={className}>
++      {children}
++    </a>
++  );
++}
+diff --git a/frontend/src/ui.tsx b/frontend/src/ui.tsx
+new file mode 100644
+index 0000000..48b370e
+--- /dev/null
++++ b/frontend/src/ui.tsx
+@@ -0,0 +1,51 @@
++import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
++
++export function Button({
++  variant = "primary",
++  className = "",
++  ...props
++}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "danger" }) {
++  const styles = {
++    primary: "bg-indigo-600 text-white hover:bg-indigo-500 focus-visible:outline-indigo-600",
++    secondary: "bg-white text-slate-700 ring-1 ring-inset ring-slate-300 hover:bg-slate-50",
++    danger: "bg-red-600 text-white hover:bg-red-500 focus-visible:outline-red-600",
++  }[variant];
++  return (
++    <button
++      {...props}
++      className={`inline-flex items-center justify-center rounded-md px-3 py-2 text-sm font-semibold shadow-sm transition focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${styles} ${className}`}
++    />
++  );
++}
++
++export function Field({
++  label,
++  ...props
++}: InputHTMLAttributes<HTMLInputElement> & { label: string }) {
++  return (
++    <label className="block">
++      <span className="block text-sm font-medium text-slate-700">{label}</span>
++      <input
++        {...props}
++        className="mt-1 block w-full rounded-md border-0 px-3 py-2 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm"
++      />
++    </label>
++  );
++}
++
++export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
++  return <div className={`rounded-xl bg-white p-5 shadow-sm ring-1 ring-slate-200 ${className}`}>{children}</div>;
++}
++
++export function ErrorMessage({ message }: { message: string | null }) {
++  if (!message) return null;
++  return (
++    <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700 ring-1 ring-inset ring-red-200">
++      {message}
++    </p>
++  );
++}
++
++export function errorText(err: unknown): string {
++  return err instanceof Error ? err.message : "Something went wrong";
++}
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..26ae231
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,15 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "noEmit": true,
++    "isolatedModules": true,
++    "skipLibCheck": true,
++    "types": ["vite/client"]
++  },
++  "include": ["src", "vite.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..775ad4a 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
+ import react from "@vitejs/plugin-react";
++import tailwindcss from "@tailwindcss/vite";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

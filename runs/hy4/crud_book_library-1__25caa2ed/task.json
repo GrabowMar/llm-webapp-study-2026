@@ -1,0 +1,1000 @@
+{
+  "category": "crud",
+  "features": [
+    "auth",
+    "search",
+    "pagination"
+  ],
+  "pinned_ref": "crud_book_library@1#51f28ed076b0",
+  "prose": "Build a shared book catalogue with reader reviews, with a JSON API under `/api` and a web frontend. Anyone can browse books and reviews; signed-in users add, edit and delete books and review each book once.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/books` lists books, newest first, as a paged list (query parameters: `q`, `page`, `page_size`).\n- `POST /api/books` adds a book.\n- `GET /api/books/{id}` returns one book.\n- `PUT /api/books/{id}` replaces a book's fields; an omitted `year` or `isbn` is cleared.\n- `DELETE /api/books/{id}` deletes a book and its reviews.\n- `GET /api/books/{id}/reviews` lists a book's reviews, newest first.\n- `POST /api/books/{id}/reviews` adds the signed-in user's review of a book.\n\nData:\n\n- A book is returned as an object with `id`, `title`, `author`, `year`, `isbn`, `created_at`, `review_count`, `average_rating`.\n- A review is returned as an object with `id`, `book_id`, `rating`, `comment`, `created_at`, `username`.\n- `GET /api/books` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n}`; each item in `items` is a book.\n- `GET /api/books/{id}/reviews` returns `{\"items\": [...]}`; each item in `items` is a review.\n\nRules:\n\n- Any signed-in user may change any book.\n- A user reviews a book at most once.\n- `average_rating` is the mean rating rounded to one decimal, or `null` without reviews.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- A book table with title, author, year and average rating, a search box and paging.\n- A book page with its reviews (username, rating, comment, date) and, for signed-in users, a rating form.\n- Add and edit forms that show the API's validation messages; delete asks for confirmation.",
+  "ref": "crud_book_library@1",
+  "slug": "crud_book_library",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "books.get",
+        "expect": {
+          "header_contains": null,
+          "json_contains": {
+            "average_rating": 4.5,
+            "review_count": 2
+          },
+          "json_schema": null,
+          "max_ms": null,
+          "status": 200
+        },
+        "id": "books.average_rating",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": null,
+          "method": "GET",
+          "path": "/api/books/{bid}",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [
+          {
+            "actor": null,
+            "capture": {
+              "bid": "$.id"
+            },
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "author": "Frank Herbert",
+                "title": "Dune"
+              },
+              "method": "POST",
+              "path": "/api/books",
+              "query": {}
+            }
+          },
+          {
+            "actor": null,
+            "capture": {},
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "rating": 4
+              },
+              "method": "POST",
+              "path": "/api/books/{bid}/reviews",
+              "query": {}
+            }
+          },
+          {
+            "actor": "user_b",
+            "capture": {},
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "rating": 5
+              },
+              "method": "POST",
+              "path": "/api/books/{bid}/reviews",
+              "query": {}
+            }
+          }
+        ],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "crud",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [],
+        "id": "books.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/books",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "q",
+            "required": false,
+            "semantics": "search",
+            "type": "string"
+          },
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "author": {
+                    "maxLength": 255,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "average_rating": [
+                    "number",
+                    "null"
+                  ],
+                  "created_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "isbn": {
+                    "maxLength": 20,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "review_count": {
+                    "type": "integer"
+                  },
+                  "title": {
+                    "maxLength": 255,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "year": {
+                    "minimum": 1000,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "title",
+                  "author",
+                  "review_count",
+                  "average_rating"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "books.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/books",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "author": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "isbn": {
+              "maxLength": 20,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "year": {
+              "minimum": 1000,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "title",
+            "author"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "author": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "average_rating": [
+              "number",
+              "null"
+            ],
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "isbn": {
+              "maxLength": 20,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "review_count": {
+              "type": "integer"
+            },
+            "title": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "year": {
+              "minimum": 1000,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "author",
+            "review_count",
+            "average_rating"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "books.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/books/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "author": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "average_rating": [
+              "number",
+              "null"
+            ],
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "isbn": {
+              "maxLength": 20,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "review_count": {
+              "type": "integer"
+            },
+            "title": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "year": {
+              "minimum": 1000,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "author",
+            "review_count",
+            "average_rating"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          404
+        ],
+        "id": "books.replace",
+        "method": "PUT",
+        "owner_entity": null,
+        "path": "/api/books/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "author": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "isbn": {
+              "maxLength": 20,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "year": {
+              "minimum": 1000,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "title",
+            "author"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "author": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "average_rating": [
+              "number",
+              "null"
+            ],
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "isbn": {
+              "maxLength": 20,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "review_count": {
+              "type": "integer"
+            },
+            "title": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "year": {
+              "minimum": 1000,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "author",
+            "review_count",
+            "average_rating"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "books.delete",
+        "method": "DELETE",
+        "owner_entity": null,
+        "path": "/api/books/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "reviews.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/books/{id}/reviews",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "book_id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "comment": {
+                    "maxLength": 1000,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "created_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "rating": {
+                    "maximum": 5,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "username": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "rating",
+                  "username"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          404,
+          409
+        ],
+        "id": "reviews.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/books/{id}/reviews",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "comment": {
+              "maxLength": 1000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "rating": {
+              "maximum": 5,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "rating"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "book_id": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "comment": {
+              "maxLength": 1000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "rating": {
+              "maximum": 5,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "rating",
+            "username"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 255,
+            "min": null,
+            "name": "title",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 255,
+            "min": null,
+            "name": "author",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": 1000.0,
+            "name": "year",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 20,
+            "min": null,
+            "name": "isbn",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "created_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Book",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "book_id",
+            "ref": "Book",
+            "required": false,
+            "secret": false,
+            "type": "ref",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 5.0,
+            "max_length": null,
+            "min": 1.0,
+            "name": "rating",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 1000,
+            "min": null,
+            "name": "comment",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "created_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Review",
+        "owned_by_user": true,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "search",
+      "pagination"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-89",
+        "endpoint": "books.list",
+        "id": "probe.books.sqli",
+        "kind": "sqli_boolean",
+        "params": {
+          "param": "q"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-79",
+        "endpoint": "reviews.create",
+        "id": "probe.reviews.xss",
+        "kind": "xss_stored",
+        "params": {
+          "field": "comment",
+          "view_endpoint": "reviews.list"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Catalogue a shared book collection and collect reader reviews.",
+    "surfaces": [
+      "cwe-89",
+      "cwe-79",
+      "cwe-862",
+      "cwe-20",
+      "cwe-639"
+    ],
+    "title": "Book library",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "books.list"
+        ],
+        "id": "ui.list",
+        "text": "A book table with title, author, year and average rating, a search box and paging."
+      },
+      {
+        "endpoints": [
+          "books.get",
+          "reviews.list",
+          "reviews.create"
+        ],
+        "id": "ui.detail",
+        "text": "A book page with its reviews (username, rating, comment, date) and, for signed-in users, a rating form."
+      },
+      {
+        "endpoints": [
+          "books.create",
+          "books.replace",
+          "books.delete"
+        ],
+        "id": "ui.forms",
+        "text": "Add and edit forms that show the API's validation messages; delete asks for confirmation."
+      }
+    ]
+  },
+  "structured_hash": "4eafe30b6a6158aa5a1784604102955515a9b377faff7c8d8685797398614a78",
+  "summary": "Catalogue a shared book collection and collect reader reviews.",
+  "surfaces": [
+    "cwe-89",
+    "cwe-79",
+    "cwe-862",
+    "cwe-20",
+    "cwe-639"
+  ],
+  "task_hash": "8da2cbfcebe21e1efe8c1296d88b3a8fc19c7bbb26f3806793b855095890f870",
+  "title": "Book library",
+  "variant": "standard",
+  "version": 1
+}

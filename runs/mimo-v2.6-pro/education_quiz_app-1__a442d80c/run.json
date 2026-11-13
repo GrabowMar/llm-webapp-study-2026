@@ -1,0 +1,646 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 566,
+  "completed_at": "2026-11-10T09:20:29.719187+00:00",
+  "condition_id": 97,
+  "condition_label": "local-opencode-go/mimo-v2.6-pro",
+  "config_fingerprint": "d1d7be56d90006514440d9ba8e9256e1520bd0b4a3c5a90b15c5c50930dc09b1",
+  "cost_usd": 0.0,
+  "duration": 1348.070737,
+  "fingerprints": {
+    "config_fingerprint": "d1d7be56d90006514440d9ba8e9256e1520bd0b4a3c5a90b15c5c50930dc09b1",
+    "prompt_hash": "70e8f283f3317f14a9c93021d1052fbaf974057624394f7370d6d91a189611ac",
+    "run_fingerprint": "b8b5d60f10153a56b5177223e591434ad6a11fbf93ad8299c0b6d03c2d20caf4",
+    "task_hash": "51f9349e5612d5eac39bf38f64decc1893f41532d2db717a23d97e1aeb927570",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "a442d80c-c829-4253-8818-4659bc77ae1e",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/mimo-v2.6-pro",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-10T09:20:09.210297+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 662,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 11,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 102,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 106,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "quiz.draw",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "quiz.draw.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "attempts.submit",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "attempts.submit.ok",
+          "ms": 1,
+          "note": "$.score: expected integer, got float",
+          "observed": {
+            "body": "{\"answers\":[{\"correct_option\":\"C\",\"id\":1,\"is_correct\":false,\"option_a\":\"London\",\"option_b\":\"Berlin\",\"option_c\":\"Paris\",\"option_d\":\"Madrid\",\"question_id\":1,\"selected\":\"A\",\"text\":\"What is the capital of France?\"}],\"correct\":0,\"id\":null,\"score\":0.0,\"submitted_at\":\"2026-11-10T09:20:21Z\",\"total_questions",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "attempts.submit",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "attempts.submit.invalid.missing",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "attempts.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "attempts.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "attempts.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "attempts.list.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "attempts.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "attempts.get.ok",
+          "ms": 2,
+          "note": "$.score: expected integer/null, got float",
+          "observed": {
+            "body": "{\"answers\":[{\"correct_option\":\"C\",\"id\":1,\"is_correct\":false,\"option_a\":\"London\",\"option_b\":\"Berlin\",\"option_c\":\"Paris\",\"option_d\":\"Madrid\",\"question_id\":1,\"selected\":\"A\",\"text\":\"What is the capital of France?\"}],\"correct\":0,\"id\":1,\"score\":0.0,\"submitted_at\":\"2026-11-10T09:20:21Z\",\"total_questions\":1",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "attempts.get",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "attempts.get.anon_401",
+          "ms": 5,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "attempts.get",
+          "expected": {
+            "status": [
+              404
+            ]
+          },
+          "id": "attempts.get.other_user",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 404
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "admin.questions.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "admin.questions.create.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.questions.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "admin.questions.create.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.questions.create",
+          "expected": {
+            "status": [
+              403
+            ]
+          },
+          "id": "admin.questions.create.non_admin_403",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "admin.questions.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "admin.questions.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "admin.questions.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "admin.questions.create.invalid.too_long",
+          "ms": 6,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"correct_option\":\"A\",\"id\":26,\"option_a\":\"llmlab option_a\",\"option_b\":\"llmlab option_b\",\"option_c\":\"llmlab option_c\",\"option_d\":\"llmlab option_d\",\"text\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "admin.questions.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "admin.questions.create.invalid.enum",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "admin.questions.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "admin.questions.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.questions.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "admin.questions.list.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.questions.list",
+          "expected": {
+            "status": [
+              403
+            ]
+          },
+          "id": "admin.questions.list.non_admin_403",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "admin.questions.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "admin.questions.list.page_size",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "quiz.draw",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "quiz.draw.hides_answer",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "persistence",
+          "endpoint": "attempts.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "attempts.get.persists",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 22,
+        "agent_pass_rate": 0.8636363636363636,
+        "agent_passed": 19,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 6,
+            "passed": 6
+          },
+          "functional": {
+            "n": 9,
+            "passed": 7
+          },
+          "ownership": {
+            "n": 1,
+            "passed": 1
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 1
+          },
+          "persistence": {
+            "n": 1,
+            "passed": 1
+          },
+          "validation": {
+            "n": 4,
+            "passed": 3
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.8636363636363636,
+        "probes_exploited": 0,
+        "probes_skipped": 1,
+        "probes_tested": 1,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.8636363636363636
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-639",
+          "endpoint": "attempts.get",
+          "evidence": "precondition checks did not pass: attempts.get.ok",
+          "id": "probe.attempts.idor",
+          "kind": "idor_enumeration",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        },
+        {
+          "cwe": "cwe-798",
+          "endpoint": null,
+          "evidence": "no default password accepted",
+          "id": "probe.quiz.default_admin",
+          "kind": "default_credential",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1686,
+  "loc_model": 1686,
+  "model": "mimo-v2.6-pro",
+  "model_id": "local-opencode-go/mimo-v2.6-pro",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "b8b5d60f10153a56b5177223e591434ad6a11fbf93ad8299c0b6d03c2d20caf4",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-10T08:58:01.648450+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "education_quiz_app@1",
+  "tokens_used": 3224225,
+  "tree_hash": "d57c134f7b0fb93a8bc27643c4ebd5b0c618f8ea1d32b3d954d675d7b8d59df4",
+  "truncated": false,
+  "unit": "task:education_quiz_app@1",
+  "usable": true
+}

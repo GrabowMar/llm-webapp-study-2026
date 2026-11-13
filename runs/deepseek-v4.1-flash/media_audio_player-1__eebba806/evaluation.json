@@ -1,0 +1,707 @@
+{
+ "adherence": {
+  "checker_version": 1,
+  "detected": {
+   "auth": {
+    "confidence": "medium",
+    "evidence": [
+     "runtime:login:bearer",
+     "runtime:tester"
+    ],
+    "value": "bearer"
+   },
+   "backend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:backend/requirements.txt:flask",
+     "import:backend/app.py:flask"
+    ],
+    "value": "flask"
+   },
+   "database": {
+    "confidence": "medium",
+    "evidence": [
+     "import:backend/app.py:sqlite3"
+    ],
+    "value": "sqlite"
+   },
+   "frontend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:frontend/package.json:react",
+     "import:frontend/src/App.tsx:react",
+     "import:frontend/src/components/AddTrackForm.tsx:react",
+     "import:frontend/src/components/AuthPanel.tsx:react",
+     "import:frontend/src/components/PlayerBar.tsx:react"
+    ],
+    "value": "react"
+   },
+   "styling": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:tailwindcss",
+     "classes:share=0.97"
+    ],
+    "value": "tailwind"
+   }
+  },
+  "deviations": [],
+  "hallucinated": [],
+  "packages": [
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "flask",
+    "pinned": true,
+    "version": "3.1.3"
+   },
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "gunicorn",
+    "pinned": true,
+    "version": "26.2.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react-dom",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@tailwindcss/vite",
+    "pinned": true,
+    "version": "4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@types/react",
+    "pinned": false,
+    "version": "^19.3.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@types/react-dom",
+    "pinned": false,
+    "version": "^19.3.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@vitejs/plugin-react",
+    "pinned": true,
+    "version": "6.2.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "tailwindcss",
+    "pinned": true,
+    "version": "4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "typescript",
+    "pinned": false,
+    "version": "^5.9.3"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "vite",
+    "pinned": true,
+    "version": "8.3.5"
+   }
+  ],
+  "sbom_blob": "747bc007ed3b82c1c7ee2708e2ab239c8249843c6e1e0493e3e8ee4f5b305d01",
+  "status": "compliant",
+  "style_metrics": {
+   "component_library_imports": {},
+   "css_files": 1,
+   "css_modules": 0,
+   "tailwind_class_share": 0.9729
+  },
+  "unpinned": [
+   "@types/react",
+   "@types/react-dom",
+   "typescript"
+  ]
+ },
+ "created_at": "2026-11-11T17:09:50.566046+00:00",
+ "eval_level": "security",
+ "eval_suite": "eval-v2@2",
+ "id": 1147,
+ "mode": "full",
+ "result": {
+  "auth_mode": "contract_bearer",
+  "checks": [
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "health",
+    "ms": 11,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "index_served",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "spa_fallback",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.register",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "auth.register.ok",
+    "ms": 102,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.login",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "auth.login.ok",
+    "ms": 102,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "tracks.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "tracks.list.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "tracks.create",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "tracks.create.ok",
+    "ms": 3,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": true,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "tracks.create",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "tracks.create.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": true,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "tracks.get",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "tracks.get.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": true,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "tracks.delete",
+    "expected": {
+     "status": [
+      204
+     ]
+    },
+    "id": "tracks.delete.ok",
+    "ms": 3,
+    "note": null,
+    "observed": {
+     "status": 204
+    },
+    "overlay": true,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "tracks.delete",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "tracks.delete.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": true,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "ownership",
+    "endpoint": "tracks.delete",
+    "expected": {
+     "status": [
+      403,
+      404
+     ]
+    },
+    "id": "tracks.delete.other_user",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 403
+    },
+    "overlay": true,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "tracks.play",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "tracks.play.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": true,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "tracks.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "tracks.create.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": true,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "tracks.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "tracks.create.invalid.too_long",
+    "ms": 2,
+    "note": "title: status 201 | url: status 201 | artist: status 201",
+    "observed": {
+     "body": "{\"added_by\":\"userab2723957\",\"artist\":\"llmlab artist\",\"created_at\":\"2026-11-11T17:13:19.929518Z\",\"duration\":1,\"id\":7,\"play_count\":0,\"title\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+     "requests": [
+      {
+       "label": "title",
+       "ok": false,
+       "status": 201
+      },
+      {
+       "label": "url",
+       "ok": false,
+       "status": 201
+      },
+      {
+       "label": "artist",
+       "ok": false,
+       "status": 201
+      }
+     ],
+     "status": 201
+    },
+    "overlay": true,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   }
+  ],
+  "compiler_version": 2,
+  "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+  "flaky_checks": [],
+  "measured": true,
+  "metrics": {
+   "agent_checks": 12,
+   "agent_pass_rate": 0.9166666666666666,
+   "agent_passed": 11,
+   "baseline_pass_rate": 0.0,
+   "by_category": {
+    "auth": {
+     "n": 2,
+     "passed": 2
+    },
+    "functional": {
+     "n": 7,
+     "passed": 7
+    },
+    "ownership": {
+     "n": 1,
+     "passed": 1
+    },
+    "validation": {
+     "n": 2,
+     "passed": 1
+    }
+   },
+   "common_pass_rate": null,
+   "infra_ok": true,
+   "over_baseline": 0.9166666666666666,
+   "probes_exploited": 0,
+   "probes_skipped": 1,
+   "probes_tested": 1,
+   "regression_pass_rate": null,
+   "sec_pass": false,
+   "slot_pass_rate": null,
+   "stated_pass_rate": 1.0,
+   "unstated_pass_rate": 0.8
+  },
+  "not_measured_reason": null,
+  "plan_sha256": "836dafd18a9633d54b8f8c72c50d9e9ab7ef3f9d938c5139d0eb7baccc370fc0",
+  "probes": [
+   {
+    "cwe": "cwe-89",
+    "endpoint": "tracks.list",
+    "evidence": "tautology payloads returned no extra rows",
+    "id": "probe.tracks.sqli",
+    "kind": "sqli_boolean",
+    "skip_reason": null,
+    "status": "not_exploited"
+   },
+   {
+    "cwe": "cwe-79",
+    "endpoint": "tracks.create",
+    "evidence": "the view at /api/tracks is application/json, not an HTML page: a browser does not run markup from it",
+    "id": "probe.tracks.xss",
+    "kind": "xss_stored",
+    "skip_reason": "not_measurable",
+    "status": "skipped"
+   }
+  ],
+  "skipped": [],
+  "tester_version": 2
+ },
+ "stages": {
+  "adherence": {
+   "detail": {
+    "record_status": "compliant",
+    "runtime": true
+   },
+   "seconds": 1.585,
+   "status": "ok"
+  },
+  "build": {
+   "detail": {
+    "attempts": [
+     {
+      "attempt": 1,
+      "infra_suspected": false,
+      "ok": true
+     }
+    ],
+    "base_images": {
+     "pkg:docker/node@24-slim?digest=sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c&platform=linux%2Famd64": "sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c",
+     "pkg:docker/python@3.13-slim?digest=sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1&platform=linux%2Famd64": "sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1"
+    },
+    "build_context": {
+     "locks": [
+      {
+       "ecosystem": "pypi",
+       "lock": "backend/requirements.lock",
+       "manifest": "backend/requirements.txt",
+       "reason": null,
+       "source": "starter",
+       "status": "complete"
+      },
+      {
+       "ecosystem": "npm",
+       "lock": "frontend/package-lock.json",
+       "manifest": "frontend/package.json",
+       "reason": null,
+       "source": "platform",
+       "status": "complete"
+      }
+     ],
+     "notes": [
+      "tree: 23 files written verbatim",
+      "lock: 1 platform lock files (platform lock source)"
+     ]
+    },
+    "build_key": "c40ad370af18a072bfc77f5c3a70d89ceaf786c99c99cc3c35c054fcba89e597",
+    "cache_hit": false,
+    "cpu_seconds": 5.01,
+    "image_bytes": 186855627,
+    "image_id": "sha256:2e3c749ce1f22bf7b2fa77b0046d921d861b346ccfbc5b307065a078cf681e90",
+    "image_tag": "llmlab/sample:c40ad370af18a072bfc77f5c-35397b51f60b",
+    "peak_memory_bytes": 330244096,
+    "prepare_seconds": 0.05,
+    "queue_seconds": 0.029,
+    "seconds": 6.786
+   },
+   "seconds": 7.254,
+   "status": "ok"
+  },
+  "lock": {
+   "detail": {
+    "files": [
+     "frontend/package-lock.json"
+    ],
+    "packages": {
+     "npm": 80,
+     "pip": 8
+    },
+    "resolved_at": "2026-11-11T05:58:55.973985+00:00",
+    "source": "platform"
+   },
+   "seconds": 0.001,
+   "status": "ok"
+  },
+  "probes": {
+   "detail": {
+    "n": 2,
+    "tested": 1
+   },
+   "status": "ok"
+  },
+  "start": {
+   "detail": {
+    "credentials_ref": "7fca691974bcd86eb297754b65fae421e4b33537db75e4a3351fc2ab27f081c2"
+   },
+   "seconds": 2.212,
+   "status": "ok"
+  },
+  "tester": {
+   "detail": {
+    "attempts": 1,
+    "checks_adjusted": 0,
+    "checks_skipped": 0,
+    "compiler_version": 2,
+    "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+    "image_override": false,
+    "only_checks": null,
+    "overlay": false,
+    "plan_sha256": "836dafd18a9633d54b8f8c72c50d9e9ab7ef3f9d938c5139d0eb7baccc370fc0",
+    "probe_rules_version": 2,
+    "probes": null,
+    "tester_rules_version": 3,
+    "tester_version": 2,
+    "upstream": false
+   },
+   "seconds": 3.188,
+   "status": "ok"
+  }
+ },
+ "status": "measured"
+}

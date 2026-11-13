@@ -1,0 +1,420 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 634,
+  "completed_at": "2026-11-10T20:27:37.974849+00:00",
+  "condition_id": 94,
+  "condition_label": "local-opencode-go/deepseek-v4-pro",
+  "config_fingerprint": "216f0b1314093d0086c05ae0a1c1513221be64f4b2eb5a546b0756484b94ed5b",
+  "cost_usd": 0.0,
+  "duration": 499.487647,
+  "fingerprints": {
+    "config_fingerprint": "216f0b1314093d0086c05ae0a1c1513221be64f4b2eb5a546b0756484b94ed5b",
+    "prompt_hash": "e3a85b3ff82a5899ef32c80738a63036d412ac3ed2a05deac362590ff6c6fd34",
+    "run_fingerprint": "c9ee32a177eab6006364d9ad8eb3682bb729773d5a94e4973893d1d59333daac",
+    "task_hash": "1b580066147336c704fddfad8222594a9acf1d016eba706c4e1c753cba072e31",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "6ad485f4-036c-44d5-81ed-a2952d7de7b6",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/deepseek-v4-pro",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-10T20:27:10.946576+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 745,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 63,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 106,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 106,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "images.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "images.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "images.upload",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "images.upload.ok",
+          "ms": 2,
+          "note": "status 400",
+          "observed": {
+            "body": "{\"error\":\"data is not valid base64\"}\n",
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "images.upload",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "images.upload.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "images.upload",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "images.upload.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "images.upload",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "images.upload.invalid.too_long",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "negative",
+          "endpoint": "images.upload",
+          "expected": {
+            "status": [
+              413
+            ]
+          },
+          "id": "images.upload.oversize",
+          "ms": 162,
+          "note": "status 400",
+          "observed": {
+            "body": "{\"error\":\"only PNG and JPEG images are supported\"}\n",
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "images.get",
+          "expected": null,
+          "id": "images.get.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/images answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "images.file",
+          "expected": null,
+          "id": "images.file.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/images answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "images.delete",
+          "expected": null,
+          "id": "images.delete.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/images answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "images.delete",
+          "expected": null,
+          "id": "images.delete.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/images answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "images.delete",
+          "expected": null,
+          "id": "images.delete.other_user",
+          "ms": null,
+          "note": "setup 0: POST /api/images answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 13,
+        "agent_pass_rate": 0.46153846153846156,
+        "agent_passed": 6,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 2,
+            "passed": 1
+          },
+          "functional": {
+            "n": 7,
+            "passed": 3
+          },
+          "negative": {
+            "n": 1,
+            "passed": 0
+          },
+          "ownership": {
+            "n": 1,
+            "passed": 0
+          },
+          "validation": {
+            "n": 2,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.46153846153846156,
+        "probes_exploited": 0,
+        "probes_skipped": 1,
+        "probes_tested": 0,
+        "regression_pass_rate": null,
+        "sec_pass": null,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.46153846153846156
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-639",
+          "endpoint": "images.delete",
+          "evidence": "precondition checks did not pass: images.delete.ok",
+          "id": "probe.images.idor",
+          "kind": "idor_enumeration",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 900,
+  "loc_model": 888,
+  "model": "deepseek-v4-pro",
+  "model_id": "local-opencode-go/deepseek-v4-pro",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "c9ee32a177eab6006364d9ad8eb3682bb729773d5a94e4973893d1d59333daac",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-10T20:19:18.487202+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "fileproc_image_upload@1",
+  "tokens_used": 1123797,
+  "tree_hash": "5921029919c383a169a73d8e7a0f7505fa7e73e238009ecc69f62abd05d508da",
+  "truncated": false,
+  "unit": "task:fileproc_image_upload@1",
+  "usable": true
+}

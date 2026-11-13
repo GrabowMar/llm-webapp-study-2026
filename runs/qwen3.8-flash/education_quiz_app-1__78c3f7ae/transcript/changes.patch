@@ -1,0 +1,1555 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..a9e0d7e
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,6 @@
++.venv/
++__pycache__/
++*.pyc
++data/
++node_modules/
++frontend/dist/
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..d8ab6db 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,23 +1,347 @@
+ """Flask entry point."""
+ 
++import json
++import os
++import random
++import re
++import secrets
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++
++import db
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+ 
+ app = Flask(__name__, static_folder=None)
+ 
++USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.-]{3,64}$")
++OPTION_LETTERS = ("A", "B", "C", "D")
++OPTION_KEYS = {
++    "A": "option_a",
++    "B": "option_b",
++    "C": "option_c",
++    "D": "option_d",
++}
++
++
++def row_to_question(row, include_correct: bool):
++    q = {
++        "id": row["id"],
++        "text": row["text"],
++        "option_a": row["option_a"],
++        "option_b": row["option_b"],
++        "option_c": row["option_c"],
++        "option_d": row["option_d"],
++    }
++    if include_correct:
++        q["correct_option"] = row["correct_option"]
++    return q
++
++
++def json_body() -> dict:
++    data = request.get_json(silent=True)
++    return data if isinstance(data, dict) else {}
++
++
++class HttpError(Exception):
++    def __init__(self, message: str, status: int):
++        super().__init__(message)
++        self.message = message
++        self.status = status
++
++
++def current_user():
++    if "user" not in g:
++        header = request.headers.get("Authorization", "")
++        g.user = None
++        if header.startswith("Bearer "):
++            conn = db.get_conn()
++            try:
++                g.user = db.lookup_token(conn, header[7:].strip())
++            finally:
++                conn.close()
++    return g.user
++
++
++def require_user():
++    user = current_user()
++    if user is None:
++        raise HttpError("Sign-in required", 401)
++    return user
++
++
++def require_admin():
++    user = require_user()
++    if user["role"] != "admin":
++        raise HttpError("Admin access required", 403)
++    return user
++
++
++@app.errorhandler(HttpError)
++def handle_http_error(e):
++    return jsonify({"error": e.message}), e.status
++
++
++@app.before_request
++def _ensure_db():
++    db.ensure_db()
++
+ 
+ @app.get("/api/health")
+ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    body = json_body()
++    username = str(body.get("username", "")).strip()
++    password = str(body.get("password", ""))
++    errors = {}
++    if not USERNAME_RE.match(username):
++        errors["username"] = "Username must be 3-64 characters using letters, numbers, '.', '-' or '_'."
++    if username.lower() == "admin":
++        errors["username"] = "This username is reserved."
++    if len(password) < 6:
++        errors["password"] = "Password must be at least 6 characters."
++    if errors:
++        return jsonify({"error": "Validation failed", "fields": errors}), 400
++    conn = db.get_conn()
++    if conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
++        conn.close()
++        return jsonify({"error": "Username is already taken"}), 409
++    user_id = secrets.token_hex(16)
++    password_hash = db.hash_password(password)
++    with conn:
++        conn.execute(
++            "INSERT INTO users (id, username, password_hash, role, created_at)"
++            " VALUES (?, ?, ?, 'user', ?)",
++            (user_id, username, password_hash, db.now_iso()),
++        )
++    conn.close()
++    return jsonify({"token": db.issue_token(user_id, password_hash)}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    body = json_body()
++    username = str(body.get("username", "")).strip()
++    password = str(body.get("password", ""))
++    if username == "admin" and not os.environ.get("ADMIN_PASSWORD", "").strip():
++        return jsonify({"error": "Invalid username or password"}), 401
++    conn = db.get_conn()
++    row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
++    conn.close()
++    if row is None or not db.verify_password(password, row["password_hash"]):
++        return jsonify({"error": "Invalid username or password"}), 401
++    return jsonify({"token": db.issue_token(row["id"], row["password_hash"])}), 200
++
++
++@app.get("/api/auth/me")
++def me():
++    user = require_user()
++    return jsonify({"username": user["username"], "role": user["role"]})
++
++
++@app.get("/api/quiz")
++def quiz():
++    raw = request.args.get("count", "5")
++    try:
++        count = int(raw)
++    except (TypeError, ValueError):
++        return jsonify({"error": "count must be an integer"}), 400
++    count = max(1, min(count, 20))
++    conn = db.get_conn()
++    rows = conn.execute(
++        "SELECT * FROM questions WHERE active = 1"
++    ).fetchall()
++    conn.close()
++    if count > len(rows):
++        return jsonify({"error": f"Only {len(rows)} questions are available"}), 400
++    picked = random.sample(rows, count)
++    return jsonify({"items": [row_to_question(r, False) for r in picked]})
++
++
++@app.post("/api/attempts")
++def submit_attempt():
++    body = json_body()
++    answers = body.get("answers")
++    if not isinstance(answers, list) or not answers:
++        return jsonify({"error": "Provide a non-empty list of answers"}), 400
++    seen: set[int] = set()
++    cleaned = []
++    for entry in answers:
++        if not isinstance(entry, dict):
++            return jsonify({"error": "Each answer needs question_id and selected"}), 400
++        try:
++            qid = int(entry.get("question_id"))
++        except (TypeError, ValueError):
++            return jsonify({"error": "Each answer needs question_id and selected"}), 400
++        selected = str(entry.get("selected", "")).strip().upper()
++        if selected not in OPTION_LETTERS:
++            return jsonify({"error": f"Invalid answer for question {qid}"}), 400
++        if qid in seen:
++            continue
++        seen.add(qid)
++        cleaned.append((qid, selected))
++    conn = db.get_conn()
++    rows = {}
++    for qid, _ in cleaned:
++        row = conn.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone()
++        if row is None:
++            conn.close()
++            return jsonify({"error": f"Question {qid} does not exist"}), 400
++        rows[qid] = row
++    review = []
++    correct_count = 0
++    for qid, selected in cleaned:
++        row = rows[qid]
++        is_correct = selected == row["correct_option"]
++        if is_correct:
++            correct_count += 1
++        item = row_to_question(row, True)
++        item["selected"] = selected
++        item["is_correct"] = is_correct
++        review.append(item)
++    total = len(review)
++    score = round(correct_count / total * 100, 1)
++    attempt = {
++        "id": None,
++        "score": score,
++        "correct": correct_count,
++        "total_questions": total,
++        "submitted_at": db.now_iso(),
++        "answers": review,
++    }
++    user = current_user()
++    if user is not None:
++        with conn:
++            cur = conn.execute(
++                "INSERT INTO attempts (user_id, score, correct, total_questions, submitted_at, review)"
++                " VALUES (?, ?, ?, ?, ?, ?)",
++                (user["id"], score, correct_count, total, attempt["submitted_at"], json.dumps(review)),
++            )
++            attempt["id"] = cur.lastrowid
++    conn.close()
++    return jsonify(attempt), 201
++
++
++def attempt_to_json(row) -> dict:
++    return {
++        "id": row["id"],
++        "score": row["score"],
++        "correct": row["correct"],
++        "total_questions": row["total_questions"],
++        "submitted_at": row["submitted_at"],
++        "answers": json.loads(row["review"]),
++    }
++
++
++@app.get("/api/attempts")
++def list_attempts():
++    user = require_user()
++    conn = db.get_conn()
++    rows = conn.execute(
++        "SELECT * FROM attempts WHERE user_id = ? ORDER BY submitted_at DESC, id DESC",
++        (user["id"],),
++    ).fetchall()
++    conn.close()
++    return jsonify({"items": [attempt_to_json(r) for r in rows]})
++
++
++@app.get("/api/attempts/<int:attempt_id>")
++def get_attempt(attempt_id: int):
++    user = require_user()
++    conn = db.get_conn()
++    row = conn.execute(
++        "SELECT * FROM attempts WHERE id = ? AND user_id = ?", (attempt_id, user["id"])
++    ).fetchone()
++    conn.close()
++    if row is None:
++        return jsonify({"error": "Attempt not found"}), 404
++    return jsonify(attempt_to_json(row))
++
++
++@app.post("/api/admin/questions")
++def admin_add_question():
++    require_admin()
++    body = json_body()
++    errors = {}
++    fields = {}
++    for name in ("text", "option_a", "option_b", "option_c", "option_d"):
++        value = str(body.get(name, "")).strip()
++        fields[name] = value
++        if not value:
++            errors[name] = "This field is required."
++    correct = str(body.get("correct_option", "")).strip().upper()
++    if correct not in OPTION_LETTERS:
++        errors["correct_option"] = "correct_option must be one of A, B, C or D."
++    if errors:
++        return jsonify({"error": "Validation failed", "fields": errors}), 400
++    conn = db.get_conn()
++    with conn:
++        cur = conn.execute(
++            "INSERT INTO questions (text, option_a, option_b, option_c, option_d,"
++            " correct_option, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
++            (fields["text"], fields["option_a"], fields["option_b"], fields["option_c"],
++             fields["option_d"], correct, db.now_iso()),
++        )
++        row = conn.execute("SELECT * FROM questions WHERE id = ?", (cur.lastrowid,)).fetchone()
++    conn.close()
++    return jsonify(row_to_question(row, True)), 201
++
++
++@app.get("/api/admin/questions")
++def admin_list_questions():
++    require_admin()
++    try:
++        page = int(request.args.get("page", "1"))
++        page_size = int(request.args.get("page_size", "20"))
++    except (TypeError, ValueError):
++        return jsonify({"error": "page and page_size must be integers"}), 400
++    page = max(1, page)
++    page_size = max(1, min(page_size, 100))
++    conn = db.get_conn()
++    total = conn.execute("SELECT COUNT(*) AS c FROM questions").fetchone()["c"]
++    rows = conn.execute(
++        "SELECT * FROM questions ORDER BY id LIMIT ? OFFSET ?",
++        (page_size, (page - 1) * page_size),
++    ).fetchall()
++    conn.close()
++    return jsonify({
++        "items": [row_to_question(r, True) for r in rows],
++        "total": total,
++        "page": page,
++        "page_size": page_size,
++    })
++
++
++@app.errorhandler(404)
++def api_not_found(e):
++    if request.path.startswith("/api/"):
++        return jsonify({"error": "Not found"}), 404
++    return e
++
++
++@app.errorhandler(405)
++def api_not_allowed(e):
++    if request.path.startswith("/api/"):
++        return jsonify({"error": "Method not allowed"}), 405
++    return e
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+-    if (DIST / path).is_file():
++    if request.path.startswith("/api/"):
++        return jsonify({"error": "Not found"}), 404
++    if path and (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
++
++
++db.init_db()
++
++if __name__ == "__main__":
++    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), debug=False)
+diff --git a/backend/db.py b/backend/db.py
+new file mode 100644
+index 0000000..8520de5
+--- /dev/null
++++ b/backend/db.py
+@@ -0,0 +1,192 @@
++"""SQLite access and seeding."""
++
++import hashlib
++import os
++import secrets
++import sqlite3
++from datetime import datetime, timezone
++from pathlib import Path
++
++from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
++
++DATA_DIR = Path(os.environ.get("DATA_DIR", "./data")).resolve()
++DB_PATH = DATA_DIR / "quiz.db"
++SECRET_PATH = DATA_DIR / "secret.key"
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id TEXT PRIMARY KEY,
++    username TEXT NOT NULL UNIQUE,
++    password_hash TEXT NOT NULL,
++    role TEXT NOT NULL DEFAULT 'user',
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS questions (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    text TEXT NOT NULL,
++    option_a TEXT NOT NULL,
++    option_b TEXT NOT NULL,
++    option_c TEXT NOT NULL,
++    option_d TEXT NOT NULL,
++    correct_option TEXT NOT NULL CHECK (correct_option IN ('A','B','C','D')),
++    active INTEGER NOT NULL DEFAULT 1,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS attempts (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    user_id TEXT NOT NULL,
++    score REAL NOT NULL,
++    correct INTEGER NOT NULL,
++    total_questions INTEGER NOT NULL,
++    submitted_at TEXT NOT NULL,
++    review TEXT NOT NULL
++);
++CREATE INDEX IF NOT EXISTS idx_attempts_user ON attempts (user_id, submitted_at DESC);
++"""
++
++SEED_QUESTIONS = [
++    ("What is the capital of France?", "Berlin", "Madrid", "Paris", "Rome", "C"),
++    ("Which planet is known as the Red Planet?", "Venus", "Mars", "Jupiter", "Saturn", "B"),
++    ("How many continents are there on Earth?", "5", "6", "7", "8", "C"),
++    ("What is the largest ocean on Earth?", "Atlantic", "Indian", "Arctic", "Pacific", "D"),
++    ("Who wrote the play 'Romeo and Juliet'?", "Charles Dickens", "William Shakespeare", "Mark Twain", "Jane Austen", "B"),
++    ("What is the chemical symbol for gold?", "Go", "Gd", "Au", "Ag", "C"),
++    ("Which country is home to the kangaroo?", "New Zealand", "Australia", "South Africa", "Brazil", "B"),
++    ("What is the tallest mountain in the world?", "K2", "Kangchenjunga", "Mount Everest", "Lhotse", "C"),
++    ("How many sides does a hexagon have?", "5", "6", "7", "8", "B"),
++    ("What is the boiling point of water at sea level in Celsius?", "90", "95", "100", "110", "C"),
++    ("Which gas do plants primarily absorb for photosynthesis?", "Oxygen", "Nitrogen", "Carbon dioxide", "Hydrogen", "C"),
++    ("What is the smallest prime number?", "0", "1", "2", "3", "C"),
++    ("In which year did the First World War end?", "1916", "1917", "1918", "1920", "C"),
++    ("What is the longest river in Africa?", "Amazon", "Nile", "Mississippi", "Ganges", "B"),
++    ("How many players are on a basketball team on the court?", "4", "5", "6", "7", "B"),
++    ("What is the currency of Japan?", "Won", "Yuan", "Yen", "Ringgit", "C"),
++    ("Which organ in the human body pumps blood?", "Liver", "Heart", "Lungs", "Kidney", "B"),
++    ("What is the largest desert in the world?", "Sahara", "Gobi", "Antarctic", "Kalahari", "C"),
++    ("How many strings does a standard guitar have?", "4", "5", "6", "7", "C"),
++    ("Which element has the atomic number 1?", "Helium", "Oxygen", "Carbon", "Hydrogen", "D"),
++    ("What is the capital of Canada?", "Toronto", "Ottawa", "Vancouver", "Montreal", "B"),
++    ("Who painted the Mona Lisa?", "Vincent van Gogh", "Pablo Picasso", "Leonardo da Vinci", "Michelangelo", "C"),
++]
++
++
++def now_iso() -> str:
++    return datetime.now(timezone.utc).isoformat(timespec="seconds")
++
++
++def _read_secret() -> str:
++    env = os.environ.get("SECRET_KEY", "").strip()
++    if env:
++        return env
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    if SECRET_PATH.exists():
++        stored = SECRET_PATH.read_text().strip()
++        if stored:
++            return stored
++    secret = secrets.token_hex(32)
++    SECRET_PATH.write_text(secret)
++    return secret
++
++
++_SECRET = None
++_SERIALIZER = None
++
++
++def _serializer() -> URLSafeTimedSerializer:
++    global _SECRET, _SERIALIZER
++    if _SERIALIZER is None:
++        _SECRET = _read_secret()
++        _SERIALIZER = URLSafeTimedSerializer(_SECRET, salt="quiz-auth")
++    return _SERIALIZER
++
++
++def get_conn() -> sqlite3.Connection:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    return conn
++
++
++def _pbkdf2(password: str, salt: str) -> str:
++    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000)
++    return dk.hex()
++
++
++def hash_password(password: str) -> str:
++    salt = secrets.token_hex(16)
++    return f"pbkdf2_sha256${salt}${_pbkdf2(password, salt)}"
++
++
++def verify_password(password: str, stored: str) -> bool:
++    parts = stored.split("$")
++    if len(parts) != 3 or parts[0] != "pbkdf2_sha256":
++        return False
++    return secrets.compare_digest(parts[2], _pbkdf2(password, parts[1]))
++
++
++def _sync_admin(conn: sqlite3.Connection) -> None:
++    """The admin account exists only while ADMIN_PASSWORD is set and non-empty."""
++    admin_password = os.environ.get("ADMIN_PASSWORD", "").strip()
++    row = conn.execute("SELECT password_hash FROM users WHERE username = 'admin'").fetchone()
++    if admin_password:
++        if row is None:
++            with conn:
++                conn.execute(
++                    "INSERT INTO users (id, username, password_hash, role, created_at)"
++                    " VALUES (?, 'admin', ?, 'admin', ?)",
++                    (secrets.token_hex(16), hash_password(admin_password), now_iso()),
++                )
++        elif not verify_password(admin_password, row["password_hash"]):
++            with conn:
++                conn.execute(
++                    "UPDATE users SET password_hash = ?, role = 'admin' WHERE username = 'admin'",
++                    (hash_password(admin_password),),
++                )
++    elif row is not None:
++        with conn:
++            conn.execute("DELETE FROM users WHERE username = 'admin'")
++
++
++_initialized = False
++
++
++def init_db() -> None:
++    global _initialized
++    conn = get_conn()
++    try:
++        conn.executescript(SCHEMA)
++        if conn.execute("SELECT COUNT(*) AS c FROM questions").fetchone()["c"] == 0:
++            ts = now_iso()
++            with conn:
++                conn.executemany(
++                    "INSERT INTO questions (text, option_a, option_b, option_c, option_d,"
++                    " correct_option, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
++                    [row + (ts,) for row in SEED_QUESTIONS],
++                )
++        _sync_admin(conn)
++        _initialized = True
++    finally:
++        conn.close()
++
++
++def ensure_db() -> None:
++    if not _initialized:
++        init_db()
++
++
++def issue_token(user_id: str, password_hash: str) -> str:
++    return _serializer().dumps({"uid": user_id, "ph": password_hash[:12]})
++
++
++def lookup_token(conn: sqlite3.Connection, token: str) -> sqlite3.Row | None:
++    try:
++        data = _serializer().loads(token, max_age=60 * 60 * 24 * 30)
++    except (BadSignature, SignatureExpired):
++        return None
++    if not isinstance(data, dict) or not data.get("uid"):
++        return None
++    row = conn.execute("SELECT * FROM users WHERE id = ?", (data["uid"],)).fetchone()
++    if row is None or row["password_hash"][:12] != data.get("ph"):
++        return None
++    return row
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..c1a2b3d 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,10 +10,65 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "^4.3.5",
++        "@types/react": "^19.2.0",
++        "@types/react-dom": "^19.2.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "^4.3.5",
++        "typescript": "^5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +359,370 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,6 +753,13 @@
+         }
+       }
+     },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +770,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +817,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1107,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -789,6 +1256,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1294,20 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..3258183 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,20 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "vite build",
++    "typecheck": "tsc --noEmit"
+   },
+   "dependencies": {
+     "react": "19.3.1",
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "^4.3.5",
++    "@types/react": "^19.2.0",
++    "@types/react-dom": "^19.2.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "^4.3.5",
++    "typescript": "^5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/AuthContext.tsx b/frontend/src/AuthContext.tsx
+new file mode 100644
+index 0000000..3dff91f
+--- /dev/null
++++ b/frontend/src/AuthContext.tsx
+@@ -0,0 +1,82 @@
++import { createContext, useContext, useEffect, useState } from "react";
++import type { ReactNode } from "react";
++import { api } from "./api";
++import type { Auth } from "./api";
++
++interface AuthContextValue {
++  auth: Auth | null;
++  isAdmin: boolean;
++  ready: boolean;
++  signIn: (username: string, password: string) => Promise<void>;
++  signUp: (username: string, password: string) => Promise<void>;
++  signOut: () => void;
++}
++
++const AuthContext = createContext<AuthContextValue | null>(null);
++
++export function AuthProvider({ children }: { children: ReactNode }) {
++  const [auth, setAuth] = useState<Auth | null>(() => {
++    try {
++      const raw = localStorage.getItem("quiz_auth");
++      return raw ? (JSON.parse(raw) as Auth) : null;
++    } catch {
++      return null;
++    }
++  });
++  const [ready, setReady] = useState(false);
++
++  useEffect(() => {
++    if (!auth) {
++      setReady(true);
++      return;
++    }
++    let cancelled = false;
++    api
++      .me(auth.token)
++      .then((me) => {
++        if (!cancelled) setAuth({ username: me.username, token: auth.token, role: me.role });
++      })
++      .catch(() => {
++        if (!cancelled) setAuth(null);
++      })
++      .finally(() => {
++        if (!cancelled) setReady(true);
++      });
++    return () => {
++      cancelled = true;
++    };
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
++
++  useEffect(() => {
++    if (auth) localStorage.setItem("quiz_auth", JSON.stringify(auth));
++    else localStorage.removeItem("quiz_auth");
++  }, [auth]);
++
++  const signIn = async (username: string, password: string) => {
++    const { token } = await api.login(username, password);
++    const me = await api.me(token);
++    setAuth({ username: me.username, token, role: me.role });
++  };
++
++  const signUp = async (username: string, password: string) => {
++    const { token } = await api.register(username, password);
++    setAuth({ username, token, role: "user" });
++  };
++
++  const value: AuthContextValue = {
++    auth,
++    isAdmin: auth?.role === "admin",
++    ready,
++    signIn,
++    signUp,
++    signOut: () => setAuth(null),
++  };
++  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
++}
++
++export function useAuth(): AuthContextValue {
++  const ctx = useContext(AuthContext);
++  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
++  return ctx;
++}
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..28dd2d6
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,77 @@
++export interface QuizQuestion {
++  id: number;
++  text: string;
++  option_a: string;
++  option_b: string;
++  option_c: string;
++  option_d: string;
++}
++
++export interface ReviewAnswer extends QuizQuestion {
++  correct_option: "A" | "B" | "C" | "D";
++  selected: "A" | "B" | "C" | "D";
++  is_correct: boolean;
++}
++
++export interface Attempt {
++  id: number | null;
++  score: number;
++  correct: number;
++  total_questions: number;
++  submitted_at: string;
++  answers: ReviewAnswer[];
++}
++
++export interface Question extends QuizQuestion {
++  correct_option: "A" | "B" | "C" | "D";
++}
++
++export interface Auth {
++  username: string;
++  token: string;
++}
++
++export class ApiError extends Error {
++  status: number;
++  fields: Record<string, string> | undefined;
++
++  constructor(status: number, message: string, fields?: Record<string, string>) {
++    super(message);
++    this.status = status;
++    this.fields = fields;
++  }
++}
++
++async function request<T>(path: string, options: RequestInit = {}, token?: string | null): Promise<T> {
++  const headers: Record<string, string> = { "Content-Type": "application/json" };
++  if (token) headers["Authorization"] = `Bearer ${token}`;
++  const res = await fetch(path, { ...options, headers });
++  let body: unknown = null;
++  try {
++    body = await res.json();
++  } catch {
++    /* empty response */
++  }
++  if (!res.ok) {
++    const err = (body ?? {}) as { error?: string; fields?: Record<string, string> };
++    throw new ApiError(res.status, err.error ?? `Request failed (${res.status})`, err.fields);
++  }
++  return body as T;
++}
++
++export const api = {
++  register: (username: string, password: string) =>
++    request<{ token: string }>("/api/auth/register", { method: "POST", body: JSON.stringify({ username, password }) }),
++  login: (username: string, password: string) =>
++    request<{ token: string }>("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
++  drawQuiz: (count: number) => request<{ items: QuizQuestion[] }>(`/api/quiz?count=${count}`),
++  submitAttempt: (answers: { question_id: number; selected: string }[], token: string | null) =>
++    request<Attempt>("/api/attempts", { method: "POST", body: JSON.stringify({ answers }) }, token),
++  listAttempts: (token: string) => request<{ items: Attempt[] }>("/api/attempts", {}, token),
++  getAttempt: (id: number, token: string) => request<Attempt>(`/api/attempts/${id}`, {}, token),
++  addQuestion: (q: Record<string, string>, token: string) =>
++    request<Question>("/api/admin/questions", { method: "POST", body: JSON.stringify(q) }, token),
++  listQuestions: (token: string, page: number, pageSize: number) =>
++    request<{ items: Question[]; total: number; page: number; page_size: number }>(
++      `/api/admin/questions?page=${page}&page_size=${pageSize}`, {}, token),
++};
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..775ad4a 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
+ import react from "@vitejs/plugin-react";
++import tailwindcss from "@tailwindcss/vite";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });
+diff --git a/scripts/api_test.py b/scripts/api_test.py
+new file mode 100644
+index 0000000..18201b7
+--- /dev/null
++++ b/scripts/api_test.py
+@@ -0,0 +1,186 @@
++"""End-to-end API checks run against the dev server (stdlib only)."""
++
++import json
++import sys
++import urllib.request
++import urllib.error
++
++BASE = "http://localhost:8000"
++fails = []
++
++
++def call(method, path, body=None, token=None):
++    req = urllib.request.Request(BASE + path, method=method)
++    req.add_header("Content-Type", "application/json")
++    if token:
++        req.add_header("Authorization", f"Bearer {token}")
++    data = json.dumps(body).encode() if body is not None else None
++    try:
++        with urllib.request.urlopen(req, data, timeout=10) as resp:
++            return resp.status, json.loads(resp.read())
++    except urllib.error.HTTPError as e:
++        try:
++            return e.code, json.loads(e.read())
++        except Exception:
++            return e.code, {}
++
++
++def check(name, cond, extra=""):
++    if cond:
++        print(f"PASS {name}")
++    else:
++        print(f"FAIL {name} {extra}")
++        fails.append(name)
++
++
++# health
++s, b = call("GET", "/api/health")
++check("health", s == 200 and b == {"status": "ok"})
++
++# quiz draw anonymous
++s, b = call("GET", "/api/quiz?count=5")
++check("quiz 200", s == 200, str(b))
++items = b.get("items", [])
++check("quiz count", len(items) == 5)
++check("quiz fields", all(set(i) == {"id", "text", "option_a", "option_b", "option_c", "option_d"} for i in items), str(items[:1]))
++check("quiz no correct", all("correct_option" not in i for i in items))
++
++s, b = call("GET", "/api/quiz")
++check("quiz default count", s == 200 and len(b.get("items", [])) == 5)
++
++s, b = call("GET", "/api/quiz?count=abc")
++check("quiz bad count 400", s == 400, str(b))
++
++# register
++import secrets as _sec
++u1 = f"user1_{_sec.token_hex(4)}"
++u2 = f"user2_{_sec.token_hex(4)}"
++s, b = call("POST", "/api/auth/register", {"username": u1, "password": "pass123"})
++check("register 201", s == 201, str(b))
++token1 = b.get("token", "")
++check("register token", bool(token1))
++
++s, b = call("POST", "/api/auth/register", {"username": u1, "password": "pass123"})
++check("register dup 409", s in (400, 409), str(b))
++
++s, b = call("POST", "/api/auth/register", {"username": "ab", "password": "1"})
++check("register invalid 400", s == 400, str(b))
++
++s, b = call("POST", "/api/auth/login", {"username": u1, "password": "wrong"})
++check("login wrong pw 401", s == 401)
++
++s, b = call("POST", "/api/auth/login", {"username": u1, "password": "pass123"})
++check("login 200", s == 200 and "token" in b, str(b))
++token1 = b["token"]
++
++# admin login
++s, b = call("POST", "/api/auth/login", {"username": "admin", "password": "secretadmin"})
++check("admin login", s == 200 and "token" in b, str(b))
++admin_token = b.get("token", "")
++
++s, b = call("POST", "/api/auth/login", {"username": "admin", "password": "nope"})
++check("admin wrong pw", s == 401)
++
++# attempts require auth
++s, b = call("GET", "/api/attempts")
++check("attempts list 401 anon", s == 401)
++s, b = call("GET", "/api/attempts", token="garbage")
++check("attempts list 401 bad token", s == 401)
++
++# submit anonymous -> no id saved
++s, b = call("POST", "/api/attempts", {"answers": [{"question_id": i["id"], "selected": "A"} for i in items]})
++check("submit anon 201", s in (200, 201), str(b)[:200])
++check("anon attempt id null", b.get("id") is None, str(b)[:120])
++check("attempt fields", {"score", "correct", "total_questions", "submitted_at", "answers"} <= set(b), str(b)[:200])
++check("review has correct+is_correct", all({"correct_option", "is_correct", "selected"} <= set(a) for a in b.get("answers", [])))
++check("review text/options", all({"text", "option_a"} <= set(a) for a in b.get("answers", [])))
++
++# submit as user -> saved
++s, b = call("POST", "/api/attempts", {"answers": [{"question_id": items[0]["id"], "selected": "A"}, {"question_id": items[1]["id"], "selected": "B"}]}, token=token1)
++check("submit user", s in (200, 201), str(b)[:120])
++aid = b.get("id")
++check("saved attempt has id", isinstance(aid, int))
++check("score computed 0-100", 0 <= b.get("score", -1) <= 100, str(b.get("score")))
++
++s, b = call("POST", "/api/attempts", {"answers": [{"question_id": 999999, "selected": "A"}]}, token=token1)
++check("submit invalid qid 400", s == 400, str(b))
++s, b = call("POST", "/api/attempts", {"answers": [{"question_id": items[0]["id"], "selected": "Z"}]}, token=token1)
++check("submit invalid option 400", s == 400, str(b))
++s, b = call("POST", "/api/attempts", {"answers": []}, token=token1)
++check("submit empty 400", s == 400, str(b))
++
++# list attempts
++s, b = call("GET", "/api/attempts", token=token1)
++check("list attempts", s == 200 and len(b.get("items", [])) >= 1, str(b)[:120])
++lst = b.get("items", [])
++check("newest first", all(lst[i]["id"] >= lst[i + 1]["id"] for i in range(len(lst) - 1)))
++check("list item shape", all({"id", "score", "correct", "total_questions", "submitted_at", "answers"} <= set(it) for it in lst))
++
++# second user cannot see first user's attempt
++call("POST", "/api/auth/register", {"username": u2, "password": "pass123"})
++s, b = call("POST", "/api/auth/login", {"username": u2, "password": "pass123"})
++token2 = b["token"]
++s, b = call("GET", "/api/attempts", token=token2)
++check("user2 isolated list", s == 200 and all(it["id"] != aid for it in b.get("items", [])))
++s, b = call("GET", f"/api/attempts/{aid}", token=token2)
++check("user2 other attempt 404", s == 404, str(b))
++
++s, b = call("GET", f"/api/attempts/{aid}", token=token1)
++check("own attempt 200", s == 200 and b.get("id") == aid and "answers" in b, str(b)[:120])
++s, b = call("GET", "/api/attempts/12345678", token=token1)
++check("missing attempt 404", s == 404)
++s, b = call("GET", f"/api/attempts/{aid}")
++check("anon attempt view 401", s == 401)
++
++# admin endpoints
++s, b = call("GET", "/api/admin/questions")
++check("admin list 401 anon", s == 401)
++s, b = call("GET", "/api/admin/questions", token=token1)
++check("admin list 403 user", s == 403)
++
++s, b = call("POST", "/api/admin/questions", {
++    "text": "What is 2 + 2?", "option_a": "3", "option_b": "4", "option_c": "5", "option_d": "6", "correct_option": "B",
++}, token=admin_token)
++check("admin add 201", s == 201, str(b))
++check("admin add shape", b.get("correct_option") == "B" and "id" in b, str(b))
++new_qid = b.get("id")
++
++s, b = call("POST", "/api/admin/questions", {"text": "", "option_a": "x", "correct_option": "Z"}, token=admin_token)
++check("admin add invalid 400", s == 400, str(b))
++fields = b.get("fields", {})
++check("admin validation messages", "text" in fields and "option_b" in fields and "correct_option" in fields, str(b))
++
++s, b = call("POST", "/api/admin/questions", {
++    "text": "dup q", "option_a": "a", "option_b": "b", "option_c": "c", "option_d": "d", "correct_option": "A",
++}, token=token1)
++check("admin add 403 user", s == 403)
++
++s, b = call("GET", "/api/admin/questions?page=1&page_size=5", token=admin_token)
++check("admin paging", s == 200 and len(b.get("items", [])) == 5 and b.get("total", 0) >= 23 and b.get("page") == 1 and b.get("page_size") == 5, str(b)[:150])
++check("admin items include correct", all("correct_option" in it for it in b.get("items", [])))
++s, b2 = call("GET", "/api/admin/questions?page=2&page_size=5", token=admin_token)
++check("admin page 2 differs", s == 200 and b2["items"][0]["id"] != b["items"][0]["id"])
++
++# new question appears in quiz draws
++found = False
++for _ in range(30):
++    s, b = call("GET", f"/api/quiz?count={min(20, len(items)+0)}")
++    pass
++s, b = call("GET", "/api/quiz?count=20", token=None)
++check("quiz count 20 capped", s == 200 and len(b.get("items", [])) == 20, str(b)[:80])
++all_ids = {q["id"] for q in call("GET", "/api/admin/questions?page_size=100", token=admin_token)[1]["items"]}
++drawn_ids = {i["id"] for _ in range(20) for i in call("GET", "/api/quiz?count=20")[1]["items"]}
++check("quiz only active ids", drawn_ids <= all_ids)
++
++# seed count
++check("seed >= 20 questions", len(all_ids) >= 20, str(len(all_ids)))
++
++# registered admin username reserved
++s, b = call("POST", "/api/auth/register", {"username": "admin", "password": "whatever1"})
++check("register admin reserved", s in (400, 409), str(b))
++
++print()
++if fails:
++    print(f"{len(fails)} FAILURES: {fails}")
++    sys.exit(1)
++print("ALL API TESTS PASSED")
+diff --git a/scripts/dev-start.sh b/scripts/dev-start.sh
+new file mode 100755
+index 0000000..9d76ac1
+--- /dev/null
++++ b/scripts/dev-start.sh
+@@ -0,0 +1,8 @@
++#!/bin/bash
++cd /workspace
++if [ -f /workspace/data/dev-server.pid ]; then
++  kill "$(cat /workspace/data/dev-server.pid)" 2>/dev/null
++  sleep 0.4
++fi
++ADMIN_PASSWORD=secretadmin nohup /workspace/.venv/bin/python backend/app.py > /workspace/data/dev-server.log 2>&1 &
++echo $! > /workspace/data/dev-server.pid

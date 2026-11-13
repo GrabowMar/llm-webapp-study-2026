@@ -1,0 +1,832 @@
+{
+ "adherence": {
+  "checker_version": 1,
+  "detected": {
+   "auth": {
+    "confidence": "medium",
+    "evidence": [
+     "runtime:login:bearer",
+     "runtime:tester"
+    ],
+    "value": "bearer"
+   },
+   "backend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:backend/requirements.txt:flask",
+     "import:backend/app.py:flask"
+    ],
+    "value": "flask"
+   },
+   "database": {
+    "confidence": "medium",
+    "evidence": [
+     "import:backend/app.py:sqlite3"
+    ],
+    "value": "sqlite"
+   },
+   "frontend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:frontend/package.json:react",
+     "import:frontend/src/App.tsx:react",
+     "import:frontend/src/components/AuthPanel.tsx:react",
+     "import:frontend/src/components/ReportForm.tsx:react",
+     "import:frontend/src/components/ReportsPanel.tsx:react",
+     "import:frontend/src/components/SearchPanel.tsx:react"
+    ],
+    "value": "react"
+   },
+   "styling": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:tailwindcss",
+     "classes:share=1.00"
+    ],
+    "value": "tailwind"
+   }
+  },
+  "deviations": [],
+  "hallucinated": [],
+  "packages": [
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "flask",
+    "pinned": true,
+    "version": "3.1.3"
+   },
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "gunicorn",
+    "pinned": true,
+    "version": "26.2.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react-dom",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@tailwindcss/vite",
+    "pinned": true,
+    "version": "4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@types/react",
+    "pinned": true,
+    "version": "19.3.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@types/react-dom",
+    "pinned": true,
+    "version": "19.3.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@vitejs/plugin-react",
+    "pinned": true,
+    "version": "6.2.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "tailwindcss",
+    "pinned": true,
+    "version": "4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "typescript",
+    "pinned": true,
+    "version": "7.0.2"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "vite",
+    "pinned": true,
+    "version": "8.3.5"
+   }
+  ],
+  "sbom_blob": "7c21a736018e906a3226b7cdde6f8f1d9c257d82ce46d2008667fbcea973ef3d",
+  "status": "compliant",
+  "style_metrics": {
+   "component_library_imports": {},
+   "css_files": 1,
+   "css_modules": 0,
+   "tailwind_class_share": 0.9955
+  },
+  "unpinned": []
+ },
+ "created_at": "2026-11-11T16:33:45.421836+00:00",
+ "eval_level": "security",
+ "eval_suite": "eval-v2@2",
+ "id": 1013,
+ "mode": "full",
+ "result": {
+  "auth_mode": "contract_bearer",
+  "checks": [
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "health",
+    "ms": 11,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "index_served",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "spa_fallback",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.register",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "auth.register.ok",
+    "ms": 118,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.login",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "auth.login.ok",
+    "ms": 112,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "weather.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "weather.list.ok",
+    "ms": 2,
+    "note": "$.items[0].condition: 'Overcast' not in enum; $.items[1].condition: 'Cloudy' not in enum; $.items[2].condition: 'Windy' not in enum; $.items[3].condition: 'Sunny' not in enum; $.items[4].condition: 'Sunny' not in enum",
+    "observed": {
+     "body": "{\"items\":[{\"city\":\"Berlin\",\"condition\":\"Overcast\",\"country\":\"Germany\",\"humidity\":70,\"id\":6,\"observed_at\":\"2026-11-11T16:35:24+00:00\",\"temperature_c\":11.2,\"wind_kph\":13.4},{\"city\":\"London\",\"condition\":\"Cloudy\",\"country\":\"United Kingdom\",\"humidity\":78,\"id\":1,\"observed_at\":\"2026-11-11T16:35:24+00:00\",\"",
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "functional",
+    "endpoint": "weather.create",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "weather.create.ok",
+    "ms": 3,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "weather.create",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "weather.create.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "negative",
+    "endpoint": "weather.create",
+    "expected": {
+     "status": [
+      409
+     ]
+    },
+    "id": "weather.create.duplicate",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 409
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "weather.get",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "weather.get.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "weather.replace",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "weather.replace.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "weather.replace",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "weather.replace.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "weather.delete",
+    "expected": {
+     "status": [
+      204
+     ]
+    },
+    "id": "weather.delete.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 204
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "weather.delete",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "weather.delete.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "weather.recent",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "weather.recent.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "weather.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "weather.create.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "weather.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "weather.create.invalid.too_long",
+    "ms": 2,
+    "note": "city: status 201 | country: status 201",
+    "observed": {
+     "body": "{\"city\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy1c4a8f72\",\"condition\":\"sunny\",\"country\":\"llmlab country\",\"humidity\":1,\"id\":14,\"observed_at\":\"2026-11-11T16:35:27+00:00\",\"temperature_c\":1.0,\"wind_kph\":1.0}\n",
+     "requests": [
+      {
+       "label": "city",
+       "ok": false,
+       "status": 201
+      },
+      {
+       "label": "country",
+       "ok": false,
+       "status": 201
+      }
+     ],
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "weather.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "weather.create.invalid.enum",
+    "ms": 2,
+    "note": "status 201",
+    "observed": {
+     "body": "{\"city\":\"llmlab city fe97a34f\",\"condition\":\"notlisted\",\"country\":\"llmlab country\",\"humidity\":1,\"id\":16,\"observed_at\":\"2026-11-11T16:35:27+00:00\",\"temperature_c\":1.0,\"wind_kph\":1.0}\n",
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "weather.replace",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "weather.replace.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "weather.replace",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "weather.replace.invalid.too_long",
+    "ms": 2,
+    "note": "city: status 200 | country: status 200",
+    "observed": {
+     "body": "{\"city\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyb9ba6f11\",\"condition\":\"sunny\",\"country\":\"llmlab country\",\"humidity\":1,\"id\":18,\"observed_at\":\"2026-11-11T16:35:27+00:00\",\"temperature_c\":1.0,\"wind_kph\":1.0}\n",
+     "requests": [
+      {
+       "label": "city",
+       "ok": false,
+       "status": 200
+      },
+      {
+       "label": "country",
+       "ok": false,
+       "status": 200
+      }
+     ],
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "weather.replace",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "weather.replace.invalid.enum",
+    "ms": 2,
+    "note": "status 200",
+    "observed": {
+     "body": "{\"city\":\"llmlab city 29b8f470\",\"condition\":\"notlisted\",\"country\":\"llmlab country\",\"humidity\":1,\"id\":19,\"observed_at\":\"2026-11-11T16:35:27+00:00\",\"temperature_c\":1.0,\"wind_kph\":1.0}\n",
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   }
+  ],
+  "compiler_version": 2,
+  "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+  "flaky_checks": [],
+  "measured": true,
+  "metrics": {
+   "agent_checks": 18,
+   "agent_pass_rate": 0.7222222222222222,
+   "agent_passed": 13,
+   "baseline_pass_rate": 0.0,
+   "by_category": {
+    "auth": {
+     "n": 3,
+     "passed": 3
+    },
+    "functional": {
+     "n": 8,
+     "passed": 7
+    },
+    "negative": {
+     "n": 1,
+     "passed": 1
+    },
+    "validation": {
+     "n": 6,
+     "passed": 2
+    }
+   },
+   "common_pass_rate": null,
+   "infra_ok": true,
+   "over_baseline": 0.7222222222222222,
+   "probes_exploited": 0,
+   "probes_skipped": 0,
+   "probes_tested": 1,
+   "regression_pass_rate": null,
+   "sec_pass": false,
+   "slot_pass_rate": null,
+   "stated_pass_rate": 1.0,
+   "unstated_pass_rate": 0.6666666666666666
+  },
+  "not_measured_reason": null,
+  "plan_sha256": "22fe86db28ddab6bd279d9cb18486de73f81bb1e3911de83f9bfa69b7be89d13",
+  "probes": [
+   {
+    "cwe": "cwe-89",
+    "endpoint": "weather.list",
+    "evidence": "tautology payloads returned no extra rows",
+    "id": "probe.weather.sqli",
+    "kind": "sqli_boolean",
+    "skip_reason": null,
+    "status": "not_exploited"
+   }
+  ],
+  "skipped": [],
+  "tester_version": 2
+ },
+ "stages": {
+  "adherence": {
+   "detail": {
+    "record_status": "compliant",
+    "runtime": true
+   },
+   "seconds": 1.655,
+   "status": "ok"
+  },
+  "build": {
+   "detail": {
+    "attempts": [
+     {
+      "attempt": 1,
+      "infra_suspected": false,
+      "ok": true
+     }
+    ],
+    "base_images": {
+     "pkg:docker/node@24-slim?digest=sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c&platform=linux%2Famd64": "sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c",
+     "pkg:docker/python@3.13-slim?digest=sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1&platform=linux%2Famd64": "sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1"
+    },
+    "build_context": {
+     "locks": [
+      {
+       "ecosystem": "pypi",
+       "lock": "backend/requirements.lock",
+       "manifest": "backend/requirements.txt",
+       "reason": null,
+       "source": "tree",
+       "status": "complete"
+      },
+      {
+       "ecosystem": "npm",
+       "lock": "frontend/package-lock.json",
+       "manifest": "frontend/package.json",
+       "reason": null,
+       "source": "tree",
+       "status": "complete"
+      }
+     ],
+     "notes": [
+      "tree: 24 files written verbatim"
+     ]
+    },
+    "build_key": "250b2d5b5cb7df8f62e7e6a2b368690218b58d44f8809a2321fe1fdba6deb1b3",
+    "cache_hit": false,
+    "cpu_seconds": 3.045,
+    "image_bytes": 186811730,
+    "image_id": "sha256:59892dd7614dfc85caa18fc64ffc72e6f901e9409269339fe828ad4735482558",
+    "image_tag": "llmlab/sample:250b2d5b5cb7df8f62e7e6a2-554cd937b2d5",
+    "peak_memory_bytes": 261115904,
+    "prepare_seconds": 0.048,
+    "queue_seconds": 0.029,
+    "seconds": 4.774
+   },
+   "seconds": 5.23,
+   "status": "ok"
+  },
+  "lock": {
+   "detail": {
+    "files": [],
+    "packages": {
+     "npm": 100,
+     "pip": 8
+    },
+    "resolved_at": "2026-11-10T12:00:28.351493+00:00",
+    "source": "model"
+   },
+   "seconds": 0.003,
+   "status": "ok"
+  },
+  "probes": {
+   "detail": {
+    "n": 1,
+    "tested": 1
+   },
+   "status": "ok"
+  },
+  "start": {
+   "detail": {
+    "credentials_ref": "a63535d055b1c411e0dd3d21b722763dc9d43fd9753efd1b37af842c5256d109"
+   },
+   "seconds": 2.277,
+   "status": "ok"
+  },
+  "tester": {
+   "detail": {
+    "attempts": 1,
+    "checks_adjusted": 0,
+    "checks_skipped": 0,
+    "compiler_version": 2,
+    "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+    "image_override": false,
+    "only_checks": null,
+    "overlay": false,
+    "plan_sha256": "22fe86db28ddab6bd279d9cb18486de73f81bb1e3911de83f9bfa69b7be89d13",
+    "probe_rules_version": 2,
+    "probes": null,
+    "tester_rules_version": 3,
+    "tester_version": 2,
+    "upstream": false
+   },
+   "seconds": 3.022,
+   "status": "ok"
+  }
+ },
+ "status": "measured"
+}

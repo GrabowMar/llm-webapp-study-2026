@@ -1,0 +1,780 @@
+{
+  "category": "iot",
+  "features": [
+    "auth",
+    "ownership",
+    "realtime"
+  ],
+  "pinned_ref": "iot_sensor_display@1#87cbe005e610",
+  "prose": "Build a sensor dashboard with a JSON API under `/api` and a web frontend. Signed-in users register sensors and post readings to their own sensors; anyone can watch the latest values and the recent history.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/sensors` lists sensors sorted by name, each with `owner`, `last_value` and `last_updated`.\n- `POST /api/sensors` registers a sensor owned by the signed-in user.\n- `GET /api/sensors/{id}` returns one sensor.\n- `DELETE /api/sensors/{id}` deletes one of the user's sensors and its readings.\n- `GET /api/sensors/{id}/readings` lists a sensor's readings, newest first, with `total`, the number of all its readings (query parameters: `limit`).\n- `POST /api/sensors/{id}/readings` records a reading for one of the user's sensors and makes it the sensor's latest value.\n\nData:\n\n- A sensor is returned as an object with `id`, `name`, `unit`, `location`, `last_value`, `last_updated`, `owner`.\n- A reading is returned as an object with `id`, `sensor_id`, `value`, `recorded_at`.\n- `GET /api/sensors` returns `{\"items\": [...]}`; each item in `items` is a sensor.\n- `GET /api/sensors/{id}/readings` returns `{\"items\": [...], \"total\": n}`; each item in `items` is a reading.\n\nRules:\n\n- Only the user who registered a sensor may post readings to it or delete it.\n- A new sensor has `last_value` and `last_updated` `null` until its first reading.\n- `recorded_at` is set by the server.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- A card per sensor with its latest value, unit, location and how long ago it was updated; the page refreshes every 10 seconds.\n- A sensor page with a line chart of its recent readings and the readings as a table.\n- For signed-in users: a form to register a sensor, a form to post a reading to their own sensors and delete with confirmation.",
+  "ref": "iot_sensor_display@1",
+  "slug": "iot_sensor_display",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "sensors.get",
+        "expect": {
+          "header_contains": null,
+          "json_contains": {
+            "last_value": 21.5
+          },
+          "json_schema": null,
+          "max_ms": null,
+          "status": 200
+        },
+        "id": "readings.updates_last_value",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": null,
+          "method": "GET",
+          "path": "/api/sensors/{sid}",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [
+          {
+            "actor": null,
+            "capture": {
+              "sid": "$.id"
+            },
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "name": "Lab",
+                "unit": "C"
+              },
+              "method": "POST",
+              "path": "/api/sensors",
+              "query": {}
+            }
+          },
+          {
+            "actor": null,
+            "capture": {},
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "value": 21.5
+              },
+              "method": "POST",
+              "path": "/api/sensors/{sid}/readings",
+              "query": {}
+            }
+          }
+        ],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "iot",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [],
+        "id": "sensors.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/sensors",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "last_updated": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "last_value": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "location": {
+                    "maxLength": 100,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "name": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "owner": {
+                    "type": "string"
+                  },
+                  "unit": {
+                    "maxLength": 20,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "unit",
+                  "owner"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "sensors.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/sensors",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "location": {
+              "maxLength": 100,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "unit": {
+              "maxLength": 20,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "unit"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "last_updated": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_value": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "location": {
+              "maxLength": 100,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "owner": {
+              "type": "string"
+            },
+            "unit": {
+              "maxLength": 20,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "unit",
+            "owner"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "sensors.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/sensors/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "last_updated": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_value": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "location": {
+              "maxLength": 100,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "owner": {
+              "type": "string"
+            },
+            "unit": {
+              "maxLength": 20,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "unit",
+            "owner"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          403,
+          404
+        ],
+        "id": "sensors.delete",
+        "method": "DELETE",
+        "owner_entity": "Sensor",
+        "path": "/api/sensors/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "readings.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/sensors/{id}/readings",
+        "query": [
+          {
+            "default": 50,
+            "enum": null,
+            "max": 500.0,
+            "name": "limit",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "recorded_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "sensor_id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "value": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "value"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          400,
+          403,
+          404
+        ],
+        "id": "readings.create",
+        "method": "POST",
+        "owner_entity": "Sensor",
+        "path": "/api/sensors/{id}/readings",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "value": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "recorded_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sensor_id": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "value": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "id",
+            "value"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 100,
+            "min": null,
+            "name": "name",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 20,
+            "min": null,
+            "name": "unit",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 100,
+            "min": null,
+            "name": "location",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "last_value",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "float",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "last_updated",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Sensor",
+        "owned_by_user": true,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "sensor_id",
+            "ref": "Sensor",
+            "required": false,
+            "secret": false,
+            "type": "ref",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "value",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "float",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "recorded_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Reading",
+        "owned_by_user": false,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "ownership",
+      "realtime"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-639",
+        "endpoint": "readings.create",
+        "id": "probe.sensors.idor",
+        "kind": "idor_enumeration",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-79",
+        "endpoint": "sensors.create",
+        "id": "probe.sensors.xss",
+        "kind": "xss_stored",
+        "params": {
+          "field": "name",
+          "view_endpoint": "sensors.list"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Register sensors, record their readings and watch the latest values and recent history.",
+    "surfaces": [
+      "cwe-639",
+      "cwe-862",
+      "cwe-20",
+      "cwe-400",
+      "cwe-770",
+      "cwe-79"
+    ],
+    "title": "Sensor dashboard",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "sensors.list"
+        ],
+        "id": "ui.cards",
+        "text": "A card per sensor with its latest value, unit, location and how long ago it was updated; the page refreshes every 10 seconds."
+      },
+      {
+        "endpoints": [
+          "sensors.get",
+          "readings.list"
+        ],
+        "id": "ui.detail",
+        "text": "A sensor page with a line chart of its recent readings and the readings as a table."
+      },
+      {
+        "endpoints": [
+          "sensors.create",
+          "readings.create",
+          "sensors.delete"
+        ],
+        "id": "ui.manage",
+        "text": "For signed-in users: a form to register a sensor, a form to post a reading to their own sensors and delete with confirmation."
+      }
+    ]
+  },
+  "structured_hash": "03abd9dfb8c49b6a4f2bd4cb810b33cbeae47a52ac0614d07777dc7937b0687a",
+  "summary": "Register sensors, record their readings and watch the latest values and recent history.",
+  "surfaces": [
+    "cwe-639",
+    "cwe-862",
+    "cwe-20",
+    "cwe-400",
+    "cwe-770",
+    "cwe-79"
+  ],
+  "task_hash": "96ca93b6dfef48b15cfef5ed9d44673181cff9cdb5708c90b52d983e3223e6e6",
+  "title": "Sensor dashboard",
+  "variant": "standard",
+  "version": 1
+}

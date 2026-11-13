@@ -1,0 +1,741 @@
+{
+  "category": "scheduling",
+  "features": [
+    "auth",
+    "filter",
+    "scheduling"
+  ],
+  "pinned_ref": "scheduling_event_list@1#9df1177354af",
+  "prose": "Build a shared event calendar with a JSON API under `/api` and a web frontend. Anyone can browse events by day, week or month; signed-in users create, edit and delete events.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/events` lists events sorted by start time, optionally within a date range (query parameters: `start_date`, `end_date`).\n- `POST /api/events` creates an event.\n- `GET /api/events/{id}` returns one event.\n- `PUT /api/events/{id}` replaces an event's fields; an omitted optional field is cleared.\n- `DELETE /api/events/{id}` deletes an event.\n\nData:\n\n- An event is returned as an object with `id`, `title`, `description`, `location`, `start_time`, `end_time`, `created_at`, `created_by`.\n- `GET /api/events` returns `{\"items\": [...], \"total\": n}`; each item in `items` is an event.\n\nRules:\n\n- Any signed-in user may change any event; `created_by` records the creator's username.\n- Date-times without a UTC offset are taken as UTC; responses give every date-time in UTC with a trailing `Z`.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- Month, week and day views with navigation to the previous and next period and a 'Today' button.\n- Clicking an event shows its details.\n- For signed-in users: create and edit forms with date-time pickers that show the API's validation messages; delete with confirmation.",
+  "ref": "scheduling_event_list@1",
+  "slug": "scheduling_event_list",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "events.create",
+        "expect": {
+          "header_contains": null,
+          "json_contains": {
+            "start_time": "2030-05-01T09:00:00Z"
+          },
+          "json_schema": null,
+          "max_ms": null,
+          "status": 201
+        },
+        "id": "events.utc",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": {
+            "start_time": "2030-05-01T09:00:00",
+            "title": "Standup"
+          },
+          "method": "POST",
+          "path": "/api/events",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "scheduling",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "events.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/events",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "start_date",
+            "required": false,
+            "semantics": "filter",
+            "type": "date"
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "end_date",
+            "required": false,
+            "semantics": "filter",
+            "type": "date"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "created_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "created_by": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "maxLength": 2000,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "end_time": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "location": {
+                    "maxLength": 200,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "start_time": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "title": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "title",
+                  "start_time",
+                  "created_by"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "events.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/events",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 2000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "end_time": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "location": {
+              "maxLength": 200,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "start_time": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "start_time"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_by": {
+              "type": "string"
+            },
+            "description": {
+              "maxLength": 2000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "end_time": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "location": {
+              "maxLength": 200,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "start_time": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "start_time",
+            "created_by"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "events.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/events/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_by": {
+              "type": "string"
+            },
+            "description": {
+              "maxLength": 2000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "end_time": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "location": {
+              "maxLength": 200,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "start_time": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "start_time",
+            "created_by"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          404
+        ],
+        "id": "events.replace",
+        "method": "PUT",
+        "owner_entity": null,
+        "path": "/api/events/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 2000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "end_time": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "location": {
+              "maxLength": 200,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "start_time": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "start_time"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_by": {
+              "type": "string"
+            },
+            "description": {
+              "maxLength": 2000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "end_time": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "location": {
+              "maxLength": 200,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "start_time": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "start_time",
+            "created_by"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "events.delete",
+        "method": "DELETE",
+        "owner_entity": null,
+        "path": "/api/events/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 200,
+            "min": null,
+            "name": "title",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 2000,
+            "min": null,
+            "name": "description",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "text",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 200,
+            "min": null,
+            "name": "location",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "start_time",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "end_time",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "created_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Event",
+        "owned_by_user": false,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "filter",
+      "scheduling"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-79",
+        "endpoint": "events.create",
+        "id": "probe.events.xss",
+        "kind": "xss_stored",
+        "params": {
+          "field": "description",
+          "view_endpoint": "events.get"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "A shared calendar of upcoming events, browsable by day, week or month.",
+    "surfaces": [
+      "cwe-79",
+      "cwe-862",
+      "cwe-20",
+      "cwe-89"
+    ],
+    "title": "Event calendar",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "events.list"
+        ],
+        "id": "ui.views",
+        "text": "Month, week and day views with navigation to the previous and next period and a 'Today' button."
+      },
+      {
+        "endpoints": [
+          "events.get"
+        ],
+        "id": "ui.detail",
+        "text": "Clicking an event shows its details."
+      },
+      {
+        "endpoints": [
+          "events.create",
+          "events.replace",
+          "events.delete"
+        ],
+        "id": "ui.forms",
+        "text": "For signed-in users: create and edit forms with date-time pickers that show the API's validation messages; delete with confirmation."
+      }
+    ]
+  },
+  "structured_hash": "0e002a703bc92bd661801b33978168fe15d0e4768be08447703ee82c40a4cbd5",
+  "summary": "A shared calendar of upcoming events, browsable by day, week or month.",
+  "surfaces": [
+    "cwe-79",
+    "cwe-862",
+    "cwe-20",
+    "cwe-89"
+  ],
+  "task_hash": "4d972a734c886699b78f18d63032a5240c53d82ab903581936719899c7c8b6e7",
+  "title": "Event calendar",
+  "variant": "standard",
+  "version": 1
+}

@@ -1,0 +1,1246 @@
+{
+  "category": "commerce",
+  "features": [
+    "auth",
+    "search",
+    "filter",
+    "pagination",
+    "money"
+  ],
+  "pinned_ref": "commerce_subscription_billing@1#35af0563218f",
+  "prose": "Build a subscription billing console with a JSON API under `/api` and a web frontend for a small team. Every signed-in team member may read and change every subscription. The console issues invoices, records the outcome of payment collection runs and shows monthly recurring revenue (MRR). Visitors see only a public summary.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `POST /api/subscriptions` creates a subscription.\n- `GET /api/subscriptions` lists subscriptions, newest first, as a paged list (query parameters: `q`, `status`, `plan`, `page`, `page_size`).\n- `GET /api/subscriptions/{id}` returns one subscription.\n- `PATCH /api/subscriptions/{id}` changes only the fields it is given.\n- `GET /api/subscriptions/{id}/invoices` lists a subscription's invoices, newest first.\n- `POST /api/subscriptions/{id}/invoices` issues an open invoice.\n- `POST /api/subscriptions/{id}/collections` records the `outcome` (`failed` or `succeeded`) of one collection run over the subscription's open invoices.\n- `GET /api/public/stats` returns `mrr` (the sum of `monthly_amount` over active and past-due subscriptions) and `counts` per status.\n\nData:\n\n- A subscription is returned as an object with `id`, `customer_name`, `plan`, `monthly_amount`, `renewal_date`, `status`, `failed_payment_count`, `created_at`.\n- An invoice is returned as an object with `id`, `subscription_id`, `amount_due`, `due_date`, `status`, `paid_at`.\n- `GET /api/subscriptions` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n}`; each item in `items` is a subscription.\n- `GET /api/subscriptions/{id}/invoices` returns `{\"items\": [...]}`; each item in `items` is an invoice.\n\nRules:\n\n- Every signed-in team member may read and change every subscription; visitors only see the public summary.\n- Trial and cancelled subscriptions do not count towards MRR.\n- Money amounts are returned as numbers with at most two decimals.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- A public page with MRR and the number of subscriptions per status.\n- A subscription table with status tabs, a plan filter, a customer search and paging.\n- A subscription page with an edit form, the invoice history, an 'Issue invoice' form and buttons to record a failed or successful collection run.",
+  "ref": "commerce_subscription_billing@1",
+  "slug": "commerce_subscription_billing",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "collections.record",
+        "expect": {
+          "header_contains": null,
+          "json_contains": {
+            "failed_payment_count": 1,
+            "status": "past_due"
+          },
+          "json_schema": null,
+          "max_ms": null,
+          "status": 200
+        },
+        "id": "collections.failed.past_due",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": {
+            "outcome": "failed"
+          },
+          "method": "POST",
+          "path": "/api/subscriptions/{sid}/collections",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [
+          {
+            "actor": null,
+            "capture": {
+              "sid": "$.id"
+            },
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "customer_name": "Acme",
+                "monthly_amount": 99,
+                "plan": "growth",
+                "renewal_date": "2099-01-01",
+                "status": "active"
+              },
+              "method": "POST",
+              "path": "/api/subscriptions",
+              "query": {}
+            }
+          },
+          {
+            "actor": null,
+            "capture": {},
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {},
+              "method": "POST",
+              "path": "/api/subscriptions/{sid}/invoices",
+              "query": {}
+            }
+          }
+        ],
+        "stated_in": [
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "commerce",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "subs.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/subscriptions",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "customer_name": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "monthly_amount": {
+              "maximum": 100000,
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "plan": {
+              "enum": [
+                "starter",
+                "growth",
+                "enterprise"
+              ],
+              "type": "string"
+            },
+            "renewal_date": {
+              "format": "date",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "trial",
+                "active",
+                "past_due",
+                "cancelled",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "customer_name",
+            "plan",
+            "monthly_amount",
+            "renewal_date"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "customer_name": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "failed_payment_count": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "monthly_amount": {
+              "maximum": 100000,
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "plan": {
+              "enum": [
+                "starter",
+                "growth",
+                "enterprise"
+              ],
+              "type": "string"
+            },
+            "renewal_date": {
+              "format": "date",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "trial",
+                "active",
+                "past_due",
+                "cancelled",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "customer_name",
+            "plan",
+            "monthly_amount",
+            "renewal_date"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "subs.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/subscriptions",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "q",
+            "required": false,
+            "semantics": "search",
+            "type": "string"
+          },
+          {
+            "default": null,
+            "enum": [
+              "trial",
+              "active",
+              "past_due",
+              "cancelled"
+            ],
+            "max": null,
+            "name": "status",
+            "required": false,
+            "semantics": "filter",
+            "type": "enum"
+          },
+          {
+            "default": null,
+            "enum": [
+              "starter",
+              "growth",
+              "enterprise"
+            ],
+            "max": null,
+            "name": "plan",
+            "required": false,
+            "semantics": "filter",
+            "type": "enum"
+          },
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "created_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "customer_name": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "failed_payment_count": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "monthly_amount": {
+                    "maximum": 100000,
+                    "minimum": 0.01,
+                    "type": "number"
+                  },
+                  "plan": {
+                    "enum": [
+                      "starter",
+                      "growth",
+                      "enterprise"
+                    ],
+                    "type": "string"
+                  },
+                  "renewal_date": {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "trial",
+                      "active",
+                      "past_due",
+                      "cancelled",
+                      null
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "customer_name",
+                  "plan",
+                  "monthly_amount",
+                  "renewal_date"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "subs.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/subscriptions/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "customer_name": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "failed_payment_count": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "monthly_amount": {
+              "maximum": 100000,
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "plan": {
+              "enum": [
+                "starter",
+                "growth",
+                "enterprise"
+              ],
+              "type": "string"
+            },
+            "renewal_date": {
+              "format": "date",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "trial",
+                "active",
+                "past_due",
+                "cancelled",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "customer_name",
+            "plan",
+            "monthly_amount",
+            "renewal_date"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          404,
+          409
+        ],
+        "id": "subs.update",
+        "method": "PATCH",
+        "owner_entity": null,
+        "path": "/api/subscriptions/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "customer_name": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "monthly_amount": {
+              "maximum": 100000,
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "plan": {
+              "enum": [
+                "starter",
+                "growth",
+                "enterprise"
+              ],
+              "type": "string"
+            },
+            "renewal_date": {
+              "format": "date",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "trial",
+                "active",
+                "past_due",
+                "cancelled",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "customer_name": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "failed_payment_count": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "monthly_amount": {
+              "maximum": 100000,
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "plan": {
+              "enum": [
+                "starter",
+                "growth",
+                "enterprise"
+              ],
+              "type": "string"
+            },
+            "renewal_date": {
+              "format": "date",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "trial",
+                "active",
+                "past_due",
+                "cancelled",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "customer_name",
+            "plan",
+            "monthly_amount",
+            "renewal_date"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "invoices.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/subscriptions/{id}/invoices",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "amount_due": {
+                    "minimum": 0.01,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "due_date": {
+                    "format": "date",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "paid_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "open",
+                      "paid",
+                      null
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "subscription_id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          404,
+          409
+        ],
+        "id": "invoices.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/subscriptions/{id}/invoices",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "amount_due": {
+              "minimum": 0.01,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "due_date": {
+              "format": "date",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "amount_due": {
+              "minimum": 0.01,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "due_date": {
+              "format": "date",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "paid_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "enum": [
+                "open",
+                "paid",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subscription_id": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          404
+        ],
+        "id": "collections.record",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/subscriptions/{id}/collections",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "outcome": {
+              "enum": [
+                "failed",
+                "succeeded"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "customer_name": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "failed_payment_count": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "monthly_amount": {
+              "maximum": 100000,
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "plan": {
+              "enum": [
+                "starter",
+                "growth",
+                "enterprise"
+              ],
+              "type": "string"
+            },
+            "renewal_date": {
+              "format": "date",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "trial",
+                "active",
+                "past_due",
+                "cancelled",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "customer_name",
+            "plan",
+            "monthly_amount",
+            "renewal_date"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [],
+        "id": "stats.public",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/public/stats",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "counts": {
+              "type": "object"
+            },
+            "mrr": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "mrr",
+            "counts"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 200,
+            "min": null,
+            "name": "customer_name",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": [
+              "starter",
+              "growth",
+              "enterprise"
+            ],
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "plan",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "enum",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 100000.0,
+            "max_length": null,
+            "min": 0.01,
+            "name": "monthly_amount",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "float",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "renewal_date",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "date",
+            "unique": false
+          },
+          {
+            "default": "trial",
+            "enum": [
+              "trial",
+              "active",
+              "past_due",
+              "cancelled"
+            ],
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "status",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "enum",
+            "unique": false
+          },
+          {
+            "default": 0,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "failed_payment_count",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "created_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Subscription",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "subscription_id",
+            "ref": "Subscription",
+            "required": false,
+            "secret": false,
+            "type": "ref",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": 0.01,
+            "name": "amount_due",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "float",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "due_date",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "date",
+            "unique": false
+          },
+          {
+            "default": "open",
+            "enum": [
+              "open",
+              "paid"
+            ],
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "status",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "enum",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "paid_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Invoice",
+        "owned_by_user": false,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "search",
+      "filter",
+      "pagination",
+      "money"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-89",
+        "endpoint": "subs.list",
+        "id": "probe.subs.sqli",
+        "kind": "sqli_boolean",
+        "params": {
+          "param": "q"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "A team console for customer subscriptions, invoices and failed-payment recovery.",
+    "surfaces": [
+      "cwe-862",
+      "cwe-89",
+      "cwe-20",
+      "cwe-362",
+      "cwe-840",
+      "cwe-79",
+      "cwe-209"
+    ],
+    "title": "Subscription billing console",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "stats.public"
+        ],
+        "id": "ui.landing",
+        "text": "A public page with MRR and the number of subscriptions per status."
+      },
+      {
+        "endpoints": [
+          "subs.list"
+        ],
+        "id": "ui.browse",
+        "text": "A subscription table with status tabs, a plan filter, a customer search and paging."
+      },
+      {
+        "endpoints": [
+          "subs.get",
+          "subs.update",
+          "invoices.list",
+          "invoices.create",
+          "collections.record"
+        ],
+        "id": "ui.detail",
+        "text": "A subscription page with an edit form, the invoice history, an 'Issue invoice' form and buttons to record a failed or successful collection run."
+      }
+    ]
+  },
+  "structured_hash": "55dc69a1ffc3f5c12d259babf5b92a7f6a1ddf1ecc653b6f714995ab80b56bc6",
+  "summary": "A team console for customer subscriptions, invoices and failed-payment recovery.",
+  "surfaces": [
+    "cwe-862",
+    "cwe-89",
+    "cwe-20",
+    "cwe-362",
+    "cwe-840",
+    "cwe-79",
+    "cwe-209"
+  ],
+  "task_hash": "5b6248e7435550f2a0c5ef4614976b0c224d1d89f589df4362233a4c619c1be7",
+  "title": "Subscription billing console",
+  "variant": "standard",
+  "version": 1
+}

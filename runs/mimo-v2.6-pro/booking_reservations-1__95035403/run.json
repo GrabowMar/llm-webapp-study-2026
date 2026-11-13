@@ -1,0 +1,645 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 613,
+  "completed_at": "2026-11-10T15:45:09.166923+00:00",
+  "condition_id": 97,
+  "condition_label": "local-opencode-go/mimo-v2.6-pro",
+  "config_fingerprint": "9301bbaf97cce033ce6d9e47af9c07fe085d20951c0c6ee2fa476311c00ca214",
+  "cost_usd": 0.0,
+  "duration": 1486.209033,
+  "fingerprints": {
+    "config_fingerprint": "9301bbaf97cce033ce6d9e47af9c07fe085d20951c0c6ee2fa476311c00ca214",
+    "prompt_hash": "092fd4bb62fe616e27ea1c1bf7c457a35f933856964444ae9d92bdbdf0804c85",
+    "run_fingerprint": "62f74cc9c9b97040613b0007bf8bbaaa078f7a416961861115a28103b4f72596",
+    "task_hash": "e3602bdbc597053848161d2536f273c67ae1e9cbbc127886574e463d7b2e8696",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "95035403-2d60-4f0e-8757-3263008589a9",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/mimo-v2.6-pro",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-10T15:44:42.646213+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 727,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 65,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 107,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 105,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "reservations.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "reservations.create.ok",
+          "ms": 15,
+          "note": "status 400",
+          "observed": {
+            "body": "{\"error\":\"time must be a time in HH:MM format\",\"message\":\"time must be a time in HH:MM format\"}\n",
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "reservations.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "reservations.create.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "reservations.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "reservations.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "reservations.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "reservations.create.invalid.too_long",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "reservations.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "reservations.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "reservations.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "reservations.list.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "reservations.get",
+          "expected": null,
+          "id": "reservations.get.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "reservations.get",
+          "expected": null,
+          "id": "reservations.get.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "reservations.get",
+          "expected": null,
+          "id": "reservations.get.other_user",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "reservations.replace",
+          "expected": null,
+          "id": "reservations.replace.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "reservations.replace",
+          "expected": null,
+          "id": "reservations.replace.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "reservations.replace",
+          "expected": null,
+          "id": "reservations.replace.other_user",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "reservations.replace",
+          "expected": null,
+          "id": "reservations.replace.invalid.missing",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "reservations.replace",
+          "expected": null,
+          "id": "reservations.replace.invalid.too_long",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "reservations.cancel",
+          "expected": null,
+          "id": "reservations.cancel.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "reservations.cancel",
+          "expected": null,
+          "id": "reservations.cancel.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "reservations.cancel",
+          "expected": null,
+          "id": "reservations.cancel.other_user",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "availability.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "availability.get.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "admin.reservations",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "admin.reservations.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.reservations",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "admin.reservations.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.reservations",
+          "expected": {
+            "status": [
+              403
+            ]
+          },
+          "id": "admin.reservations.non_admin_403",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "admin.reservations",
+          "expected": null,
+          "id": "admin.reservations.page_size",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "persistence",
+          "endpoint": "reservations.get",
+          "expected": null,
+          "id": "reservations.get.persists",
+          "ms": null,
+          "note": "setup 0: POST /api/reservations answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "reservations.create",
+          "expected": {
+            "status": [
+              409
+            ]
+          },
+          "id": "reservations.capacity.enforced",
+          "ms": 2,
+          "note": "status 400",
+          "observed": {
+            "body": "{\"code\":\"slot_full\",\"error\":\"Slot is fully booked\",\"message\":\"Slot is fully booked\",\"remaining\":0}\n",
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 26,
+        "agent_pass_rate": 0.4230769230769231,
+        "agent_passed": 11,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 7,
+            "passed": 4
+          },
+          "functional": {
+            "n": 10,
+            "passed": 5
+          },
+          "ownership": {
+            "n": 3,
+            "passed": 0
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 0
+          },
+          "persistence": {
+            "n": 1,
+            "passed": 0
+          },
+          "validation": {
+            "n": 4,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.4230769230769231,
+        "probes_exploited": 0,
+        "probes_skipped": 1,
+        "probes_tested": 1,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.4230769230769231
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-639",
+          "endpoint": "reservations.get",
+          "evidence": "precondition checks did not pass: reservations.get.ok",
+          "id": "probe.reservations.idor",
+          "kind": "idor_enumeration",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        },
+        {
+          "cwe": "cwe-798",
+          "endpoint": null,
+          "evidence": "no default password accepted",
+          "id": "probe.reservations.default_admin",
+          "kind": "default_credential",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1500,
+  "loc_model": 1500,
+  "model": "mimo-v2.6-pro",
+  "model_id": "local-opencode-go/mimo-v2.6-pro",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "62f74cc9c9b97040613b0007bf8bbaaa078f7a416961861115a28103b4f72596",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-10T15:20:22.957890+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "booking_reservations@1",
+  "tokens_used": 3914198,
+  "tree_hash": "3af9dd604a6aab7ac78cd3bd0b5079d765af5351646383c8885f0a2f2052816c",
+  "truncated": false,
+  "unit": "task:booking_reservations@1",
+  "usable": true
+}

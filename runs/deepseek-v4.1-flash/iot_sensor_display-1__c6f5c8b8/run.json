@@ -1,0 +1,538 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 727,
+  "completed_at": "2026-11-11T04:46:08.636908+00:00",
+  "condition_id": 95,
+  "condition_label": "local-opencode-go/deepseek-v4.1-flash",
+  "config_fingerprint": "bd0a8bb421d8239cf1a1f023bcb0432eceb9b5dfdef0074a9eca57c565744c50",
+  "cost_usd": 0.0,
+  "duration": 812.410391,
+  "fingerprints": {
+    "config_fingerprint": "bd0a8bb421d8239cf1a1f023bcb0432eceb9b5dfdef0074a9eca57c565744c50",
+    "prompt_hash": "2eb177a943d899ef85c43c2f60bfb744ddbd8384ff7c98d0731f4e70b5f50392",
+    "run_fingerprint": "75d3b1d21889641b05d43c3c33f65c9f50ef33ecc8e549c618bc663576ca3fe4",
+    "task_hash": "96ca93b6dfef48b15cfef5ed9d44673181cff9cdb5708c90b52d983e3223e6e6",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "c6f5c8b8-b155-4a70-b4ca-4468281fd325",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/deepseek-v4.1-flash",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-11T04:45:42.817219+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 838,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 11,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 105,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 109,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "sensors.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "sensors.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "sensors.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "sensors.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "sensors.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "sensors.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "sensors.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "sensors.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "sensors.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "sensors.create.invalid.too_long",
+          "ms": 2,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"id\":2,\"last_updated\":null,\"last_value\":null,\"location\":\"llmlab location\",\"name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"owner\":\"userab038d8f8\",\"unit\":\"llmlab unit\"}\n",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "sensors.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "sensors.get.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "sensors.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "sensors.delete.ok",
+          "ms": 2,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"ok\":true}\n",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "sensors.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "sensors.delete.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "sensors.delete",
+          "expected": {
+            "status": [
+              403,
+              404
+            ]
+          },
+          "id": "sensors.delete.other_user",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "readings.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "readings.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "readings.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "readings.create.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "readings.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "readings.create.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "readings.create",
+          "expected": {
+            "status": [
+              403,
+              404
+            ]
+          },
+          "id": "readings.create.other_user",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "readings.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "readings.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "sensors.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "readings.updates_last_value",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 17,
+        "agent_pass_rate": 0.8823529411764706,
+        "agent_passed": 15,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 3,
+            "passed": 3
+          },
+          "functional": {
+            "n": 9,
+            "passed": 8
+          },
+          "ownership": {
+            "n": 2,
+            "passed": 2
+          },
+          "validation": {
+            "n": 3,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.8823529411764706,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 2,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.8823529411764706
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-639",
+          "endpoint": "readings.create",
+          "evidence": "user_b got 403",
+          "id": "probe.sensors.idor",
+          "kind": "idor_enumeration",
+          "skip_reason": null,
+          "status": "not_exploited"
+        },
+        {
+          "cwe": "cwe-79",
+          "endpoint": "sensors.create",
+          "evidence": "payload not served unescaped as HTML",
+          "id": "probe.sensors.xss",
+          "kind": "xss_stored",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1710,
+  "loc_model": 1710,
+  "model": "deepseek-v4.1-flash",
+  "model_id": "local-opencode-go/deepseek-v4.1-flash",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "75d3b1d21889641b05d43c3c33f65c9f50ef33ecc8e549c618bc663576ca3fe4",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-11T04:32:36.226517+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "iot_sensor_display@1",
+  "tokens_used": 2057414,
+  "tree_hash": "6052e27c837ef953e1f45186f2bc20cbfeda6f9ddc3f7301ad51b12f23efbb1a",
+  "truncated": false,
+  "unit": "task:iot_sensor_display@1",
+  "usable": true
+}

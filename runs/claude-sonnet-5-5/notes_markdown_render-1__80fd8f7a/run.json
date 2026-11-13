@@ -1,0 +1,597 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 539,
+  "completed_at": "2026-11-09T19:00:03.894838+00:00",
+  "condition_id": 83,
+  "condition_label": "local-anthropic/claude-sonnet-5-5",
+  "config_fingerprint": "7a6d44d67524288a9314682f758676ac213b1ede60b7af25ffdcbefc3a438ffb",
+  "cost_usd": 0.0,
+  "duration": 805.98121,
+  "fingerprints": {
+    "config_fingerprint": "7a6d44d67524288a9314682f758676ac213b1ede60b7af25ffdcbefc3a438ffb",
+    "prompt_hash": "6236cb50621690a5c5d48cd7bd756173d479fe1050193d10d83180971f8e54f0",
+    "run_fingerprint": "94a0bc9cb2ab84f0c21cdef30959c7e92e4b18d86464bf7f7dc235ec2368936a",
+    "task_hash": "86cc52015d557a11ab714ace17350d8736f3dc1a4224d444750bf3669158aa1b",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "80fd8f7a-d2ca-417c-9b6a-87fe32822280",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-anthropic/claude-sonnet-5-5",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-09T18:59:34.401143+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 595,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 70,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 130,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 161,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "notes.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "notes.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "notes.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "notes.list.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "notes.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "notes.create.ok",
+          "ms": 4,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "notes.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "notes.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "notes.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "notes.create.invalid.missing",
+          "ms": 3,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"author\":\"useraaf6e94da\",\"body\":\"llmlab body\",\"id\":2,\"published\":false,\"title\":\"\",\"updated_at\":\"2026-11-09T18:59:57.661924Z\"}\n",
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "notes.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "notes.create.invalid.too_long",
+          "ms": 59,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"author\":\"useraaf6e94da\",\"body\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "notes.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "notes.get.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "notes.get",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "notes.get.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "notes.get",
+          "expected": {
+            "status": [
+              404
+            ]
+          },
+          "id": "notes.get.other_user",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 404
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "notes.update",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "notes.update.ok",
+          "ms": 4,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "notes.update",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "notes.update.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "notes.update",
+          "expected": {
+            "status": [
+              404
+            ]
+          },
+          "id": "notes.update.other_user",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 404
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "notes.update",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "notes.update.invalid.too_long",
+          "ms": 5,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"author\":\"useraaf6e94da\",\"body\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "notes.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "notes.delete.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 204
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "notes.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "notes.delete.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "notes.delete",
+          "expected": {
+            "status": [
+              404
+            ]
+          },
+          "id": "notes.delete.other_user",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 404
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "notes.render",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "notes.render.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "notes.render",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "notes.render.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "notes.render",
+          "expected": {
+            "status": [
+              404
+            ]
+          },
+          "id": "notes.render.other_user",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 404
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "public.render",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "public.render.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "notes.render",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "notes.render.heading",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "persistence",
+          "endpoint": "notes.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "notes.get.persists",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 24,
+        "agent_pass_rate": 0.875,
+        "agent_passed": 21,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 6,
+            "passed": 6
+          },
+          "functional": {
+            "n": 10,
+            "passed": 10
+          },
+          "ownership": {
+            "n": 4,
+            "passed": 4
+          },
+          "persistence": {
+            "n": 1,
+            "passed": 1
+          },
+          "validation": {
+            "n": 3,
+            "passed": 0
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.875,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 2,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.875
+      },
+      "not_measured_reason": null,
+      "probes": [
+        {
+          "cwe": "cwe-79",
+          "endpoint": "notes.create",
+          "evidence": "payload not served unescaped as HTML",
+          "id": "probe.notes.xss",
+          "kind": "xss_stored",
+          "skip_reason": null,
+          "status": "not_exploited"
+        },
+        {
+          "cwe": "cwe-639",
+          "endpoint": "notes.get",
+          "evidence": "user_b got 404",
+          "id": "probe.notes.idor",
+          "kind": "idor_enumeration",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 834,
+  "loc_model": 834,
+  "model": "claude-sonnet-5-5",
+  "model_id": "local-anthropic/claude-sonnet-5-5",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "94a0bc9cb2ab84f0c21cdef30959c7e92e4b18d86464bf7f7dc235ec2368936a",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-09T18:46:37.913628+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "af98d250-94d5-4c53-8ed7-d4aa2cd2e354",
+  "task": "notes_markdown_render@1",
+  "tokens_used": 975737,
+  "tree_hash": "179a2cb6d1e78f474e67326a669767fe343fd38d214c52b00ea3388da4cd7658",
+  "truncated": false,
+  "unit": "task:notes_markdown_render@1",
+  "usable": true
+}

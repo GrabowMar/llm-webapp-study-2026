@@ -1,0 +1,863 @@
+{
+ "adherence": {
+  "checker_version": 1,
+  "detected": {
+   "auth": {
+    "confidence": "medium",
+    "evidence": [
+     "runtime:login:bearer",
+     "runtime:tester"
+    ],
+    "value": "bearer"
+   },
+   "backend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:backend/requirements.txt:flask",
+     "import:backend/app.py:flask"
+    ],
+    "value": "flask"
+   },
+   "database": {
+    "confidence": "medium",
+    "evidence": [
+     "import:backend/app.py:sqlite3"
+    ],
+    "value": "sqlite"
+   },
+   "frontend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:frontend/package.json:react",
+     "import:frontend/src/auth.tsx:react",
+     "import:frontend/src/pages/AuthForms.tsx:react",
+     "import:frontend/src/pages/Editor.tsx:react",
+     "import:frontend/src/pages/PostList.tsx:react",
+     "import:frontend/src/pages/PostPage.tsx:react",
+     "import:frontend/src/router.tsx:react"
+    ],
+    "value": "react"
+   },
+   "styling": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:tailwindcss",
+     "classes:share=1.00"
+    ],
+    "value": "tailwind"
+   }
+  },
+  "deviations": [],
+  "hallucinated": [],
+  "packages": [
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "flask",
+    "pinned": true,
+    "version": "3.1.3"
+   },
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "gunicorn",
+    "pinned": true,
+    "version": "26.2.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@tailwindcss/vite",
+    "pinned": true,
+    "version": "4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react-dom",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "tailwindcss",
+    "pinned": true,
+    "version": "4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@vitejs/plugin-react",
+    "pinned": true,
+    "version": "6.2.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "vite",
+    "pinned": true,
+    "version": "8.3.5"
+   }
+  ],
+  "sbom_blob": "2627490061c0a4f6d3918c3eb19910493bf1292dff21bd62a9063f1b26056546",
+  "status": "compliant",
+  "style_metrics": {
+   "component_library_imports": {},
+   "css_files": 1,
+   "css_modules": 0,
+   "tailwind_class_share": 1.0
+  },
+  "unpinned": []
+ },
+ "created_at": "2026-11-11T17:00:04.196159+00:00",
+ "eval_level": "security",
+ "eval_suite": "eval-v2@2",
+ "id": 1113,
+ "mode": "full",
+ "result": {
+  "auth_mode": "contract_bearer",
+  "checks": [
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "health",
+    "ms": 10,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "index_served",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "spa_fallback",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.register",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "auth.register.ok",
+    "ms": 102,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.login",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "auth.login.ok",
+    "ms": 101,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "posts.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "posts.list.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "posts.create",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "posts.create.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "posts.create",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "posts.create.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "posts.get",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "posts.get.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "posts.replace",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "posts.replace.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "posts.replace",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "posts.replace.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "ownership",
+    "endpoint": "posts.replace",
+    "expected": {
+     "status": [
+      403,
+      404
+     ]
+    },
+    "id": "posts.replace.other_user",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 403
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "posts.delete",
+    "expected": {
+     "status": [
+      204
+     ]
+    },
+    "id": "posts.delete.ok",
+    "ms": 2,
+    "note": "status 200",
+    "observed": {
+     "body": "{\"status\":\"ok\"}\n",
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "auth",
+    "endpoint": "posts.delete",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "posts.delete.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "ownership",
+    "endpoint": "posts.delete",
+    "expected": {
+     "status": [
+      403,
+      404
+     ]
+    },
+    "id": "posts.delete.other_user",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 403
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "admin.posts.takedown",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "admin.posts.takedown.ok",
+    "ms": 5,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "admin.posts.takedown",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "admin.posts.takedown.anon_401",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "admin.posts.takedown",
+    "expected": {
+     "status": [
+      403
+     ]
+    },
+    "id": "admin.posts.takedown.non_admin_403",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 403
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "posts.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "posts.create.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "posts.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "posts.create.invalid.too_long",
+    "ms": 3,
+    "note": "title: status 201 | content: status 201",
+    "observed": {
+     "body": "{\"author\":\"usera35ebee27\",\"content\":\"llmlab content\",\"created_at\":\"2026-11-11T17:02:37.391470+00:00\",\"excerpt\":\"llmlab content\",\"id\":12,\"tags\":[\"llmlab\"],\"taken_down\":false,\"title\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+     "requests": [
+      {
+       "label": "title",
+       "ok": false,
+       "status": 201
+      },
+      {
+       "label": "content",
+       "ok": false,
+       "status": 201
+      }
+     ],
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "posts.replace",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "posts.replace.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "posts.replace",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "posts.replace.invalid.too_long",
+    "ms": 3,
+    "note": "title: status 200 | content: status 200",
+    "observed": {
+     "body": "{\"author\":\"usera35ebee27\",\"content\":\"llmlab content\",\"created_at\":\"2026-11-11T17:02:37.402827+00:00\",\"excerpt\":\"llmlab content\",\"id\":15,\"tags\":[\"llmlab\"],\"taken_down\":false,\"title\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+     "requests": [
+      {
+       "label": "title",
+       "ok": false,
+       "status": 200
+      },
+      {
+       "label": "content",
+       "ok": false,
+       "status": 200
+      }
+     ],
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   }
+  ],
+  "compiler_version": 2,
+  "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+  "flaky_checks": [],
+  "measured": true,
+  "metrics": {
+   "agent_checks": 19,
+   "agent_pass_rate": 0.8421052631578947,
+   "agent_passed": 16,
+   "baseline_pass_rate": 0.0,
+   "by_category": {
+    "auth": {
+     "n": 5,
+     "passed": 5
+    },
+    "functional": {
+     "n": 8,
+     "passed": 7
+    },
+    "ownership": {
+     "n": 2,
+     "passed": 2
+    },
+    "validation": {
+     "n": 4,
+     "passed": 2
+    }
+   },
+   "common_pass_rate": null,
+   "infra_ok": true,
+   "over_baseline": 0.8421052631578947,
+   "probes_exploited": 0,
+   "probes_skipped": 1,
+   "probes_tested": 2,
+   "regression_pass_rate": null,
+   "sec_pass": false,
+   "slot_pass_rate": null,
+   "stated_pass_rate": 1.0,
+   "unstated_pass_rate": 0.5714285714285714
+  },
+  "not_measured_reason": null,
+  "plan_sha256": "20f73223e81cfd7503cc2903f6c977bbc1bb3c167c9d1b3031bf8e19fa8db391",
+  "probes": [
+   {
+    "cwe": "cwe-79",
+    "endpoint": "posts.create",
+    "evidence": "the view at /api/posts/17 is application/json, not an HTML page: a browser does not run markup from it",
+    "id": "probe.posts.xss",
+    "kind": "xss_stored",
+    "skip_reason": "not_measurable",
+    "status": "skipped"
+   },
+   {
+    "cwe": "cwe-89",
+    "endpoint": "posts.list",
+    "evidence": "tautology payloads returned no extra rows",
+    "id": "probe.posts.sqli",
+    "kind": "sqli_boolean",
+    "skip_reason": null,
+    "status": "not_exploited"
+   },
+   {
+    "cwe": "cwe-798",
+    "endpoint": null,
+    "evidence": "none of 6 default passwords accepted",
+    "id": "probe.posts.default_admin",
+    "kind": "default_credential",
+    "skip_reason": null,
+    "status": "not_exploited"
+   }
+  ],
+  "skipped": [],
+  "tester_version": 2
+ },
+ "stages": {
+  "adherence": {
+   "detail": {
+    "record_status": "compliant",
+    "runtime": true
+   },
+   "seconds": 1.626,
+   "status": "ok"
+  },
+  "build": {
+   "detail": {
+    "attempts": [
+     {
+      "attempt": 1,
+      "infra_suspected": false,
+      "ok": true
+     }
+    ],
+    "base_images": {
+     "pkg:docker/node@24-slim?digest=sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c&platform=linux%2Famd64": "sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c",
+     "pkg:docker/python@3.13-slim?digest=sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1&platform=linux%2Famd64": "sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1"
+    },
+    "build_context": {
+     "locks": [
+      {
+       "ecosystem": "pypi",
+       "lock": "backend/requirements.lock",
+       "manifest": "backend/requirements.txt",
+       "reason": null,
+       "source": "starter",
+       "status": "complete"
+      },
+      {
+       "ecosystem": "npm",
+       "lock": "frontend/package-lock.json",
+       "manifest": "frontend/package.json",
+       "reason": null,
+       "source": "tree",
+       "status": "complete"
+      }
+     ],
+     "notes": [
+      "tree: 21 files written verbatim"
+     ]
+    },
+    "build_key": "057e5ffbcba96e1cb1558f4a31db890972c4050497e90430aa1d0ca4e3ebe934",
+    "cache_hit": false,
+    "cpu_seconds": 2.418,
+    "image_bytes": 186834141,
+    "image_id": "sha256:fd880cea2f446e8f1dfa63ec2a91ab7d053f2a03a56184b9cc348c868491ef2c",
+    "image_tag": "llmlab/sample:057e5ffbcba96e1cb1558f4a-20ae471422db",
+    "peak_memory_bytes": 63799296,
+    "prepare_seconds": 0.045,
+    "queue_seconds": 0.029,
+    "seconds": 4.337
+   },
+   "seconds": 4.81,
+   "status": "ok"
+  },
+  "lock": {
+   "detail": {
+    "files": [],
+    "packages": {
+     "npm": 76,
+     "pip": 8
+    },
+    "resolved_at": "2026-11-11T02:49:39.502246+00:00",
+    "source": "model"
+   },
+   "seconds": 0.001,
+   "status": "ok"
+  },
+  "probes": {
+   "detail": {
+    "n": 3,
+    "tested": 2
+   },
+   "status": "ok"
+  },
+  "start": {
+   "detail": {
+    "credentials_ref": "418e3f9e3a04a29ec5dfdbc4953104355c5a1da40bf01ca3b58e635ade1df530"
+   },
+   "seconds": 2.222,
+   "status": "ok"
+  },
+  "tester": {
+   "detail": {
+    "attempts": 1,
+    "checks_adjusted": 0,
+    "checks_skipped": 0,
+    "compiler_version": 2,
+    "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+    "image_override": false,
+    "only_checks": null,
+    "overlay": false,
+    "plan_sha256": "20f73223e81cfd7503cc2903f6c977bbc1bb3c167c9d1b3031bf8e19fa8db391",
+    "probe_rules_version": 2,
+    "probes": null,
+    "tester_rules_version": 3,
+    "tester_version": 2,
+    "upstream": false
+   },
+   "seconds": 3.888,
+   "status": "ok"
+  }
+ },
+ "status": "measured"
+}

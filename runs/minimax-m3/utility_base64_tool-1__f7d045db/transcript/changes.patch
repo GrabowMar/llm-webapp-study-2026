@@ -1,0 +1,3494 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..db16da6
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,7 @@
++node_modules/
++dist/
++__pycache__/
++*.pyc
++.venv/
++venv/
++data/
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..a58c086 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,23 +1,231 @@
+-"""Flask entry point."""
++"""Flask entry point: JSON API under /api plus the built web frontend."""
+ 
++from __future__ import annotations
++
++import sqlite3
+ from pathlib import Path
++from typing import Any
++
++from flask import Flask, g, jsonify, request, send_from_directory
+ 
+-from flask import Flask
+-from flask import send_from_directory
++try:  # package import
++    from . import auth, codec, db
++except ImportError:  # top-level import (gunicorn: "app:app")
++    import auth  # type: ignore[no-redef]
++    import codec  # type: ignore[no-redef]
++    import db  # type: ignore[no-redef]
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+ 
++DEFAULT_PAGE_SIZE = 20
++MAX_PAGE_SIZE = 100
++
+ app = Flask(__name__, static_folder=None)
+ 
+ 
++def error(message: str, status: int = 400):
++    """Return a JSON error payload."""
++    return jsonify(error=message, message=message), status
++
++
++def json_body() -> dict[str, Any]:
++    """Return the request body as a JSON object (empty when it is not one)."""
++    payload = request.get_json(silent=True)
++    return payload if isinstance(payload, dict) else {}
++
++
++def serialize_conversion(row: sqlite3.Row, include_output: bool = False) -> dict[str, Any]:
++    """Build the public representation of a conversion."""
++    data: dict[str, Any] = {
++        "id": row["id"],
++        "direction": row["direction"],
++        "input_preview": codec.preview(row["input"]),
++        "output_preview": codec.preview(row["output"]),
++        "created_at": row["created_at"],
++    }
++    if include_output:
++        data["output"] = row["output"]
++    return data
++
++
++def paginate() -> tuple[int, int]:
++    """Read and normalize the paging parameters of a request."""
++    def positive_int(name: str, default: int, maximum: int | None = None) -> int:
++        raw = request.args.get(name)
++        if raw is None or raw == "":
++            return default
++        try:
++            value = int(raw)
++        except (TypeError, ValueError):
++            return default
++        if value < 1:
++            return default
++        if maximum is not None and value > maximum:
++            return maximum
++        return value
++
++    page = positive_int("page", 1)
++    page_size = positive_int("page_size", DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE)
++    return page, page_size
++
++
+ @app.get("/api/health")
+ def health():
+-    return {"status": "ok"}
++    return jsonify(status="ok")
++
++
++@app.post("/api/auth/register")
++def register():
++    payload = json_body()
++    try:
++        username = auth.normalize_username(payload.get("username"))
++        password = auth.normalize_password(payload.get("password"))
++    except auth.AuthError as exc:
++        return error(str(exc), 400)
++
++    try:
++        user = auth.create_user(username, password)
++    except auth.AuthError as exc:
++        return error(str(exc), 409)
++
++    return jsonify(id=user["id"], username=user["username"]), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    payload = json_body()
++    username = payload.get("username")
++    password = payload.get("password")
++    if not isinstance(username, str) or not isinstance(password, str) or not username:
++        return error("Username and password are required", 400)
++
++    user = auth.verify_user(username, password)
++    if user is None:
++        return error("Invalid username or password", 401)
++
++    token = auth.issue_token(user["id"])
++    return jsonify(token=token, username=user["username"])
++
++
++@app.get("/api/auth/me")
++@auth.require_auth
++def me():
++    return jsonify(id=g.user["id"], username=g.user["username"])
++
++
++@app.post("/api/base64/encode")
++def encode_endpoint():
++    payload = json_body()
++    text = payload.get("text")
++    if not isinstance(text, str):
++        return error("Field 'text' must be a string", 400)
++    return jsonify(encoded=codec.encode_text(text))
++
++
++@app.post("/api/base64/decode")
++def decode_endpoint():
++    payload = json_body()
++    encoded = payload.get("encoded")
++    if not isinstance(encoded, str):
++        return error("Field 'encoded' must be a string", 400)
++    try:
++        text = codec.decode_base64(encoded)
++    except codec.ConversionError as exc:
++        return error(str(exc), 400)
++    return jsonify(text=text)
++
++
++@app.post("/api/conversions")
++@auth.require_auth
++def create_conversion():
++    payload = json_body()
++    direction = payload.get("direction")
++    source = payload.get("input")
++    if not isinstance(direction, str) or direction not in ("encode", "decode"):
++        return error("Field 'direction' must be 'encode' or 'decode'", 400)
++    if not isinstance(source, str):
++        return error("Field 'input' must be a string", 400)
++
++    try:
++        output = codec.convert(direction, source)
++    except codec.ConversionError as exc:
++        return error(str(exc), 400)
++
++    with db.get_conn() as conn:
++        cursor = conn.execute(
++            "INSERT INTO conversions (user_id, direction, input, output, created_at) "
++            "VALUES (?, ?, ?, ?, ?)",
++            (g.user["id"], direction, source, output, db.now_iso()),
++        )
++        row = conn.execute(
++            "SELECT * FROM conversions WHERE id = ?", (cursor.lastrowid,)
++        ).fetchone()
++
++    return jsonify(serialize_conversion(row, include_output=True))
++
++
++@app.get("/api/conversions")
++@auth.require_auth
++def list_conversions():
++    page, page_size = paginate()
++    offset = (page - 1) * page_size
++    with db.get_conn() as conn:
++        total = conn.execute(
++            "SELECT COUNT(*) AS count FROM conversions WHERE user_id = ?", (g.user["id"],)
++        ).fetchone()["count"]
++        rows = conn.execute(
++            "SELECT * FROM conversions WHERE user_id = ? "
++            "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
++            (g.user["id"], page_size, offset),
++        ).fetchall()
++
++    return jsonify(
++        items=[serialize_conversion(row) for row in rows],
++        total=total,
++        page=page,
++        page_size=page_size,
++    )
++
++
++@app.delete("/api/conversions/<int:conversion_id>")
++@auth.require_auth
++def delete_conversion(conversion_id: int):
++    with db.get_conn() as conn:
++        cursor = conn.execute(
++            "DELETE FROM conversions WHERE id = ? AND user_id = ?",
++            (conversion_id, g.user["id"]),
++        )
++        deleted = cursor.rowcount
++    if not deleted:
++        return error("Conversion not found", 404)
++    return "", 204
++
++
++@app.errorhandler(404)
++def not_found(_exc):
++    if request.path.startswith("/api/"):
++        return error("Not found", 404)
++    if (DIST / "index.html").is_file():
++        return send_from_directory(DIST, "index.html")
++    return error("Not found", 404)
++
++@app.errorhandler(405)
++def method_not_allowed(_exc):
++    if request.path.startswith("/api/"):
++        return error("Method not allowed", 405)
++    return error("Method not allowed", 405)
+ 
+ 
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
++    if path.startswith("api/"):
++        return error("Not found", 404)
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+-    return send_from_directory(DIST, "index.html")
++    if (DIST / "index.html").is_file():
++        return send_from_directory(DIST, "index.html")
++    return error("Frontend build is not available", 404)
++
++
++db.init_db()
+diff --git a/backend/auth.py b/backend/auth.py
+new file mode 100644
+index 0000000..0909d4f
+--- /dev/null
++++ b/backend/auth.py
+@@ -0,0 +1,121 @@
++"""Account creation, sign in and bearer token handling."""
++
++from __future__ import annotations
++
++import secrets
++import sqlite3
++from functools import wraps
++from typing import Any, Callable
++
++from flask import g, jsonify, request
++from werkzeug.security import check_password_hash, generate_password_hash
++
++try:  # package import
++    from . import db
++except ImportError:  # top-level import (gunicorn: "app:app")
++    import db  # type: ignore[no-redef]
++
++MAX_USERNAME_LENGTH = 64
++MAX_PASSWORD_LENGTH = 256
++
++
++class AuthError(Exception):
++    """Raised when credentials cannot be processed."""
++
++
++def normalize_username(username: Any) -> str:
++    """Validate and normalize a username."""
++    if not isinstance(username, str):
++        raise AuthError("Username must be a string")
++    username = username.strip()
++    if not username:
++        raise AuthError("Username is required")
++    if len(username) > MAX_USERNAME_LENGTH:
++        raise AuthError(f"Username must be at most {MAX_USERNAME_LENGTH} characters")
++    return username
++
++
++def normalize_password(password: Any) -> str:
++    """Validate a password."""
++    if not isinstance(password, str):
++        raise AuthError("Password must be a string")
++    if not password:
++        raise AuthError("Password is required")
++    if len(password) > MAX_PASSWORD_LENGTH:
++        raise AuthError(f"Password must be at most {MAX_PASSWORD_LENGTH} characters")
++    return password
++
++
++def create_user(username: str, password: str) -> dict[str, Any]:
++    """Create a new account and return its public representation."""
++    with db.get_conn() as conn:
++        try:
++            cursor = conn.execute(
++                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++                (username, generate_password_hash(password), db.now_iso()),
++            )
++        except sqlite3.IntegrityError as exc:
++            raise AuthError("Username is already taken") from exc
++        return {"id": cursor.lastrowid, "username": username}
++
++
++def verify_user(username: str, password: str) -> sqlite3.Row | None:
++    """Return the user row when the credentials match, otherwise None."""
++    with db.get_conn() as conn:
++        row = conn.execute(
++            "SELECT id, username, password_hash FROM users WHERE username = ? COLLATE NOCASE",
++            (username,),
++        ).fetchone()
++    if row is None:
++        return None
++    if not check_password_hash(row["password_hash"], password):
++        return None
++    return row
++
++
++def issue_token(user_id: int) -> str:
++    """Create a fresh bearer token for a user."""
++    token = secrets.token_urlsafe(32)
++    with db.get_conn() as conn:
++        conn.execute(
++            "INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)",
++            (token, user_id, db.now_iso()),
++        )
++    return token
++
++
++def user_for_token(token: str) -> sqlite3.Row | None:
++    """Return the user owning a token, or None when the token is unknown."""
++    if not token:
++        return None
++    with db.get_conn() as conn:
++        return conn.execute(
++            "SELECT users.id, users.username FROM tokens "
++            "JOIN users ON users.id = tokens.user_id WHERE tokens.token = ?",
++            (token,),
++        ).fetchone()
++
++
++def bearer_token() -> str | None:
++    """Extract the bearer token from the Authorization header."""
++    header = request.headers.get("Authorization", "")
++    parts = header.split()
++    if len(parts) == 2 and parts[0].lower() == "bearer":
++        return parts[1].strip()
++    return None
++
++
++def require_auth(view: Callable) -> Callable:
++    """Reject requests that do not carry a valid bearer token."""
++
++    @wraps(view)
++    def wrapper(*args: Any, **kwargs: Any):
++        token = bearer_token()
++        user = user_for_token(token) if token else None
++        if user is None:
++            return jsonify(error="Authentication required", message="Authentication required"), 401
++        g.user = user
++        g.token = token
++        return view(*args, **kwargs)
++
++    return wrapper
+diff --git a/backend/codec.py b/backend/codec.py
+new file mode 100644
+index 0000000..e90d64d
+--- /dev/null
++++ b/backend/codec.py
+@@ -0,0 +1,46 @@
++"""Base64 helpers shared by the API endpoints."""
++
++from __future__ import annotations
++
++import base64
++import binascii
++
++PREVIEW_LIMIT = 200
++
++
++class ConversionError(ValueError):
++    """Raised when a payload cannot be converted."""
++
++
++def encode_text(text: str) -> str:
++    """Encode text as UTF-8 into standard, padded base64."""
++    return base64.b64encode(text.encode("utf-8")).decode("ascii")
++
++
++def decode_base64(value: str) -> str:
++    """Decode standard base64 into UTF-8 text."""
++    compact = "".join(value.split())
++    if not compact:
++        return ""
++    try:
++        raw = base64.b64decode(compact, validate=True)
++    except (binascii.Error, ValueError) as exc:
++        raise ConversionError("Invalid base64 input") from exc
++    try:
++        return raw.decode("utf-8")
++    except UnicodeDecodeError as exc:
++        raise ConversionError("Decoded value is not valid UTF-8 text") from exc
++
++
++def convert(direction: str, value: str) -> str:
++    """Convert a value in the given direction ("encode" or "decode")."""
++    if direction == "encode":
++        return encode_text(value)
++    if direction == "decode":
++        return decode_base64(value)
++    raise ConversionError("Direction must be 'encode' or 'decode'")
++
++
++def preview(text: str, limit: int = PREVIEW_LIMIT) -> str:
++    """Return a short preview of a text."""
++    return text[:limit]
+diff --git a/backend/db.py b/backend/db.py
+new file mode 100644
+index 0000000..f14efcb
+--- /dev/null
++++ b/backend/db.py
+@@ -0,0 +1,76 @@
++"""SQLite storage layer for the base64 converter."""
++
++from __future__ import annotations
++
++import os
++import sqlite3
++from contextlib import contextmanager
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Iterator
++
++BASE_DIR = Path(__file__).resolve().parent.parent
++DATA_DIR = Path(os.environ.get("DATA_DIR") or BASE_DIR / "data")
++DB_PATH = DATA_DIR / "app.db"
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id            INTEGER PRIMARY KEY AUTOINCREMENT,
++    username      TEXT    NOT NULL UNIQUE COLLATE NOCASE,
++    password_hash TEXT    NOT NULL,
++    created_at    TEXT    NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS tokens (
++    token      TEXT    PRIMARY KEY,
++    user_id    INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
++    created_at TEXT    NOT NULL
++);
++
++CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens (user_id);
++
++CREATE TABLE IF NOT EXISTS conversions (
++    id         INTEGER PRIMARY KEY AUTOINCREMENT,
++    user_id    INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
++    direction  TEXT    NOT NULL CHECK (direction IN ('encode', 'decode')),
++    input      TEXT    NOT NULL,
++    output     TEXT    NOT NULL,
++    created_at TEXT    NOT NULL
++);
++
++CREATE INDEX IF NOT EXISTS idx_conversions_user ON conversions (user_id, created_at DESC, id DESC);
++"""
++
++
++def now_iso() -> str:
++    """Return the current UTC time as an ISO 8601 string."""
++    return datetime.now(timezone.utc).isoformat()
++
++
++def connect() -> sqlite3.Connection:
++    """Open a connection to the SQLite database."""
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH, timeout=15)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    return conn
++
++
++@contextmanager
++def get_conn() -> Iterator[sqlite3.Connection]:
++    """Yield a database connection that is committed on success and closed always."""
++    conn = connect()
++    try:
++        yield conn
++        conn.commit()
++    except Exception:
++        conn.rollback()
++        raise
++    finally:
++        conn.close()
++
++
++def init_db() -> None:
++    """Create the database file and its tables if they do not exist yet."""
++    with get_conn() as conn:
++        conn.executescript(SCHEMA)
+diff --git a/backend/smoke_test.py b/backend/smoke_test.py
+new file mode 100644
+index 0000000..5fae0d7
+--- /dev/null
++++ b/backend/smoke_test.py
+@@ -0,0 +1,148 @@
++"""Manual API smoke test for the base64 converter."""
++
++import json
++import os
++import sys
++import urllib.error
++import urllib.request
++
++BASE = "http://127.0.0.1:8000"
++
++
++def call(method, path, body=None, token=None):
++    url = BASE + path
++    data = json.dumps(body).encode() if body is not None else None
++    req = urllib.request.Request(url, data=data, method=method)
++    req.add_header("Content-Type", "application/json")
++    if token:
++        req.add_header("Authorization", f"Bearer {token}")
++    try:
++        with urllib.request.urlopen(req) as resp:
++            raw = resp.read().decode()
++            return resp.status, (json.loads(raw) if raw else None)
++    except urllib.error.HTTPError as exc:
++        raw = exc.read().decode()
++        return exc.code, (json.loads(raw) if raw else None)
++
++
++def check(label, actual, expected):
++    status = "OK " if actual == expected else "FAIL"
++    if status == "FAIL":
++        print(f"{status} {label}: got {actual!r}, expected {expected!r}")
++        globals()["failures"] = globals().get("failures", 0) + 1
++    else:
++        print(f"{status} {label}")
++    return actual == expected
++
++
++failures = 0
++
++status, body = call("GET", "/api/health")
++check("health", (status, body), (200, {"status": "ok"}))
++
++status, body = call("POST", "/api/base64/encode", {"text": "hello"})
++check("encode hello", (status, body), (200, {"encoded": "aGVsbG8="}))
++
++status, body = call("POST", "/api/base64/encode", {"text": ""})
++check("encode empty", (status, body), (200, {"encoded": ""}))
++
++status, body = call("POST", "/api/base64/encode", {"text": "héllo wörld ✨"})
++check(
++    "encode unicode",
++    body,
++    {"encoded": "aMOpbGxvIHfDtnJsZCDinKg="},
++)
++
++status, body = call("POST", "/api/base64/decode", {"encoded": "aGVsbG8="})
++check("decode hello", (status, body), (200, {"text": "hello"}))
++
++status, body = call("POST", "/api/base64/decode", {"encoded": ""})
++check("decode empty", (status, body), (200, {"text": ""}))
++
++status, body = call("POST", "/api/base64/decode", {"encoded": "not base64!"})
++check("decode invalid status", status, 400)
++check("decode invalid message", "error" in (body or {}), True)
++
++status, body = call("POST", "/api/base64/decode", {"encoded": "aGVsbG8"})
++check("decode invalid padding status", status, 400)
++
++status, body = call("POST", "/api/base64/decode", {"encoded": "////"})
++check("decode invalid utf8 status", status, 400)
++
++# accounts
++suffix = os.environ.get("SMOKE_SUFFIX") or os.urandom(4).hex()
++user = f"alice_{suffix}"
++status, body = call("POST", "/api/auth/register", {"username": user, "password": "s3cret"})
++check("register", status, 201)
++check("register username", body.get("username"), user)
++
++status, body = call("POST", "/api/auth/register", {"username": user, "password": "s3cret"})
++check("register duplicate", status, 409)
++
++status, body = call("POST", "/api/auth/login", {"username": user, "password": "s3cret"})
++check("login", status, 200)
++token = body.get("token")
++check("login token", isinstance(token, str) and len(token) > 10, True)
++
++status, body = call("POST", "/api/auth/login", {"username": user, "password": "wrong"})
++check("login wrong password", status, 401)
++
++status, body = call("GET", "/api/conversions")
++check("history without token", status, 401)
++
++status, body = call("GET", "/api/conversions", token="nope")
++check("history with bad token", status, 401)
++
++status, body = call("GET", "/api/conversions", token=token)
++check("history empty", (status, body["total"], body["items"], body["page"], body["page_size"]),
++      (200, 0, [], 1, 20))
++
++status, body = call("POST", "/api/conversions", {"direction": "encode", "input": "hello"})
++check("conversion without token", status, 401)
++
++status, body = call(
++    "POST", "/api/conversions", {"direction": "encode", "input": "hello"}, token=token
++)
++check("save encode", status, 200)
++check("save encode output", body.get("output"), "aGVsbG8=")
++check("save encode preview", body.get("input_preview"), "hello")
++check("save encode keys",
++      sorted(body.keys()),
++      sorted(["id", "direction", "input_preview", "output_preview", "created_at", "output"]))
++first_id = body["id"]
++
++status, body = call(
++    "POST", "/api/conversions", {"direction": "decode", "input": "aGVsbG8="}, token=token
++)
++check("save decode", (status, body.get("output")), (200, "hello"))
++second_id = body["id"]
++
++status, body = call("GET", "/api/conversions", token=token)
++check("history count", (body["total"], len(body["items"])), (2, 2))
++check("history newest first", body["items"][0]["id"], second_id)
++
++status, body = call("GET", "/api/conversions?page=1&page_size=1", token=token)
++check("history page size", (body["total"], len(body["items"]), body["page"], body["page_size"]),
++      (2, 1, 1, 1))
++status, body = call("GET", "/api/conversions?page=2&page_size=1", token=token)
++check("history page 2", (len(body["items"]), body["items"][0]["id"]), (1, first_id))
++
++status, body = call("DELETE", f"/api/conversions/{first_id}", token=token)
++check("delete own", status, 204)
++status, body = call("GET", "/api/conversions", token=token)
++check("history after delete", body["total"], 1)
++
++# other user isolation
++call("POST", "/api/auth/register", {"username": f"bob_{suffix}", "password": "hunter22"})
++status, body = call("POST", "/api/auth/login", {"username": f"bob_{suffix}", "password": "hunter22"})
++bob_token = body["token"]
++status, body = call("GET", "/api/conversions", token=bob_token)
++check("other user history empty", body["total"], 0)
++status, body = call("DELETE", f"/api/conversions/{second_id}", token=bob_token)
++check("delete other user's conversion", status, 404)
++status, body = call("DELETE", f"/api/conversions/99999", token=token)
++check("delete missing conversion", status, 404)
++
++print()
++print("FAILURES:", failures)
++sys.exit(1 if failures else 0)
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..d98c3f0 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -1,9 +1,9 @@
+ <!DOCTYPE html>
+ <html lang="en">
+   <head>
+-    <meta charset="utf-8" />
+-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <meta charset="UTF-8" />
++    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
++    <title>Base64 Converter</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..5fa632b 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,8 +10,130 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "4.3.5",
++        "@testing-library/jest-dom": "^7.0.1",
++        "@testing-library/react": "^16.3.3",
++        "@testing-library/user-event": "^14.6.9",
++        "@types/react": "19.3.0",
++        "@types/react-dom": "19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
+-        "vite": "8.3.5"
++        "jsdom": "^31.0.0",
++        "tailwindcss": "4.3.5",
++        "typescript": "5.9.3",
++        "vite": "8.3.5",
++        "vitest": "^5.1.0"
++      }
++    },
++    "node_modules/@adobe/css-tools": {
++      "version": "4.5.0",
++      "resolved": "https://registry.npmjs.org/@adobe/css-tools/-/css-tools-4.5.0.tgz",
++      "integrity": "sha512-6OzddxPio9UiWTCemp4N8cYLV2ZN1ncRnV1cVGtve7dhPOtRkleRyx32GQCYSwDYgaHU3USMm84tNsvKzRCa1Q==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@babel/code-frame": {
++      "version": "7.29.7",
++      "resolved": "https://registry.npmjs.org/@babel/code-frame/-/code-frame-7.29.7.tgz",
++      "integrity": "sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "dependencies": {
++        "@babel/helper-validator-identifier": "^7.29.7",
++        "js-tokens": "^4.0.0",
++        "picocolors": "^1.1.1"
++      },
++      "engines": {
++        "node": ">=6.9.0"
++      }
++    },
++    "node_modules/@babel/helper-validator-identifier": {
++      "version": "7.29.7",
++      "resolved": "https://registry.npmjs.org/@babel/helper-validator-identifier/-/helper-validator-identifier-7.29.7.tgz",
++      "integrity": "sha512-qehxGkRj55h/ff8EMaJ+cYhyaKlHIxqYDn682wQD7RNp9UujOQsHog2uS0r2vzr4pW+sXf90NeeayjcNaX3fFg==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "engines": {
++        "node": ">=6.9.0"
++      }
++    },
++    "node_modules/@babel/runtime": {
++      "version": "7.29.13",
++      "resolved": "https://registry.npmjs.org/@babel/runtime/-/runtime-7.29.13.tgz",
++      "integrity": "sha512-v+oN26xP4YIlQsbQ/CbTH1WG5m/l/DjKKZNy/Kp3f/AFvbgt7Em/D0FeMM3O2hX0YzeN2M16W8lOpyhIkfCBcQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.9.0"
++      }
++    },
++    "node_modules/@exodus/bytes": {
++      "version": "1.16.0",
++      "resolved": "https://registry.npmjs.org/@exodus/bytes/-/bytes-1.16.0.tgz",
++      "integrity": "sha512-IcpW84uEn3N7ETtNZMlxKhfl6Pec8rUNGOTBtWbK1FKhJxIFAptZyVrvVRVBimAJxJCgc3PxepxkdWWG4DVzfA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
++      },
++      "peerDependencies": {
++        "@noble/hashes": "^1.8.0 || ^2.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@noble/hashes": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
+       }
+     },
+     "node_modules/@oxc-project/types": {
+@@ -304,79 +426,938 @@
+       "dev": true,
+       "license": "MIT"
+     },
+-    "node_modules/@vitejs/plugin-react": {
+-      "version": "6.2.1",
+-      "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+-      "integrity": "sha512-9KyWCij3r0+qLG3Q62vBmv0VyevmYibAtxaCIVK9o0k6CXgaajZRIe8tpfchQcdZArJ5b/7OrIz4W3b2uxVRDA==",
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+-        "@rolldown/pluginutils": "^1.0.1"
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
+       },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
+       },
+-      "peerDependencies": {
+-        "@rolldown/plugin-babel": "^0.1.7 || ^0.2.0 || ^0.3.0",
+-        "babel-plugin-react-compiler": "^1.0.0",
+-        "oxc-transform-react": ">=0.152.0 <0.157.0",
+-        "vite": "^8.0.0"
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
+       },
+-      "peerDependenciesMeta": {
+-        "@rolldown/plugin-babel": {
+-          "optional": true
+-        },
+-        "babel-plugin-react-compiler": {
+-          "optional": true
+-        },
+-        "oxc-transform-react": {
+-          "optional": true
+-        }
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
+       }
+     },
+-    "node_modules/detect-libc": {
+-      "version": "2.1.2",
+-      "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+-      "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@testing-library/dom": {
++      "version": "10.4.2",
++      "resolved": "https://registry.npmjs.org/@testing-library/dom/-/dom-10.4.2.tgz",
++      "integrity": "sha512-yzr2S9HyAIdhz2/6qHgbs665Q7PKVcDF05vsOlHPxG1mo36gKVesdYVeDLnXgfjJ03CrKRk08knc6+E/9m8v2Q==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "dependencies": {
++        "@babel/code-frame": "^7.10.4",
++        "@babel/runtime": "^7.12.5",
++        "@types/aria-query": "^5.0.1",
++        "aria-query": "5.3.0",
++        "dom-accessibility-api": "^0.5.9",
++        "lz-string": "^1.5.0",
++        "picocolors": "1.1.1",
++        "pretty-format": "^27.0.2"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@testing-library/jest-dom": {
++      "version": "7.0.1",
++      "resolved": "https://registry.npmjs.org/@testing-library/jest-dom/-/jest-dom-7.0.1.tgz",
++      "integrity": "sha512-oMDTC3oA+6CXSO2JZnvOI7CA6oVub6kij5ggk9ohwye5slmkwxYDXcPOVxgMw/RQlticjtO0C1RZkR97HgrWMw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@adobe/css-tools": "^4.4.0",
++        "aria-query": "^5.0.0",
++        "css.escape": "^1.5.1",
++        "dom-accessibility-api": "^0.6.3",
++        "picocolors": "^1.1.1",
++        "redent": "^3.0.0"
++      },
++      "engines": {
++        "node": ">=22",
++        "npm": ">=6",
++        "yarn": ">=1"
++      },
++      "peerDependencies": {
++        "@testing-library/dom": ">=10 <11",
++        "vitest": ">= 0.32"
++      },
++      "peerDependenciesMeta": {
++        "vitest": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@testing-library/jest-dom/node_modules/dom-accessibility-api": {
++      "version": "0.6.3",
++      "resolved": "https://registry.npmjs.org/dom-accessibility-api/-/dom-accessibility-api-0.6.3.tgz",
++      "integrity": "sha512-7ZgogeTnjuHbo+ct10G9Ffp0mif17idi0IyWNVA/wcwcm7NPOD/WEHVP3n7n3MhXqxoIYm8d6MuZohYWIZ4T3w==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@testing-library/react": {
++      "version": "16.3.3",
++      "resolved": "https://registry.npmjs.org/@testing-library/react/-/react-16.3.3.tgz",
++      "integrity": "sha512-Uo193NgQbPMz6lrrhtRQQFcMC6Re/ELLFbbuVL30WDlZxlpZf9/lMHTAVxPRLw1q1iu9OJmR1c2BLiENRstdBg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@babel/runtime": "^7.12.5"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "@testing-library/dom": "^10.0.0",
++        "@types/react": "^18.0.0 || ^19.0.0",
++        "@types/react-dom": "^18.0.0 || ^19.0.0",
++        "react": "^18.0.0 || ^19.0.0",
++        "react-dom": "^18.0.0 || ^19.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        },
++        "@types/react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@testing-library/user-event": {
++      "version": "14.6.9",
++      "resolved": "https://registry.npmjs.org/@testing-library/user-event/-/user-event-14.6.9.tgz",
++      "integrity": "sha512-/8boTjZHNXFi8JGUI2Ev05cq0Szh0OX35Bamkq6CK1ne+l1Xm8BKE3+nGgsnFgaYk0MX67Vh59cZDsNz5lJJEg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=12",
++        "npm": ">=6"
++      },
++      "peerDependencies": {
++        "@testing-library/dom": ">=7.21.4"
++      }
++    },
++    "node_modules/@types/aria-query": {
++      "version": "5.0.4",
++      "resolved": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.4.tgz",
++      "integrity": "sha512-rfT93uj5s0PRL7EzccGMs3brplhcrghnDoV26NqKhCAS1hVo+WdNsPvE/yb6ilfr5hi2MEk6d5EWJTKdxg8jVw==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true
++    },
++    "node_modules/@types/chai": {
++      "version": "5.2.3",
++      "resolved": "https://registry.npmjs.org/@types/chai/-/chai-5.2.3.tgz",
++      "integrity": "sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/deep-eql": "*",
++        "assertion-error": "^2.0.1"
++      }
++    },
++    "node_modules/@types/deep-eql": {
++      "version": "4.0.2",
++      "resolved": "https://registry.npmjs.org/@types/deep-eql/-/deep-eql-4.0.2.tgz",
++      "integrity": "sha512-c9h9dVVMigMPc4bwTvC5dxqtqJZwQPePsWjPlpSOnojbor6pGqdk541lfA7AqFQr5pB1BRdq0juY9db81BwyFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/estree": {
++      "version": "1.0.10",
++      "resolved": "https://registry.npmjs.org/@types/estree/-/estree-1.0.10.tgz",
++      "integrity": "sha512-lTyOMnOcmRBzdCv6/4zUZCrEhV0xrqQiUZBZtVcbmLHBXKLnN8q89v/wKRF/Q0HbwVsqbIG3o5HDoFl9sduM+g==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
++    "node_modules/@vitejs/plugin-react": {
++      "version": "6.2.1",
++      "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
++      "integrity": "sha512-9KyWCij3r0+qLG3Q62vBmv0VyevmYibAtxaCIVK9o0k6CXgaajZRIe8tpfchQcdZArJ5b/7OrIz4W3b2uxVRDA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@rolldown/pluginutils": "^1.0.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      },
++      "peerDependencies": {
++        "@rolldown/plugin-babel": "^0.1.7 || ^0.2.0 || ^0.3.0",
++        "babel-plugin-react-compiler": "^1.0.0",
++        "oxc-transform-react": ">=0.152.0 <0.157.0",
++        "vite": "^8.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@rolldown/plugin-babel": {
++          "optional": true
++        },
++        "babel-plugin-react-compiler": {
++          "optional": true
++        },
++        "oxc-transform-react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@vitest/mocker": {
++      "version": "5.1.0",
++      "resolved": "https://registry.npmjs.org/@vitest/mocker/-/mocker-5.1.0.tgz",
++      "integrity": "sha512-5umB9/jlWcqVS6fsrFmv5Gdnpu6wAUio/lEOwAmvB7v+lFo/IW2B9FhAD0p19GCULTgMzLCdUmuCDCnAzWgppQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/trace-mapping": "0.3.31",
++        "@vitest/spy": "5.1.0",
++        "estree-walker": "^3.0.3",
++        "magic-string": "^1.4.3"
++      },
++      "funding": {
++        "url": "https://opencollective.com/vitest"
++      },
++      "peerDependencies": {
++        "msw": "^2.4.9 || ^3.0.0",
++        "vite": "^6.0.0 || ^7.0.0 || ^8.0.0"
++      },
++      "peerDependenciesMeta": {
++        "msw": {
++          "optional": true
++        },
++        "vite": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@vitest/spy": {
++      "version": "5.1.0",
++      "resolved": "https://registry.npmjs.org/@vitest/spy/-/spy-5.1.0.tgz",
++      "integrity": "sha512-2DPO5OMHWKrBngC+fCmTQqemNF0gidRhp3lxbBmRhW+M1XJrfgPpqNqWVevXtn2f2ufD5ZaR1B6B641aAlcX5A==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "url": "https://opencollective.com/vitest"
++      }
++    },
++    "node_modules/ansi-regex": {
++      "version": "5.0.1",
++      "resolved": "https://registry.npmjs.org/ansi-regex/-/ansi-regex-5.0.1.tgz",
++      "integrity": "sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/ansi-styles": {
++      "version": "5.2.0",
++      "resolved": "https://registry.npmjs.org/ansi-styles/-/ansi-styles-5.2.0.tgz",
++      "integrity": "sha512-Cxwpt2SfTzTtXcfOlzGEee8O+c+MmUgGrNiBcXnuWxuFJHe6a5Hz7qwhwe5OgaSYI0IJvkLqWX1ASG+cJOkEiA==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "engines": {
++        "node": ">=10"
++      },
++      "funding": {
++        "url": "https://github.com/chalk/ansi-styles?sponsor=1"
++      }
++    },
++    "node_modules/aria-query": {
++      "version": "5.3.0",
++      "resolved": "https://registry.npmjs.org/aria-query/-/aria-query-5.3.0.tgz",
++      "integrity": "sha512-b0P0sZPKtyu8HkeRAfCq0IfURZK+SuwMjY1UXGBU27wpAiTwQAIlq56IbIO+ytk/JjS1fMR14ee5WBBfKi5J6A==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "dequal": "^2.0.3"
++      }
++    },
++    "node_modules/assertion-error": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/assertion-error/-/assertion-error-2.0.1.tgz",
++      "integrity": "sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/bcp-47": {
++      "version": "2.1.2",
++      "resolved": "https://registry.npmjs.org/bcp-47/-/bcp-47-2.1.2.tgz",
++      "integrity": "sha512-wsv86UuNFuPnVieKLyECTT+CP1WSAHeoIg5P3xu2kA9Z+7fVPoKt7dxzSeEhtJel0AI+NW3fIW3KtTKQKUCngg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "is-alphabetical": "^2.0.0",
++        "is-alphanumerical": "^2.0.0",
++        "is-decimal": "^2.0.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/bcp-47-match": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/bcp-47-match/-/bcp-47-match-2.0.3.tgz",
++      "integrity": "sha512-JtTezzbAibu8G0R9op9zb3vcWZd9JF6M0xOYGPn0fNCd7wOpRB1mU2mH9T8gaBGbAAyIIVgB2G7xG0GP98zMAQ==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/chai": {
++      "version": "6.3.0",
++      "resolved": "https://registry.npmjs.org/chai/-/chai-6.3.0.tgz",
++      "integrity": "sha512-XWAtwJ6OHO+tj0EKCs0Y2UamnyOxseZWltU4x2U2wh8g4AigdjwvtUjvLP2tqkA/avxHEtzxNaqGq/YGNwckKg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/css.escape": {
++      "version": "1.5.1",
++      "resolved": "https://registry.npmjs.org/css.escape/-/css.escape-1.5.1.tgz",
++      "integrity": "sha512-YUifsXXuknHlUsmlgyY0PKzgPOr7/FjCePfHNt0jxm83wHZi44VDMQ7/fGNkjY3/jV1MC+1CmZbaHzugyeRtpg==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/data-urls": {
++      "version": "8.0.0",
++      "resolved": "https://registry.npmjs.org/data-urls/-/data-urls-8.0.0.tgz",
++      "integrity": "sha512-JQUCCK+/CAGbGGx618PlFZMXH81Jtj7t73CHv9dd/zVWvxgGT2zLFRjnKb+Ng46GIwcy+f7f88qd4duqllK+WQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "whatwg-mimetype": "^5.0.0",
++        "whatwg-url": "^17.1.2"
++      },
++      "engines": {
++        "node": "^22.14.0 || >=24.0.0"
++      }
++    },
++    "node_modules/decimal.js": {
++      "version": "10.6.0",
++      "resolved": "https://registry.npmjs.org/decimal.js/-/decimal.js-10.6.0.tgz",
++      "integrity": "sha512-YpgQiITW3JXGntzdUmyUR1V812Hn8T1YVXhCu+wO3OpS4eU9l4YdD3qjyiKdV6mvV29zapkMeD390UVEf2lkUg==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/dequal": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/dequal/-/dequal-2.0.3.tgz",
++      "integrity": "sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      }
++    },
++    "node_modules/detect-libc": {
++      "version": "2.1.2",
++      "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
++      "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/dom-accessibility-api": {
++      "version": "0.5.16",
++      "resolved": "https://registry.npmjs.org/dom-accessibility-api/-/dom-accessibility-api-0.5.16.tgz",
++      "integrity": "sha512-X7BJ2yElsnOJ30pZF4uIIDfBEVgF4XEBxL9Bxhy6dnrm5hkzqmsWHGTiHqRiITNhMyFLyAiWndIJP7Z1NTteDg==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true
++    },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
++    "node_modules/entities": {
++      "version": "9.0.0",
++      "resolved": "https://registry.npmjs.org/entities/-/entities-9.0.0.tgz",
++      "integrity": "sha512-oJFNDJg3kTPwAD1cNn2+WmUq4wFoo09npc3Ydf1D7ED4smRiWrsKnaLxykrTWgyGEcusc87P5dxlAleol9kpkg==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=20.19.0"
++      },
++      "funding": {
++        "url": "https://github.com/fb55/entities?sponsor=1"
++      }
++    },
++    "node_modules/es-module-lexer": {
++      "version": "2.3.2",
++      "resolved": "https://registry.npmjs.org/es-module-lexer/-/es-module-lexer-2.3.2.tgz",
++      "integrity": "sha512-poHGpORABojJJucnV9KbOavETW8lBVnphkW77ER5/BQ5Fz7oXSoCNek7IH3vR5nRjdsEz926ibFYX8KtLQmdyw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/estree-walker": {
++      "version": "3.0.3",
++      "resolved": "https://registry.npmjs.org/estree-walker/-/estree-walker-3.0.3.tgz",
++      "integrity": "sha512-7RUKfXgSMMkzt6ZuXmqapOurLGPPfgj6l9uRZ7lRGolvk0y2yocc35LdcxKC5PQZdn2DMqioAQ2NoWcrTKmm6g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/estree": "^1.0.0"
++      }
++    },
++    "node_modules/expect-type": {
++      "version": "1.4.0",
++      "resolved": "https://registry.npmjs.org/expect-type/-/expect-type-1.4.0.tgz",
++      "integrity": "sha512-KfYbmpRm0VbLjEvVa9yGwCi9GI34xvi7A/HXYWQO65CSD2u3MczUJSuwXKFIxlGsgBQizV9q5J9NHj4VG0n+pA==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=12.0.0"
++      }
++    },
++    "node_modules/fdir": {
++      "version": "6.5.0",
++      "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
++      "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=12.0.0"
++      },
++      "peerDependencies": {
++        "picomatch": "^3 || ^4"
++      },
++      "peerDependenciesMeta": {
++        "picomatch": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/fsevents": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
++      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
++      "dev": true,
++      "hasInstallScript": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
++      }
++    },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/html-encoding-sniffer": {
++      "version": "7.0.0",
++      "resolved": "https://registry.npmjs.org/html-encoding-sniffer/-/html-encoding-sniffer-7.0.0.tgz",
++      "integrity": "sha512-UikN5yr7xsCDAq87Or5or0PAlD3HJJOKVzM05az588WnpDJ4Ux7a2A53Qi6gofGg2/EtvF/H4hCi/TXfCW4Y6w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@exodus/bytes": "^1.15.1"
++      },
++      "engines": {
++        "node": "^22.13.0 || >=24.0.0"
++      }
++    },
++    "node_modules/indent-string": {
++      "version": "4.0.0",
++      "resolved": "https://registry.npmjs.org/indent-string/-/indent-string-4.0.0.tgz",
++      "integrity": "sha512-EdDDZu4A2OyIK7Lr/2zG+w5jmbuk1DVBnEwREQvBzspBJkCEbRa8GxU1lghYcaGJCnRWibjDXlq779X1/y5xwg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/is-alphabetical": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/is-alphabetical/-/is-alphabetical-2.0.1.tgz",
++      "integrity": "sha512-FWyyY60MeTNyeSRpkM2Iry0G9hpr7/9kD40mD/cGQEuilcZYS4okz8SN2Q6rLCJ8gbCt6fN+rC+6tMGS99LaxQ==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/is-alphanumerical": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/is-alphanumerical/-/is-alphanumerical-2.0.1.tgz",
++      "integrity": "sha512-hmbYhX/9MUMF5uh7tOXyK/n0ZvWpad5caBA17GsC6vyuCqaWliRG5K1qS9inmUhEMaOBIW7/whAnSwveW/LtZw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "is-alphabetical": "^2.0.0",
++        "is-decimal": "^2.0.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/is-decimal": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/is-decimal/-/is-decimal-2.0.1.tgz",
++      "integrity": "sha512-AAB9hiomQs5DXWcRB1rqsxGUstbRroFOPPVAomNk/3XHR5JyEZChOyTWe2oayKnsSsr/kcGqF+z6yuH6HHpN0A==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/is-potential-custom-element-name": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/is-potential-custom-element-name/-/is-potential-custom-element-name-1.0.1.tgz",
++      "integrity": "sha512-bCYeRA2rVibKZd+s2625gGnGF/t7DSqDs4dP7CrLA1m7jKWz6pps0LpYLJN8Q64HtmPKJ1hrN3nzPNKFEKOUiQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
+       "dev": true,
+-      "license": "Apache-2.0",
+-      "engines": {
+-        "node": ">=8"
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
+       }
+     },
+-    "node_modules/fdir": {
+-      "version": "6.5.0",
+-      "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+-      "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
++    "node_modules/js-tokens": {
++      "version": "4.0.0",
++      "resolved": "https://registry.npmjs.org/js-tokens/-/js-tokens-4.0.0.tgz",
++      "integrity": "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==",
+       "dev": true,
+       "license": "MIT",
++      "peer": true
++    },
++    "node_modules/jsdom": {
++      "version": "31.0.0",
++      "resolved": "https://registry.npmjs.org/jsdom/-/jsdom-31.0.0.tgz",
++      "integrity": "sha512-xAkhD9z1eyFC5+QUi9K24CaZJgdCQ2GOGLW1GdVDoQvkp/AxEH9TQ0pAplPOlIiV92hfcgnFOADZypbjgbBT6Q==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@exodus/bytes": "^1.16.0",
++        "bcp-47": "^2.1.2",
++        "bcp-47-match": "^2.0.3",
++        "data-urls": "^8.0.0",
++        "decimal.js": "^10.6.0",
++        "html-encoding-sniffer": "^7.0.0",
++        "is-potential-custom-element-name": "^1.0.1",
++        "lru-cache": "^11.5.3",
++        "parse5": "^8.1.0",
++        "parse5-parser-stream": "^8.1.0",
++        "saxes": "^6.0.0",
++        "tough-cookie": "^6.0.2",
++        "undici": "^8.12.3",
++        "w3c-xmlserializer": "^6.0.0",
++        "webidl-conversions": "^8.0.1",
++        "whatwg-mimetype": "^5.0.0",
++        "whatwg-url": "^17.3.0",
++        "xml-name-validator": "^5.0.0"
++      },
+       "engines": {
+-        "node": ">=12.0.0"
++        "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
+       },
+       "peerDependencies": {
+-        "picomatch": "^3 || ^4"
++        "@napi-rs/canvas": "^1.0.13"
+       },
+       "peerDependenciesMeta": {
+-        "picomatch": {
++        "@napi-rs/canvas": {
+           "optional": true
+         }
+       }
+     },
+-    "node_modules/fsevents": {
+-      "version": "2.3.3",
+-      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+-      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+-      "dev": true,
+-      "hasInstallScript": true,
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "darwin"
+-      ],
+-      "engines": {
+-        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+-      }
+-    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1631,47 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/lru-cache": {
++      "version": "11.5.3",
++      "resolved": "https://registry.npmjs.org/lru-cache/-/lru-cache-11.5.3.tgz",
++      "integrity": "sha512-U4N8FgzmWxc8k1VH8Kr6lQg18U7Fjvby6wXHVRX/ZZ7IwWbRMgrRbP0Wrb5q5NVinryp4SQampHKdvtecItxUg==",
++      "dev": true,
++      "license": "BlueOak-1.0.0",
++      "engines": {
++        "node": "20 || >=22"
++      }
++    },
++    "node_modules/lz-string": {
++      "version": "1.5.0",
++      "resolved": "https://registry.npmjs.org/lz-string/-/lz-string-1.5.0.tgz",
++      "integrity": "sha512-h5bgJWpxJNswbU7qCrV0tIKQCaS3blPDrqKWx+QxzuzL1zGUzij9XCWLrSLsJPu5t+eWA/ycetzYAO5IOMcWAQ==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "bin": {
++        "lz-string": "bin/bin.js"
++      }
++    },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
++    "node_modules/min-indent": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/min-indent/-/min-indent-1.0.1.tgz",
++      "integrity": "sha512-I9jwMn07Sy/IwOj3zVkVik2JTvgpaykDZEigL6Rx6N9LbMywwUSMtxET+7lVoDLLd3O3IXwJwvuuns8UB/HeAg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=4"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -669,6 +1691,46 @@
+         "node": "^10 || ^12 || ^13.7 || ^14 || >=15.0.1"
+       }
+     },
++    "node_modules/obug": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/obug/-/obug-3.0.0.tgz",
++      "integrity": "sha512-5vvB5+W7ePv+p3uqxi+RcW1XAzLW0/hxt3/4X4Lc4qHudzOhmBiBwOY6DRob4WnanAEGvNcLjF+KNOufrUoEQw==",
++      "dev": true,
++      "funding": [
++        "https://github.com/sponsors/sxzz",
++        "https://opencollective.com/debug"
++      ],
++      "license": "MIT",
++      "engines": {
++        "node": ">=12.20.0"
++      }
++    },
++    "node_modules/parse5": {
++      "version": "8.1.1",
++      "resolved": "https://registry.npmjs.org/parse5/-/parse5-8.1.1.tgz",
++      "integrity": "sha512-EcR/6WDcU7b2N3vQSxKALCk9lXGtUMQxXio008OEMBE0kavu/7JLfBEeFPzi43nMqVDSbEn3QCK+BMCc9zO//w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "entities": "^9.0.0"
++      },
++      "funding": {
++        "url": "https://github.com/inikulin/parse5?sponsor=1"
++      }
++    },
++    "node_modules/parse5-parser-stream": {
++      "version": "8.1.1",
++      "resolved": "https://registry.npmjs.org/parse5-parser-stream/-/parse5-parser-stream-8.1.1.tgz",
++      "integrity": "sha512-hMcVbbUJcQmP8rURWUdYrT1flRiBiBVjq/RYGguJpDUgIXSqdYKlE0CxthmdMWoSlBAuL5bUBa73g0pttSy7Hw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "parse5": "^8.1.1"
++      },
++      "funding": {
++        "url": "https://github.com/inikulin/parse5?sponsor=1"
++      }
++    },
+     "node_modules/picocolors": {
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
+@@ -718,6 +1780,32 @@
+         "node": "^10 || ^12 || >=14"
+       }
+     },
++    "node_modules/pretty-format": {
++      "version": "27.5.1",
++      "resolved": "https://registry.npmjs.org/pretty-format/-/pretty-format-27.5.1.tgz",
++      "integrity": "sha512-Qb1gy5OrP5+zDf2Bvnzdl3jsTf1qXVMazbvCoKhtKqVs4/YK4ozX4gKQJJVyNe+cajNPn0KoC0MC3FUmaHWEmQ==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "dependencies": {
++        "ansi-regex": "^5.0.1",
++        "ansi-styles": "^5.0.0",
++        "react-is": "^17.0.1"
++      },
++      "engines": {
++        "node": "^10.13.0 || ^12.13.0 || ^14.15.0 || >=15.0.0"
++      }
++    },
++    "node_modules/punycode": {
++      "version": "2.3.1",
++      "resolved": "https://registry.npmjs.org/punycode/-/punycode-2.3.1.tgz",
++      "integrity": "sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      }
++    },
+     "node_modules/react": {
+       "version": "19.3.1",
+       "resolved": "https://registry.npmjs.org/react/-/react-19.3.1.tgz",
+@@ -739,6 +1827,28 @@
+         "react": "^19.3.1"
+       }
+     },
++    "node_modules/react-is": {
++      "version": "17.0.2",
++      "resolved": "https://registry.npmjs.org/react-is/-/react-is-17.0.2.tgz",
++      "integrity": "sha512-w2GsyukL62IJnlaff/nRegPQR94C/XXamvMWmSHRJ4y7Ts/4ocGRmTHvOs8PSE6pB3dWOrD/nueuU5sduBsQ4w==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true
++    },
++    "node_modules/redent": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/redent/-/redent-3.0.0.tgz",
++      "integrity": "sha512-6tDA8g98We0zd0GvVeMT9arEOnTw9qM03L9cJXaCjrip1OO764RDBLBfrB4cwzNGDj5OA5ioymC9GkizgWJDUg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "indent-string": "^4.0.0",
++        "strip-indent": "^3.0.0"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/rolldown": {
+       "version": "1.2.16",
+       "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz",
+@@ -773,6 +1883,19 @@
+         "@rolldown/binding-win32-x64-msvc": "1.2.16"
+       }
+     },
++    "node_modules/saxes": {
++      "version": "6.0.0",
++      "resolved": "https://registry.npmjs.org/saxes/-/saxes-6.0.0.tgz",
++      "integrity": "sha512-xAg7SOnEhrm5zI3puOOKyy1OMcMlIJZYNJY7xLBwSze0UjhPLnWfj2GF2EpT0jmzaJKIWKHLsaSSajf35bcYnA==",
++      "dev": true,
++      "license": "ISC",
++      "dependencies": {
++        "xmlchars": "^2.2.0"
++      },
++      "engines": {
++        "node": ">=v12.22.7"
++      }
++    },
+     "node_modules/scheduler": {
+       "version": "0.28.0",
+       "resolved": "https://registry.npmjs.org/scheduler/-/scheduler-0.28.0.tgz",
+@@ -789,6 +1912,67 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/std-env": {
++      "version": "4.3.0",
++      "resolved": "https://registry.npmjs.org/std-env/-/std-env-4.3.0.tgz",
++      "integrity": "sha512-OtU/EgQ1kIm5KwqQpBC6ZEMXrZRui11w8zgfTWp8cdO9B8OaPsbA8bTHO2P+HNo1VlUTGMVBwPhydu6poeXiag==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/strip-indent": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/strip-indent/-/strip-indent-3.0.0.tgz",
++      "integrity": "sha512-laJTa3Jb+VQpaC6DseHhF7dXVqHTfJPCRDaEbid/drOhgitgYku/letMUqOXFoWV0zIIUbjpdH2t+tYj4bQMRQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "min-indent": "^1.0.0"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
++    "node_modules/tinybench": {
++      "version": "6.2.3",
++      "resolved": "https://registry.npmjs.org/tinybench/-/tinybench-6.2.3.tgz",
++      "integrity": "sha512-Al01C2JIBnO2CXCAPbpAl6sUiOZHeThGtHYNTa51JRw9PyWOCdr+9Ong05R4qg/Sk3+H645E8ov1h2c58ityNw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=20.0.0"
++      }
++    },
++    "node_modules/tinyexec": {
++      "version": "1.3.1",
++      "resolved": "https://registry.npmjs.org/tinyexec/-/tinyexec-1.3.1.tgz",
++      "integrity": "sha512-GCvB3aoys96IuDFBMcTB46JOR6mdMtAToqwiW8JlWhsoh1mhHi/xn9ss/Dg7N555GiJyEt2qzoG/NHCwM6h1EA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1990,76 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/tldts": {
++      "version": "7.4.21",
++      "resolved": "https://registry.npmjs.org/tldts/-/tldts-7.4.21.tgz",
++      "integrity": "sha512-SomReMX1GpjzK4KzAMr8SKtn628eakKLlPWEEPOLnC2lfKXt5UZ5gh/y2I8cgRI2zWidULCx2p7vfYyjGSwnaw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "tldts-core": "^7.4.21"
++      },
++      "bin": {
++        "tldts": "bin/cli.js"
++      }
++    },
++    "node_modules/tldts-core": {
++      "version": "7.4.21",
++      "resolved": "https://registry.npmjs.org/tldts-core/-/tldts-core-7.4.21.tgz",
++      "integrity": "sha512-sj8bAOjYu9juPKgsB3A58Uj91ybcnsRzgEUxbEGACP32rfJ5o9EScerRIfX1c6GPCiQlMoy4rCu2qTVIQgL4UA==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tough-cookie": {
++      "version": "6.1.0",
++      "resolved": "https://registry.npmjs.org/tough-cookie/-/tough-cookie-6.1.0.tgz",
++      "integrity": "sha512-FTxc8u8Kl2tz0Lat1u8ksvcy8bwHRyEMawwTWybo51JqaC6O7SvfuhAKg+Ld6VqyIe2QRJBzY9HA7y2WyFRT2w==",
++      "dev": true,
++      "license": "BSD-3-Clause",
++      "dependencies": {
++        "tldts": "^7.0.5"
++      },
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/tr46": {
++      "version": "7.0.0",
++      "resolved": "https://registry.npmjs.org/tr46/-/tr46-7.0.0.tgz",
++      "integrity": "sha512-BcDSDW+SIGWVOns1Zm6Yg91q9AEj7eaID0QDY9oIqJD1A8dscNwMcl9Sms2DeuWCNov1X0/oXanHGYQBSLwZsg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "punycode": "^2.3.1"
++      },
++      "engines": {
++        "node": "^22.14.0 || >=24.0.0"
++      }
++    },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
++    "node_modules/undici": {
++      "version": "8.12.4",
++      "resolved": "https://registry.npmjs.org/undici/-/undici-8.12.4.tgz",
++      "integrity": "sha512-8Mx+uNKKER2bA4AdtedkqRbwUCIJFr2nJckXRe5yrDqzePqwLP7VNcctN8/XdmDSbF7mS+jJKIszlL+vbam1VA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=22.19.0"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+@@ -883,6 +2137,167 @@
+           "optional": true
+         }
+       }
++    },
++    "node_modules/vitest": {
++      "version": "5.1.0",
++      "resolved": "https://registry.npmjs.org/vitest/-/vitest-5.1.0.tgz",
++      "integrity": "sha512-MzmNFnrwa8v8lF1bLxw3UJ4EREwVOVb75VqJZmUDRjJ6EluK/x9th7qTbaeDk41WxE1GxWqmTXcdsfobfH5sOA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/chai": "^5.2.2",
++        "@vitest/mocker": "5.1.0",
++        "chai": "^6.3.0",
++        "es-module-lexer": "^2.3.2",
++        "expect-type": "^1.4.0",
++        "magic-string": "^1.4.3",
++        "obug": "^3.0.0",
++        "picomatch": "^4.0.7",
++        "std-env": "^4.3.0",
++        "tinybench": "^6.2.2",
++        "tinyexec": "^1.3.1",
++        "tinyglobby": "^0.2.17",
++        "why-is-node-running": "3.2.1"
++      },
++      "bin": {
++        "vitest": "vitest.mjs"
++      },
++      "engines": {
++        "node": "^22.12.0 || ^24.0.0 || >=26.0.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/vitest"
++      },
++      "peerDependencies": {
++        "@edge-runtime/vm": "*",
++        "@opentelemetry/api": "^1.9.0",
++        "@types/node": "^22.0.0 || >=24.0.0",
++        "@vitest/browser-playwright": "5.1.0",
++        "@vitest/browser-preview": "5.1.0",
++        "@vitest/browser-webdriverio": "^5.0.0-beta.5 || >=5.0.0",
++        "@vitest/coverage-istanbul": "5.1.0",
++        "@vitest/coverage-v8": "5.1.0",
++        "@vitest/ui": "5.1.0",
++        "happy-dom": "*",
++        "jsdom": "*",
++        "vite": "^6.4.0 || ^7.0.0 || ^8.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@edge-runtime/vm": {
++          "optional": true
++        },
++        "@opentelemetry/api": {
++          "optional": true
++        },
++        "@types/node": {
++          "optional": true
++        },
++        "@vitest/browser-playwright": {
++          "optional": true
++        },
++        "@vitest/browser-preview": {
++          "optional": true
++        },
++        "@vitest/browser-webdriverio": {
++          "optional": true
++        },
++        "@vitest/coverage-istanbul": {
++          "optional": true
++        },
++        "@vitest/coverage-v8": {
++          "optional": true
++        },
++        "@vitest/ui": {
++          "optional": true
++        },
++        "happy-dom": {
++          "optional": true
++        },
++        "jsdom": {
++          "optional": true
++        },
++        "vite": {
++          "optional": false
++        }
++      }
++    },
++    "node_modules/w3c-xmlserializer": {
++      "version": "6.0.0",
++      "resolved": "https://registry.npmjs.org/w3c-xmlserializer/-/w3c-xmlserializer-6.0.0.tgz",
++      "integrity": "sha512-4Nsy8K5Tr6SPDH9jhKJOHf7ChDrc1zufZTVSF7x72hwuEXBqxqk9G6cK+K2NRUtB3iELRJqjXb4JPDMBjMTl2Q==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "xml-name-validator": "^5.0.0"
++      },
++      "engines": {
++        "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
++      }
++    },
++    "node_modules/webidl-conversions": {
++      "version": "8.0.1",
++      "resolved": "https://registry.npmjs.org/webidl-conversions/-/webidl-conversions-8.0.1.tgz",
++      "integrity": "sha512-BMhLD/Sw+GbJC21C/UgyaZX41nPt8bUTg+jWyDeg7e7YN4xOM05YPSIXceACnXVtqyEw/LMClUQMtMZ+PGGpqQ==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/whatwg-mimetype": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/whatwg-mimetype/-/whatwg-mimetype-5.0.0.tgz",
++      "integrity": "sha512-sXcNcHOC51uPGF0P/D4NVtrkjSU2fNsm9iog4ZvZJsL3rjoDAzXZhkm2MWt1y+PUdggKAYVoMAIYcs78wJ51Cw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/whatwg-url": {
++      "version": "17.3.0",
++      "resolved": "https://registry.npmjs.org/whatwg-url/-/whatwg-url-17.3.0.tgz",
++      "integrity": "sha512-KwOAJrpf+GTgBvcBQJcP38sMF0DsQKdwtG+TxM2pW44P6E5k0hDbWrDmyuJDIF0Uef0aQq0ZoJs+5oI+k8ddhg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@exodus/bytes": "^1.16.0",
++        "tr46": "^7.0.0",
++        "webidl-conversions": "^8.0.1"
++      },
++      "engines": {
++        "node": "^22.14.0 || >=24.0.0"
++      }
++    },
++    "node_modules/why-is-node-running": {
++      "version": "3.2.1",
++      "resolved": "https://registry.npmjs.org/why-is-node-running/-/why-is-node-running-3.2.1.tgz",
++      "integrity": "sha512-Tb2FUhB4vUsGQlfSquQLYkApkuPAFQXGFzxWKHHumVz2dK+X1RUm/HnID4+TfIGYJ1kTcwOaCk/buYCEJr6YjQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "why-is-node-running": "cli.js"
++      },
++      "engines": {
++        "node": ">=20.11"
++      }
++    },
++    "node_modules/xml-name-validator": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/xml-name-validator/-/xml-name-validator-5.0.0.tgz",
++      "integrity": "sha512-EvGK8EJ3DhaHfbRlETOWAS5pO9MZITeauHKJyb8wyajUfQUenkIg2MvLDTZ4T/TgIcm3HU0TFBgWWboAZ30UHg==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/xmlchars": {
++      "version": "2.2.0",
++      "resolved": "https://registry.npmjs.org/xmlchars/-/xmlchars-2.2.0.tgz",
++      "integrity": "sha512-JZnDKK8B0RCDw84FNdDAIpZK+JuJw+s7Lz8nksI7SIuU3UXJJslUthsi+uWBUYOwPFwW7W7PRLRfUKpxjtjFCw==",
++      "dev": true,
++      "license": "MIT"
+     }
+   }
+ }
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..0ef593f 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,26 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "vite build",
++    "typecheck": "tsc --noEmit",
++    "preview": "vite preview"
+   },
+   "dependencies": {
+     "react": "19.3.1",
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "4.3.5",
++    "@testing-library/jest-dom": "^7.0.1",
++    "@testing-library/react": "^16.3.3",
++    "@testing-library/user-event": "^14.6.9",
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
+-    "vite": "8.3.5"
++    "jsdom": "^31.0.0",
++    "tailwindcss": "4.3.5",
++    "typescript": "5.9.3",
++    "vite": "8.3.5",
++    "vitest": "^5.1.0"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..e50bc60 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,107 @@
++import { useCallback, useEffect, useState } from "react";
++import * as api from "./api";
++import AuthPanel from "./components/AuthPanel";
++import Converter from "./components/Converter";
++import HistoryPanel from "./components/HistoryPanel";
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [token, setToken] = useState<string | null>(() => api.storedToken());
++  const [username, setUsername] = useState<string | null>(() =>
++    api.storedUsername(),
++  );
++  const [error, setError] = useState<string | null>(null);
++  const [historyVersion, setHistoryVersion] = useState(0);
++
++  useEffect(() => {
++    if (!token) {
++      setUsername(null);
++      return;
++    }
++    let active = true;
++    api
++      .me(token)
++      .then((user) => {
++        if (!active) return;
++        setUsername(user.username);
++        api.storeSession(token, user.username);
++      })
++      .catch(() => {
++        if (!active) return;
++        api.clearSession();
++        setToken(null);
++        setUsername(null);
++      });
++    return () => {
++      active = false;
++    };
++  }, [token]);
++
++  const signedIn = useCallback((newToken: string, newUsername: string) => {
++    setToken(newToken);
++    setUsername(newUsername);
++    setHistoryVersion((version) => version + 1);
++  }, []);
++
++  const signedOut = useCallback(() => {
++    setToken(null);
++    setUsername(null);
++    setHistoryVersion((version) => version + 1);
++  }, []);
++
++  const handleError = useCallback((message: string | null) => {
++    setError(message);
++  }, []);
++
++  const refreshHistory = useCallback(() => {
++    setHistoryVersion((version) => version + 1);
++  }, []);
++
++  return (
++    <div className="min-h-screen bg-slate-950 text-slate-100">
++      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-10 sm:px-6">
++        <header className="flex flex-col gap-2">
++          <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl">
++            Base64 Converter
++          </h1>
++          <p className="text-sm text-slate-400">
++            Encode any UTF-8 text to base64 and decode it back. Sign in to keep
++            your conversions in a private history.
++          </p>
++        </header>
++
++        {error ? (
++          <div
++            role="alert"
++            className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200"
++          >
++            {error}
++          </div>
++        ) : null}
++
++        <AuthPanel
++          token={token}
++          username={username}
++          onSignedIn={signedIn}
++          onSignedOut={signedOut}
++          onError={handleError}
++        />
++
++        <Converter
++          token={token}
++          onError={handleError}
++          onSaved={refreshHistory}
++        />
++
++        <HistoryPanel
++          token={token}
++          version={historyVersion}
++          onError={handleError}
++        />
++
++        <footer className="pt-2 text-center text-xs text-slate-600">
++          Base64 Converter — Flask API + React frontend
++        </footer>
++      </div>
++    </div>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..eddddf9
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,151 @@
++import type {
++  AuthUser,
++  ConversionPage,
++  Direction,
++  SavedConversion,
++} from "./types";
++
++const TOKEN_KEY = "base64.token";
++const USERNAME_KEY = "base64.username";
++
++export class ApiError extends Error {
++  status: number;
++
++  constructor(message: string, status: number) {
++    super(message);
++    this.name = "ApiError";
++    this.status = status;
++  }
++}
++
++export function storedToken(): string | null {
++  return window.localStorage.getItem(TOKEN_KEY);
++}
++
++export function storedUsername(): string | null {
++  return window.localStorage.getItem(USERNAME_KEY);
++}
++
++export function storeSession(token: string, username: string): void {
++  window.localStorage.setItem(TOKEN_KEY, token);
++  window.localStorage.setItem(USERNAME_KEY, username);
++}
++
++export function clearSession(): void {
++  window.localStorage.removeItem(TOKEN_KEY);
++  window.localStorage.removeItem(USERNAME_KEY);
++}
++
++async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
++  let response: Response;
++  try {
++    response = await fetch(path, {
++      ...init,
++      headers: {
++        "Content-Type": "application/json",
++        ...(init.headers ?? {}),
++      },
++    });
++  } catch {
++    throw new ApiError("The server could not be reached", 0);
++  }
++
++  const raw = await response.text();
++  let payload: unknown = null;
++  if (raw) {
++    try {
++      payload = JSON.parse(raw);
++    } catch {
++      payload = null;
++    }
++  }
++
++  if (!response.ok) {
++    const data = payload as { error?: string; message?: string } | null;
++    const message =
++      data?.error ?? data?.message ?? `Request failed (${response.status})`;
++    throw new ApiError(message, response.status);
++  }
++
++  return payload as T;
++}
++
++function authHeaders(token: string): HeadersInit {
++  return { Authorization: `Bearer ${token}` };
++}
++
++export async function register(
++  username: string,
++  password: string,
++): Promise<AuthUser> {
++  return request<AuthUser>("/api/auth/register", {
++    method: "POST",
++    body: JSON.stringify({ username, password }),
++  });
++}
++
++export async function login(
++  username: string,
++  password: string,
++): Promise<{ token: string; username: string }> {
++  return request<{ token: string; username: string }>("/api/auth/login", {
++    method: "POST",
++    body: JSON.stringify({ username, password }),
++  });
++}
++
++export async function me(token: string): Promise<AuthUser> {
++  return request<AuthUser>("/api/auth/me", { headers: authHeaders(token) });
++}
++
++export async function encode(text: string): Promise<string> {
++  const data = await request<{ encoded: string }>("/api/base64/encode", {
++    method: "POST",
++    body: JSON.stringify({ text }),
++  });
++  return data.encoded;
++}
++
++export async function decode(encoded: string): Promise<string> {
++  const data = await request<{ text: string }>("/api/base64/decode", {
++    method: "POST",
++    body: JSON.stringify({ encoded }),
++  });
++  return data.text;
++}
++
++export async function saveConversion(
++  token: string,
++  direction: Direction,
++  input: string,
++): Promise<SavedConversion> {
++  return request<SavedConversion>("/api/conversions", {
++    method: "POST",
++    headers: authHeaders(token),
++    body: JSON.stringify({ direction, input }),
++  });
++}
++
++export async function listConversions(
++  token: string,
++  page: number,
++  pageSize: number,
++): Promise<ConversionPage> {
++  const query = new URLSearchParams({
++    page: String(page),
++    page_size: String(pageSize),
++  });
++  return request<ConversionPage>(`/api/conversions?${query.toString()}`, {
++    headers: authHeaders(token),
++  });
++}
++
++export async function deleteConversion(
++  token: string,
++  id: number,
++): Promise<void> {
++  await request<null>(`/api/conversions/${id}`, {
++    method: "DELETE",
++    headers: authHeaders(token),
++  });
++}
+diff --git a/frontend/src/components/AuthPanel.tsx b/frontend/src/components/AuthPanel.tsx
+new file mode 100644
+index 0000000..868e279
+--- /dev/null
++++ b/frontend/src/components/AuthPanel.tsx
+@@ -0,0 +1,152 @@
++import { useState } from "react";
++import type { FormEvent } from "react";
++import * as api from "../api";
++import { ApiError } from "../api";
++
++interface AuthPanelProps {
++  token: string | null;
++  username: string | null;
++  onSignedIn: (token: string, username: string) => void;
++  onSignedOut: () => void;
++  onError: (message: string | null) => void;
++}
++
++export default function AuthPanel({
++  token,
++  username,
++  onSignedIn,
++  onSignedOut,
++  onError,
++}: AuthPanelProps) {
++  const [fields, setFields] = useState({ username: "", password: "" });
++  const [busy, setBusy] = useState(false);
++  const [notice, setNotice] = useState<string | null>(null);
++
++  if (token) {
++    return (
++      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-900/70 px-5 py-4">
++        <p className="text-sm text-slate-300">
++          Signed in as{" "}
++          <span className="font-semibold text-white" data-testid="current-username">
++            {username ?? "unknown"}
++          </span>
++        </p>
++        <button
++          type="button"
++          onClick={() => {
++            api.clearSession();
++            setFields({ username: "", password: "" });
++            setNotice(null);
++            onError(null);
++            onSignedOut();
++          }}
++          title="Log out"
++          className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:text-white"
++        >
++          Sign out
++        </button>
++      </div>
++    );
++  }
++
++  async function submit(event: FormEvent<HTMLFormElement>) {
++    event.preventDefault();
++    onError(null);
++    setNotice(null);
++    const submitter = (event.nativeEvent as SubmitEvent).submitter as
++      | HTMLButtonElement
++      | null;
++    const chosen: "signin" | "register" =
++      submitter?.value === "register" ? "register" : "signin";
++    setBusy(true);
++    try {
++      if (chosen === "register") {
++        await api.register(fields.username, fields.password);
++        setNotice("Account created. Please sign in.");
++        setFields({ username: fields.username, password: "" });
++      } else {
++        const session = await api.login(fields.username, fields.password);
++        api.storeSession(session.token, session.username);
++        onSignedIn(session.token, session.username);
++      }
++    } catch (err) {
++      onError(err instanceof ApiError ? err.message : "Something went wrong");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <form
++      aria-label="Sign in or Register"
++      onSubmit={submit}
++      className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5"
++    >
++      <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
++        Sign in or Register
++      </h2>
++
++      <div className="mt-4 grid gap-3 sm:grid-cols-2">
++        <div className="flex flex-col gap-1">
++          <label htmlFor="username" className="text-sm font-medium text-slate-300">
++            Username
++          </label>
++          <input
++            id="username"
++            name="username"
++            type="text"
++            autoComplete="username"
++            value={fields.username}
++            onChange={(event) =>
++              setFields((current) => ({ ...current, username: event.target.value }))
++            }
++            className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
++            placeholder="Username"
++          />
++        </div>
++
++        <div className="flex flex-col gap-1">
++          <label htmlFor="password" className="text-sm font-medium text-slate-300">
++            Password
++          </label>
++          <input
++            id="password"
++            name="password"
++            type="password"
++            autoComplete="current-password"
++            value={fields.password}
++            onChange={(event) =>
++              setFields((current) => ({ ...current, password: event.target.value }))
++            }
++            className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
++            placeholder="Password"
++          />
++        </div>
++      </div>
++
++      <div className="mt-4 flex flex-wrap items-center gap-2">
++        <button
++          type="submit"
++          value="signin"
++          disabled={busy}
++          title="Log in"
++          className="rounded-lg bg-indigo-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
++        >
++          Sign in
++        </button>
++        <button
++          type="submit"
++          value="register"
++          disabled={busy}
++          title="Create account"
++          className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
++        >
++          Register
++        </button>
++        {notice ? (
++          <p className="text-sm text-emerald-300">{notice}</p>
++        ) : null}
++      </div>
++    </form>
++  );
++}
+diff --git a/frontend/src/components/Converter.tsx b/frontend/src/components/Converter.tsx
+new file mode 100644
+index 0000000..3160868
+--- /dev/null
++++ b/frontend/src/components/Converter.tsx
+@@ -0,0 +1,159 @@
++import { useState } from "react";
++import * as api from "../api";
++import { ApiError } from "../api";
++import type { Direction } from "../types";
++
++interface ConverterProps {
++  token: string | null;
++  onError: (message: string | null) => void;
++  onSaved: () => void;
++}
++
++export default function Converter({ token, onError, onSaved }: ConverterProps) {
++  const [input, setInput] = useState("");
++  const [output, setOutput] = useState("");
++  const [busy, setBusy] = useState(false);
++  const [saveToHistory, setSaveToHistory] = useState(false);
++  const [copied, setCopied] = useState(false);
++
++  async function convert(direction: Direction) {
++    onError(null);
++    setBusy(true);
++    try {
++      let result: string;
++      if (token && saveToHistory) {
++        const saved = await api.saveConversion(token, direction, input);
++        result = saved.output;
++        onSaved();
++      } else if (direction === "encode") {
++        result = await api.encode(input);
++      } else {
++        result = await api.decode(input);
++      }
++      setOutput(result);
++    } catch (err) {
++      setOutput("");
++      onError(err instanceof ApiError ? err.message : "Something went wrong");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function copy() {
++    if (!output) return;
++    try {
++      if (navigator.clipboard?.writeText) {
++        await navigator.clipboard.writeText(output);
++      } else {
++        const area = document.createElement("textarea");
++        area.value = output;
++        area.style.position = "fixed";
++        area.style.opacity = "0";
++        document.body.appendChild(area);
++        area.select();
++        document.execCommand("copy");
++        document.body.removeChild(area);
++      }
++      setCopied(true);
++      window.setTimeout(() => setCopied(false), 1500);
++    } catch {
++      onError("The text could not be copied to the clipboard");
++    }
++  }
++
++  return (
++    <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
++      <div className="flex flex-wrap items-center justify-between gap-3">
++        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
++          Converter
++        </h2>
++        {token ? (
++          <label
++            htmlFor="save-to-history"
++            className="flex cursor-pointer items-center gap-2 text-sm text-slate-300"
++          >
++            <input
++              id="save-to-history"
++              type="checkbox"
++              role="switch"
++              checked={saveToHistory}
++              onChange={(event) => setSaveToHistory(event.target.checked)}
++              className="h-5 w-5 cursor-pointer rounded border-slate-600 bg-slate-950 text-indigo-500 accent-indigo-500 focus:ring-2 focus:ring-indigo-500/50"
++            />
++            Save to history
++          </label>
++        ) : null}
++      </div>
++
++      <div className="mt-4 grid gap-4 md:grid-cols-2">
++        <div className="flex flex-col gap-2">
++          <label htmlFor="input-text" className="text-sm font-medium text-slate-300">
++            Input
++          </label>
++          <textarea
++            id="input-text"
++            name="input"
++            value={input}
++            onChange={(event) => setInput(event.target.value)}
++            rows={8}
++            spellCheck={false}
++            placeholder="Type the text you want to convert"
++            className="w-full resize-y rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
++          />
++          <div className="flex flex-wrap gap-2">
++            <button
++              type="button"
++              onClick={() => convert("encode")}
++              disabled={busy}
++              title="Encode the input as base64"
++              className="rounded-lg bg-indigo-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
++            >
++              Encode
++            </button>
++            <button
++              type="button"
++              onClick={() => convert("decode")}
++              disabled={busy}
++              title="Decode the input from base64"
++              className="rounded-lg bg-slate-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
++            >
++              Decode
++            </button>
++          </div>
++        </div>
++
++        <div className="flex flex-col gap-2">
++          <label htmlFor="output-text" className="text-sm font-medium text-slate-300">
++            Output
++          </label>
++          <textarea
++            id="output-text"
++            name="output"
++            value={output}
++            readOnly
++            rows={8}
++            spellCheck={false}
++            placeholder="The result shows up here"
++            className="w-full resize-y rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
++          />
++          <div className="flex flex-wrap items-center gap-2">
++            <button
++              type="button"
++              onClick={copy}
++              disabled={!output}
++              title="Copy the output to the clipboard"
++              className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
++            >
++              Copy
++            </button>
++            {copied ? (
++              <span role="status" className="text-sm text-emerald-300">
++                Copied to clipboard
++              </span>
++            ) : null}
++          </div>
++        </div>
++      </div>
++    </section>
++  );
++}
+diff --git a/frontend/src/components/HistoryPanel.tsx b/frontend/src/components/HistoryPanel.tsx
+new file mode 100644
+index 0000000..91669cd
+--- /dev/null
++++ b/frontend/src/components/HistoryPanel.tsx
+@@ -0,0 +1,168 @@
++import { useCallback, useEffect, useState } from "react";
++import * as api from "../api";
++import { ApiError } from "../api";
++import type { Conversion } from "../types";
++
++interface HistoryPanelProps {
++  token: string | null;
++  version: number;
++  onError: (message: string | null) => void;
++}
++
++const PAGE_SIZE = 5;
++
++function formatTimestamp(value: string): string {
++  const parsed = new Date(value);
++  if (Number.isNaN(parsed.getTime())) return value;
++  return parsed.toLocaleString();
++}
++
++export default function HistoryPanel({
++  token,
++  version,
++  onError,
++}: HistoryPanelProps) {
++  const [items, setItems] = useState<Conversion[]>([]);
++  const [total, setTotal] = useState(0);
++  const [page, setPage] = useState(1);
++  const [loading, setLoading] = useState(false);
++
++  const load = useCallback(
++    async (targetPage: number) => {
++      if (!token) return;
++      setLoading(true);
++      try {
++        const data = await api.listConversions(token, targetPage, PAGE_SIZE);
++        setItems(data.items);
++        setTotal(data.total);
++        setPage(data.page);
++      } catch (err) {
++        onError(err instanceof ApiError ? err.message : "Something went wrong");
++      } finally {
++        setLoading(false);
++      }
++    },
++    [token, onError],
++  );
++
++  useEffect(() => {
++    setPage(1);
++    void load(1);
++  }, [load, version]);
++
++  if (!token) {
++    return (
++      <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
++        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
++          History
++        </h2>
++        <p className="mt-3 text-sm text-slate-500">
++          Sign in to keep your conversions in a private history.
++        </p>
++      </section>
++    );
++  }
++
++  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
++
++  async function remove(id: number) {
++    if (!token) return;
++    try {
++      await api.deleteConversion(token, id);
++      if (items.length === 1 && page > 1) {
++        await load(page - 1);
++      } else {
++        await load(page);
++      }
++    } catch (err) {
++      onError(err instanceof ApiError ? err.message : "Something went wrong");
++    }
++  }
++
++  return (
++    <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
++      <div className="flex flex-wrap items-center justify-between gap-3">
++        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
++          History
++        </h2>
++        <p className="text-sm text-slate-500">
++          {total} saved conversion{total === 1 ? "" : "s"}
++        </p>
++      </div>
++
++      {items.length === 0 ? (
++        <p className="mt-4 text-sm text-slate-500">
++          Nothing saved yet. Turn on &quot;Save to history&quot; and convert
++          something.
++        </p>
++      ) : (
++        <ul className="mt-4 flex flex-col gap-2">
++          {items.map((item) => (
++            <li
++              key={item.id}
++              data-testid="history-item"
++              className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3"
++            >
++              <div className="min-w-0 flex-1">
++                <div className="flex items-center gap-2">
++                  <span
++                    className={`rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${
++                      item.direction === "encode"
++                        ? "bg-indigo-500/20 text-indigo-200"
++                        : "bg-emerald-500/20 text-emerald-200"
++                    }`}
++                  >
++                    {item.direction}
++                  </span>
++                  <span className="text-xs text-slate-500">
++                    {formatTimestamp(item.created_at)}
++                  </span>
++                </div>
++                <p className="mt-2 truncate font-mono text-sm text-slate-200">
++                  {item.input_preview}
++                </p>
++                <p className="mt-1 truncate font-mono text-sm text-slate-400">
++                  {item.output_preview}
++                </p>
++              </div>
++              <button
++                type="button"
++                onClick={() => remove(item.id)}
++                title="Delete conversion"
++                className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium text-slate-300 transition hover:border-rose-500 hover:text-rose-200"
++              >
++                Delete
++              </button>
++            </li>
++          ))}
++        </ul>
++      )}
++
++      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
++        <p className="text-sm text-slate-500">
++          Page {page} of {pageCount}
++        </p>
++        <div className="flex gap-2">
++          <button
++            type="button"
++            onClick={() => load(page - 1)}
++            disabled={loading || page <= 1}
++            title="Previous page"
++            className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
++          >
++            Previous
++          </button>
++          <button
++            type="button"
++            onClick={() => load(page + 1)}
++            disabled={loading || page >= pageCount}
++            title="Next page"
++            className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
++          >
++            Next
++          </button>
++        </div>
++      </div>
++    </section>
++  );
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..c2a145c 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
++import { StrictMode } from "react";
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <StrictMode>
++    <App />
++  </StrictMode>,
++);
+diff --git a/frontend/src/test/app.test.tsx b/frontend/src/test/app.test.tsx
+new file mode 100644
+index 0000000..87ba488
+--- /dev/null
++++ b/frontend/src/test/app.test.tsx
+@@ -0,0 +1,257 @@
++import { describe, expect, it, beforeEach, vi } from "vitest";
++import { render, screen, waitFor, within } from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import App from "../App";
++
++interface StoredConversion {
++  id: number;
++  user_id: number;
++  direction: "encode" | "decode";
++  input: string;
++  output: string;
++  created_at: string;
++}
++
++const users = new Map<string, { id: number; password: string }>();
++const tokens = new Map<string, number>();
++const conversions: StoredConversion[] = [];
++let nextId = 1;
++
++function json(body: unknown, status = 200) {
++  return new Response(JSON.stringify(body), {
++    status,
++    headers: { "Content-Type": "application/json" },
++  });
++}
++
++function currentUser(request: Request): number | null {
++  const header = request.headers.get("Authorization") ?? "";
++  const token = header.replace(/^Bearer\s+/i, "");
++  return tokens.get(token) ?? null;
++}
++
++function mockFetch(input: RequestInfo | URL, init?: RequestInit) {
++  const request = new Request(input as RequestInfo, init);
++  const url = new URL(request.url);
++  const path = url.pathname;
++  const method = request.method.toUpperCase();
++
++  if (path === "/api/base64/encode" && method === "POST") {
++    return request.json().then((body: { text: string }) =>
++      json({ encoded: btoa(String(body.text)) }),
++    );
++  }
++
++  if (path === "/api/base64/decode" && method === "POST") {
++    return request.json().then((body: { encoded: string }) => {
++      try {
++        return json({ text: atob(String(body.encoded)) });
++      } catch {
++        return json({ error: "Invalid base64 input" }, 400);
++      }
++    });
++  }
++
++  if (path === "/api/auth/register" && method === "POST") {
++    return request.json().then((body: { username: string; password: string }) => {
++      if (users.has(body.username)) {
++        return json({ error: "Username is already taken" }, 409);
++      }
++      const id = users.size + 1;
++      users.set(body.username, { id, password: body.password });
++      return json({ id, username: body.username }, 201);
++    });
++  }
++
++  if (path === "/api/auth/login" && method === "POST") {
++    return request.json().then((body: { username: string; password: string }) => {
++      const user = users.get(body.username);
++      if (!user || user.password !== body.password) {
++        return json({ error: "Invalid username or password" }, 401);
++      }
++      const token = `token-${user.id}`;
++      tokens.set(token, user.id);
++      return json({ token, username: body.username });
++    });
++  }
++
++  if (path === "/api/auth/me") {
++    const userId = currentUser(request);
++    if (!userId) return json({ error: "Authentication required" }, 401);
++    const name = [...users.entries()].find(([, value]) => value.id === userId)?.[0];
++    return json({ id: userId, username: name });
++  }
++
++  if (path === "/api/conversions" && method === "POST") {
++    const userId = currentUser(request);
++    if (!userId) return json({ error: "Authentication required" }, 401);
++    return request.json().then((body: { direction: "encode" | "decode"; input: string }) => {
++      const output =
++        body.direction === "encode"
++          ? btoa(body.input)
++          : (() => {
++              try {
++                return atob(body.input);
++              } catch {
++                return null;
++              }
++            })();
++      if (output === null) return json({ error: "Invalid base64 input" }, 400);
++      const row: StoredConversion = {
++        id: nextId++,
++        user_id: userId,
++        direction: body.direction,
++        input: body.input,
++        output,
++        created_at: new Date().toISOString(),
++      };
++      conversions.push(row);
++      return json({
++        id: row.id,
++        direction: row.direction,
++        input_preview: row.input,
++        output_preview: row.output,
++        created_at: row.created_at,
++        output: row.output,
++      });
++    });
++  }
++
++  if (path === "/api/conversions" && method === "GET") {
++    const userId = currentUser(request);
++    if (!userId) return json({ error: "Authentication required" }, 401);
++    const page = Number(url.searchParams.get("page") ?? "1");
++    const pageSize = Number(url.searchParams.get("page_size") ?? "20");
++    const mine = conversions
++      .filter((row) => row.user_id === userId)
++      .sort((a, b) => b.id - a.id);
++    const items = mine
++      .slice((page - 1) * pageSize, page * pageSize)
++      .map((row) => ({
++        id: row.id,
++        direction: row.direction,
++        input_preview: row.input,
++        output_preview: row.output,
++        created_at: row.created_at,
++      }));
++    return json({ items, total: mine.length, page, page_size: pageSize });
++  }
++
++  const deleteMatch = path.match(/^\/api\/conversions\/(\d+)$/);
++  if (deleteMatch && method === "DELETE") {
++    const userId = currentUser(request);
++    if (!userId) return json({ error: "Authentication required" }, 401);
++    const id = Number(deleteMatch[1]);
++    const index = conversions.findIndex((row) => row.id === id && row.user_id === userId);
++    if (index === -1) return json({ error: "Conversion not found" }, 404);
++    conversions.splice(index, 1);
++    return new Response(null, { status: 204 });
++  }
++
++  return json({ error: "Not found" }, 404);
++}
++
++beforeEach(() => {
++  users.clear();
++  tokens.clear();
++  conversions.length = 0;
++  nextId = 1;
++  vi.stubGlobal("fetch", vi.fn(mockFetch));
++});
++
++async function signIn(user: userEvent.UserEvent, username: string, password: string) {
++  await user.click(screen.getByRole("button", { name: /register/i }));
++  await user.type(screen.getByLabelText("Username"), username);
++  await user.type(screen.getByLabelText("Password"), password);
++  await user.click(screen.getByRole("button", { name: /^register$/i }));
++  await user.click(screen.getByRole("button", { name: /sign in/i }));
++  await screen.findByText(username);
++}
++
++describe("base64 converter", () => {
++  it("encodes and decodes text", async () => {
++    const user = userEvent.setup();
++    render(<App />);
++
++    await user.type(screen.getByLabelText("Input"), "hello");
++    await user.click(screen.getByRole("button", { name: "Encode" }));
++
++    const output = screen.getByLabelText("Output") as HTMLTextAreaElement;
++    await waitFor(() => expect(output.value).toBe("aGVsbG8="));
++
++    await user.clear(screen.getByLabelText("Input"));
++    await user.type(screen.getByLabelText("Input"), "aGVsbG8=");
++    await user.click(screen.getByRole("button", { name: "Decode" }));
++    await waitFor(() => expect(output.value).toBe("hello"));
++  });
++
++  it("shows the api error message for invalid input", async () => {
++    const user = userEvent.setup();
++    render(<App />);
++
++    await user.type(screen.getByLabelText("Input"), "not base64!");
++    await user.click(screen.getByRole("button", { name: "Decode" }));
++
++    const alert = await screen.findByRole("alert");
++    expect(alert).toHaveTextContent("Invalid base64 input");
++  });
++
++  it("exposes unambiguous labels for the account form", () => {
++    render(<App />);
++    expect(screen.getAllByLabelText("Username")).toHaveLength(1);
++    expect(screen.getAllByLabelText("Password")).toHaveLength(1);
++    expect(screen.getAllByLabelText("Input")).toHaveLength(1);
++    expect(screen.getAllByLabelText("Output")).toHaveLength(1);
++    expect(screen.getAllByRole("button", { name: "Encode" })).toHaveLength(1);
++    expect(screen.getAllByRole("button", { name: "Decode" })).toHaveLength(1);
++    expect(screen.getAllByRole("button", { name: "Copy" })).toHaveLength(1);
++  });
++
++  it("registers, signs in and shows the username", async () => {
++    const user = userEvent.setup();
++    render(<App />);
++
++    await user.click(screen.getByRole("button", { name: "Register" }));
++    await user.type(screen.getByLabelText("Username"), "alice");
++    await user.type(screen.getByLabelText("Password"), "s3cret");
++    await user.click(screen.getByRole("button", { name: "Register" }));
++
++    await user.click(screen.getByRole("button", { name: "Sign in" }));
++    expect(await screen.findByText("alice")).toBeInTheDocument();
++    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
++  });
++
++  it("saves, lists, pages and deletes history", async () => {
++    const user = userEvent.setup();
++    render(<App />);
++    await signIn(user, "bob", "hunter22");
++
++    const saveSwitch = screen.getByRole("switch", { name: "Save to history" });
++    await user.click(saveSwitch);
++    expect(saveSwitch).toBeChecked();
++
++    for (const word of ["one", "two", "three"]) {
++      await user.clear(screen.getByLabelText("Input"));
++      await user.type(screen.getByLabelText("Input"), word);
++      await user.click(screen.getByRole("button", { name: "Encode" }));
++    }
++
++    await waitFor(() =>
++      expect(screen.getAllByTestId("history-item")).toHaveLength(3),
++    );
++
++    const items = screen.getAllByTestId("history-item");
++    expect(items[0]).toHaveTextContent("three");
++
++    await user.click(screen.getByRole("button", { name: "Next" }));
++    await waitFor(() =>
++      expect(screen.getByText(/Page 2 of/)).toBeInTheDocument(),
++    );
++
++    const deleteButtons = screen.getAllByRole("button", { name: "Delete" });
++    await user.click(deleteButtons[0]);
++    await waitFor(() =>
++      expect(screen.getAllByTestId("history-item")).toHaveLength(2),
++    );
++  });
++});
+diff --git a/frontend/src/test/setup.ts b/frontend/src/test/setup.ts
+new file mode 100644
+index 0000000..dbe2408
+--- /dev/null
++++ b/frontend/src/test/setup.ts
+@@ -0,0 +1,9 @@
++import "@testing-library/jest-dom/vitest";
++import { afterEach, vi } from "vitest";
++import { cleanup } from "@testing-library/react";
++
++afterEach(() => {
++  cleanup();
++  window.localStorage.clear();
++  vi.unstubAllGlobals();
++});
+diff --git a/frontend/src/types.ts b/frontend/src/types.ts
+new file mode 100644
+index 0000000..79a47d7
+--- /dev/null
++++ b/frontend/src/types.ts
+@@ -0,0 +1,25 @@
++export type Direction = "encode" | "decode";
++
++export interface Conversion {
++  id: number;
++  direction: Direction;
++  input_preview: string;
++  output_preview: string;
++  created_at: string;
++}
++
++export interface SavedConversion extends Conversion {
++  output: string;
++}
++
++export interface ConversionPage {
++  items: Conversion[];
++  total: number;
++  page: number;
++  page_size: number;
++}
++
++export interface AuthUser {
++  id: number;
++  username: string;
++}
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..68a32e2
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,23 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "useDefineForClassFields": true,
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "skipLibCheck": true,
++
++    "moduleResolution": "bundler",
++    "allowImportingTsExtensions": true,
++    "resolveJsonModule": true,
++    "isolatedModules": true,
++    "moduleDetection": "force",
++    "noEmit": true,
++    "jsx": "react-jsx",
++
++    "strict": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "noFallthroughCasesInSwitch": true
++  },
++  "include": ["src", "vite.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });
+diff --git a/frontend/vitest.config.ts b/frontend/vitest.config.ts
+new file mode 100644
+index 0000000..c06c230
+--- /dev/null
++++ b/frontend/vitest.config.ts
+@@ -0,0 +1,12 @@
++import react from "@vitejs/plugin-react";
++import { defineConfig } from "vitest/config";
++
++export default defineConfig({
++  plugins: [react()],
++  test: {
++    environment: "jsdom",
++    globals: true,
++    setupFiles: ["./src/test/setup.ts"],
++    include: ["src/**/*.test.tsx", "src/**/*.test.ts"],
++  },
++});

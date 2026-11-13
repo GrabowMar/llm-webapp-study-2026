@@ -1,0 +1,568 @@
+{
+  "category": "authentication",
+  "features": [
+    "auth",
+    "password-reset",
+    "email-mock"
+  ],
+  "pinned_ref": "account_password_reset@1#51be4203ad47",
+  "prose": "Build an account service with password reset, with a JSON API under `/api` and a web frontend. Accounts have an email address; a user who forgot their password asks for a reset, receives a reset link by email and sets a new password. The app sends no real email: every outgoing message is stored in an outbox that stands in for a mail server.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username`, a `password` and an `email` address; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/me` returns the signed-in account's `id`, `username` and `email`.\n- `PATCH /api/me` changes the account's `email`.\n- `POST /api/me/password` changes the password; the body holds `current_password` and `new_password`.\n- `POST /api/auth/password-reset` takes a `username` or an `email`; when it matches an account with an email address, a message with a single-use reset link is put in the outbox for that address.\n- `POST /api/auth/password-reset/confirm` takes the `token` and a `new_password`, sets the password and invalidates the token.\n- `GET /api/outbox` lists the outbox messages sent to the address given in `to`, newest first; this stands in for reading a mailbox (query parameters: `to`).\n\nData:\n\n- An outbox message is returned as an object with `id`, `to`, `subject`, `body`, `sent_at`.\n- `GET /api/outbox` returns `{\"items\": [...]}`; each item in `items` is an outbox message.\n\nRules:\n\n- Passwords are at least 8 characters long and are never returned by any endpoint.\n- Email addresses are unique ignoring case; an account may have none, and such an account cannot reset its password.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- A 'Forgot password?' form that always answers 'If the account exists, a reset link is on its way'.\n- A `/reset` page that reads the token from the link and asks for the new password twice.\n- An account page with the email address, an edit form and a change-password form.\n- A simple 'Mailbox' page that shows the outbox messages for an address, standing in for an email client.",
+  "ref": "account_password_reset@1",
+  "slug": "account_password_reset",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "anon",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "reset.request",
+        "expect": {
+          "header_contains": null,
+          "json_contains": null,
+          "json_schema": null,
+          "max_ms": null,
+          "status": 202
+        },
+        "id": "reset.unknown.same_response",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": {
+            "email": "nobody-zz@example.com"
+          },
+          "method": "POST",
+          "path": "/api/auth/password-reset",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "authentication",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "email": {
+              "format": "email",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "password": {
+              "minLength": 8,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "me.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/me",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "email": [
+              "string",
+              "null"
+            ],
+            "id": [
+              "integer",
+              "string"
+            ],
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "username"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "me.update",
+        "method": "PATCH",
+        "owner_entity": null,
+        "path": "/api/me",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "email": {
+              "format": "email",
+              "maxLength": 254,
+              "type": "string"
+            }
+          },
+          "required": [
+            "email"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          403
+        ],
+        "id": "me.password",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/me/password",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "current_password": {
+              "type": "string"
+            },
+            "new_password": {
+              "maxLength": 128,
+              "minLength": 8,
+              "type": "string"
+            }
+          },
+          "required": [
+            "current_password",
+            "new_password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "reset.request",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/password-reset",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "email": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 202,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "reset.confirm",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/password-reset/confirm",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "new_password": {
+              "maxLength": 128,
+              "minLength": 8,
+              "type": "string"
+            },
+            "token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "token",
+            "new_password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "outbox.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/outbox",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "to",
+            "required": true,
+            "semantics": "filter",
+            "type": "string"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "body": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "sent_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "subject": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "to": {
+                    "format": "email",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 254,
+            "min": null,
+            "name": "email",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "email",
+            "unique": true
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "to",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "email",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "subject",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "body",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "text",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "sent_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "OutboxMessage",
+        "owned_by_user": false,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "password-reset",
+      "email-mock"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-256",
+        "endpoint": null,
+        "id": "probe.reset.plaintext_password",
+        "kind": "plaintext_password_db",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-307",
+        "endpoint": "reset.request",
+        "id": "probe.reset.rate_limit",
+        "kind": "rate_limit_missing",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Accounts with an email address can reset a forgotten password through a token sent by email.",
+    "surfaces": [
+      "cwe-640",
+      "cwe-330",
+      "cwe-204",
+      "cwe-307",
+      "cwe-613",
+      "cwe-620",
+      "cwe-521",
+      "cwe-256",
+      "cwe-916"
+    ],
+    "title": "Password reset",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "reset.request"
+        ],
+        "id": "ui.forgot",
+        "text": "A 'Forgot password?' form that always answers 'If the account exists, a reset link is on its way'."
+      },
+      {
+        "endpoints": [
+          "reset.confirm"
+        ],
+        "id": "ui.reset",
+        "text": "A `/reset` page that reads the token from the link and asks for the new password twice."
+      },
+      {
+        "endpoints": [
+          "me.get",
+          "me.update",
+          "me.password"
+        ],
+        "id": "ui.account",
+        "text": "An account page with the email address, an edit form and a change-password form."
+      },
+      {
+        "endpoints": [
+          "outbox.list"
+        ],
+        "id": "ui.mailbox",
+        "text": "A simple 'Mailbox' page that shows the outbox messages for an address, standing in for an email client."
+      }
+    ]
+  },
+  "structured_hash": "2a73ebecbd767e3d2cff816f487fa124a610d72a8d457b2135caf60bc284281a",
+  "summary": "Accounts with an email address can reset a forgotten password through a token sent by email.",
+  "surfaces": [
+    "cwe-640",
+    "cwe-330",
+    "cwe-204",
+    "cwe-307",
+    "cwe-613",
+    "cwe-620",
+    "cwe-521",
+    "cwe-256",
+    "cwe-916"
+  ],
+  "task_hash": "4b58f214ce8156e45cd85a7e366879e76654dcd790704073544d5be25f8cfb87",
+  "title": "Password reset",
+  "variant": "standard",
+  "version": 1
+}

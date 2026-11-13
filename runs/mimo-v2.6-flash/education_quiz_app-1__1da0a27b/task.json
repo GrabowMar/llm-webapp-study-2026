@@ -1,0 +1,925 @@
+{
+  "category": "education",
+  "features": [
+    "auth",
+    "ownership",
+    "admin"
+  ],
+  "pinned_ref": "education_quiz_app@1#7ed0062e0d94",
+  "prose": "Build a quiz app with a JSON API under `/api` and a web frontend. Anyone can draw a short random quiz of multiple-choice questions and submit answers to get a score; signed-in users keep a history of their attempts. The admin writes the questions.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/quiz` returns `count` random active questions with their four options but without `correct_option` (query parameters: `count`).\n- `POST /api/attempts` scores a list of `answers` (each a `question_id` and the `selected` option `A` to `D`) and returns the score with every answered question, its correct option and `is_correct`; for a signed-in user the attempt is saved.\n- `GET /api/attempts` lists the signed-in user's saved attempts, newest first.\n- `GET /api/attempts/{id}` returns one saved attempt with the same review as the submit response.\n- `POST /api/admin/questions` adds a question, for the admin.\n- `GET /api/admin/questions` lists every question with its correct option, for the admin (query parameters: `page`, `page_size`).\n\nData:\n\n- An attempt is returned as an object with `id`, `score`, `correct`, `total_questions`, `submitted_at`, `answers`.\n- A question is returned as an object with `id`, `text`, `option_a`, `option_b`, `option_c`, `option_d`, `correct_option`.\n- `GET /api/quiz` returns `{\"items\": [...]}`; each item in `items` is an object with `id`, `text`, `option_a`, `option_b`, `option_c` and `option_d`.\n- `GET /api/attempts` returns `{\"items\": [...]}`; each item in `items` is an attempt.\n- `GET /api/admin/questions` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n}`; each item in `items` is a question.\n\nRules:\n\n- The correct option of a question is never part of a quiz draw; it is revealed only in the result of a submitted attempt.\n- Each user sees only their own saved attempts.\n- On first start the app holds at least 20 general-knowledge questions.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- One question at a time with its options as radio buttons, a progress indicator ('Question 2 of 5'), 'Next' and, on the last question, 'Submit'.\n- A result view with the score, the number correct and every question with the chosen and the correct option marked; visitors see a 'Sign in to save your results' prompt.\n- For signed-in users: the saved attempts (date, score, number of questions); opening one shows its review.\n- For the admin: an 'Add question' form showing the API's validation messages and the question list.",
+  "ref": "education_quiz_app@1",
+  "slug": "education_quiz_app",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "quiz.draw",
+        "expect": {
+          "header_contains": null,
+          "json_contains": null,
+          "json_schema": {
+            "properties": {
+              "items": {
+                "items": {
+                  "not": {
+                    "required": [
+                      "correct_option"
+                    ]
+                  },
+                  "type": "object"
+                },
+                "maxItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "items"
+            ],
+            "type": "object"
+          },
+          "max_ms": null,
+          "status": 200
+        },
+        "id": "quiz.draw.hides_answer",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": null,
+          "method": "GET",
+          "path": "/api/quiz",
+          "query": {
+            "count": 3
+          }
+        },
+        "restart_before": false,
+        "setup": [],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "education",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "quiz.draw",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/quiz",
+        "query": [
+          {
+            "default": 5,
+            "enum": null,
+            "max": 10.0,
+            "name": "count",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "id": [
+                    "integer",
+                    "string"
+                  ],
+                  "option_a": {
+                    "type": "string"
+                  },
+                  "option_b": {
+                    "type": "string"
+                  },
+                  "option_c": {
+                    "type": "string"
+                  },
+                  "option_d": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "option_a",
+                  "option_b",
+                  "option_c",
+                  "option_d"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "attempts.submit",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/attempts",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "answers": {
+              "items": {
+                "properties": {
+                  "question_id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "selected": {
+                    "enum": [
+                      "A",
+                      "B",
+                      "C",
+                      "D"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "question_id",
+                  "selected"
+                ],
+                "type": "object"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "answers"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "answers": {
+              "type": "array"
+            },
+            "correct": {
+              "type": "integer"
+            },
+            "id": [
+              "integer",
+              "string",
+              "null"
+            ],
+            "score": {
+              "type": "integer"
+            },
+            "total_questions": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "score",
+            "correct",
+            "total_questions",
+            "answers"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "attempts.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/attempts",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "answers": {
+                    "type": "array"
+                  },
+                  "correct": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "score": {
+                    "maximum": 100,
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "submitted_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "total_questions": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "answers"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "attempts.get",
+        "method": "GET",
+        "owner_entity": "Attempt",
+        "path": "/api/attempts/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "answers": {
+              "type": "array"
+            },
+            "correct": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "score": {
+              "maximum": 100,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "submitted_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "total_questions": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "answers"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "admin.questions.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/admin/questions",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "correct_option": {
+              "enum": [
+                "A",
+                "B",
+                "C",
+                "D"
+              ],
+              "type": "string"
+            },
+            "option_a": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "option_b": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "option_c": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "option_d": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "text": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "option_a",
+            "option_b",
+            "option_c",
+            "option_d",
+            "correct_option"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "correct_option": {
+              "enum": [
+                "A",
+                "B",
+                "C",
+                "D"
+              ],
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "option_a": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "option_b": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "option_c": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "option_d": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "text": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "text",
+            "option_a",
+            "option_b",
+            "option_c",
+            "option_d",
+            "correct_option"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [],
+        "id": "admin.questions.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/admin/questions",
+        "query": [
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "correct_option": {
+                    "enum": [
+                      "A",
+                      "B",
+                      "C",
+                      "D"
+                    ],
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "option_a": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "option_b": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "option_c": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "option_d": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "text": {
+                    "maxLength": 500,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "option_a",
+                  "option_b",
+                  "option_c",
+                  "option_d",
+                  "correct_option"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 500,
+            "min": null,
+            "name": "text",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 200,
+            "min": null,
+            "name": "option_a",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 200,
+            "min": null,
+            "name": "option_b",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 200,
+            "min": null,
+            "name": "option_c",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 200,
+            "min": null,
+            "name": "option_d",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": [
+              "A",
+              "B",
+              "C",
+              "D"
+            ],
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "correct_option",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "enum",
+            "unique": false
+          }
+        ],
+        "name": "Question",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": 100.0,
+            "max_length": null,
+            "min": 0.0,
+            "name": "score",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "correct",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "total_questions",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "submitted_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Attempt",
+        "owned_by_user": true,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "ownership",
+      "admin"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-639",
+        "endpoint": "attempts.get",
+        "id": "probe.attempts.idor",
+        "kind": "idor_enumeration",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-798",
+        "endpoint": null,
+        "id": "probe.quiz.default_admin",
+        "kind": "default_credential",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Take short random multiple-choice quizzes, review the answers and keep a history of attempts.",
+    "surfaces": [
+      "cwe-200",
+      "cwe-639",
+      "cwe-862",
+      "cwe-20",
+      "cwe-840",
+      "cwe-798"
+    ],
+    "title": "Quiz app",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "quiz.draw",
+          "attempts.submit"
+        ],
+        "id": "ui.quiz",
+        "text": "One question at a time with its options as radio buttons, a progress indicator ('Question 2 of 5'), 'Next' and, on the last question, 'Submit'."
+      },
+      {
+        "endpoints": [
+          "attempts.submit"
+        ],
+        "id": "ui.result",
+        "text": "A result view with the score, the number correct and every question with the chosen and the correct option marked; visitors see a 'Sign in to save your results' prompt."
+      },
+      {
+        "endpoints": [
+          "attempts.list",
+          "attempts.get"
+        ],
+        "id": "ui.history",
+        "text": "For signed-in users: the saved attempts (date, score, number of questions); opening one shows its review."
+      },
+      {
+        "endpoints": [
+          "admin.questions.create",
+          "admin.questions.list"
+        ],
+        "id": "ui.admin",
+        "text": "For the admin: an 'Add question' form showing the API's validation messages and the question list."
+      }
+    ]
+  },
+  "structured_hash": "c2b0054dcfc4accb225c0749df85ebe70a31cf8158729719c20e0dd699334459",
+  "summary": "Take short random multiple-choice quizzes, review the answers and keep a history of attempts.",
+  "surfaces": [
+    "cwe-200",
+    "cwe-639",
+    "cwe-862",
+    "cwe-20",
+    "cwe-840",
+    "cwe-798"
+  ],
+  "task_hash": "51f9349e5612d5eac39bf38f64decc1893f41532d2db717a23d97e1aeb927570",
+  "title": "Quiz app",
+  "variant": "standard",
+  "version": 1
+}

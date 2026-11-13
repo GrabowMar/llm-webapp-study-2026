@@ -1,0 +1,128 @@
+import { expect, test } from "@playwright/test";
+
+test("register, sign in, manage shared customers and conversations", async ({ page, request }) => {
+  const stamp = Date.now();
+  const username = `member_${stamp}`;
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Welcome back." })).toBeVisible();
+  await page.screenshot({ path: "../.cache/login-desktop.png", fullPage: true });
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
+  await page.getByLabel("Username", { exact: true }).fill(username);
+  await page.getByLabel("Password", { exact: true }).fill("password123");
+  await page.getByRole("button", { name: "Create your account" }).click();
+  await expect(page.getByText("Account created. Sign in to join your workspace.")).toBeVisible();
+  await page.getByLabel("Password", { exact: true }).fill("password123");
+  await page.getByRole("button", { name: "Sign in to your workspace" }).click();
+  await expect(page.getByRole("heading", { name: "Customers", exact: true })).toBeVisible();
+  const token = await page.evaluate(() => localStorage.getItem("commonplace-token"));
+  const headers = { Authorization: `Bearer ${token}` };
+  const previous = await request.get("/api/customers?page_size=100", { headers });
+  for (const customer of (await previous.json()).items) {
+    await request.delete(`/api/customers/${customer.id}`, { headers });
+  }
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Customers", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Add customer", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Add customer" }).click();
+  await expect(page.getByText("Name is required.")).toBeVisible();
+  await page.getByLabel("Full name").fill("Alex Morgan");
+  await page.getByLabel("Email address", { exact: true }).fill(`alex${stamp}@example.com`);
+  await page.getByLabel("Phone number").fill("+1 (555) 123-4567");
+  await page.getByLabel("Company", { exact: true }).fill("Acme Studio");
+  await page.getByLabel("Notes", { exact: true }).fill("Prefers a quick call before email.");
+  await page.getByRole("dialog").getByRole("button", { name: "Add customer" }).click();
+  await expect(page.getByRole("link", { name: "AM Alex Morgan" })).toBeVisible();
+  await page.getByRole("button", { name: "Add customer", exact: true }).click();
+  await page.getByLabel("Full name").fill("Jamie Lee");
+  await page.getByLabel("Email address", { exact: true }).fill(`ALEX${stamp}@example.com`);
+  await page.getByRole("dialog").getByRole("button", { name: "Add customer" }).click();
+  await expect(page.getByText("A customer with this email already exists.").last()).toBeVisible();
+  await page.getByLabel("Email address", { exact: true }).fill(`jamie${stamp}@example.com`);
+  await page.getByLabel("Company", { exact: true }).fill("North & Co.");
+  await page.getByRole("dialog").getByRole("button", { name: "Add customer" }).click();
+  await expect(page.getByRole("link", { name: "JL Jamie Lee" })).toBeVisible();
+  await page.getByLabel("Search customers").fill("Alex");
+  await expect(page.getByRole("link", { name: "JL Jamie Lee" })).not.toBeVisible();
+  await page.getByLabel("Clear search").click();
+  await expect(page.getByRole("link", { name: "JL Jamie Lee" })).toBeVisible();
+  await page.getByLabel("Filter by company").selectOption("Acme Studio");
+  await expect(page.getByRole("link", { name: "JL Jamie Lee" })).not.toBeVisible();
+  await page.getByLabel("Filter by company").selectOption("");
+  await expect(page.getByRole("link", { name: "JL Jamie Lee" })).toBeVisible();
+  await page.screenshot({ path: "../.cache/customers-desktop.png", fullPage: true });
+  await page.getByRole("link", { name: "AM Alex Morgan" }).click();
+  await expect(page.getByRole("heading", { name: "Alex Morgan", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Log interaction", exact: true }).click();
+  await expect(page.getByText("Summary is required.")).toBeVisible();
+  await page.getByLabel("What did you talk about?").fill("Discussed the next project and agreed to follow up next week.");
+  await page.getByLabel("When did it happen?").fill("2026-10-15T10:30");
+  await page.getByRole("button", { name: "Log interaction", exact: true }).click();
+  await expect(page.getByText("Discussed the next project and agreed to follow up next week.")).toBeVisible();
+  await expect(page.getByText(username, { exact: true }).last()).toBeVisible();
+  await page.locator("label").filter({ hasText: /^Email$/ }).click();
+  await page.getByLabel("What did you talk about?").fill("An earlier introduction, added later.");
+  await page.getByLabel("When did it happen?").fill("2026-10-01T09:00");
+  await page.getByRole("button", { name: "Log interaction", exact: true }).click();
+  await expect(page.getByText("An earlier introduction, added later.")).toBeVisible();
+  await expect(page.getByText("Oct 15, 2026", { exact: true })).toBeVisible();
+  await page.screenshot({ path: "../.cache/profile-desktop.png", fullPage: true });
+  await page.getByRole("button", { name: "Edit customer" }).click();
+  await page.getByLabel("Phone number").fill("");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByText("Not added", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Alex Morgan", exact: true })).toBeVisible();
+  await expect(page.getByText("Not added", { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: "../.cache/profile-mobile.png", fullPage: true });
+  await page.getByLabel("Delete customer", { exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete customer" }).click();
+  await expect(page.getByRole("heading", { name: "Customers", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "JL Jamie Lee" }).click();
+  await page.getByLabel("Delete customer", { exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete customer" }).click();
+  await page.getByLabel("Open menu").click();
+  await page.getByLabel("Sign out", { exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Welcome back." })).toBeVisible();
+  expect(await page.getByRole("button", { name: "Sign in to your workspace" }).evaluate((element) => element.getBoundingClientRect().bottom <= window.innerHeight)).toBe(true);
+  await page.screenshot({ path: "../.cache/login-mobile.png", fullPage: true });
+  await page.goto("/customers");
+  await expect(page.getByRole("heading", { name: "Welcome back." })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("customer pagination preserves filters and page size", async ({ page, request }) => {
+  const stamp = Date.now();
+  const username = `paging_${stamp}`;
+  await request.post("/api/auth/register", { data: { username, password: "password123" } });
+  const login = await request.post("/api/auth/login", { data: { username, password: "password123" } });
+  const { token } = await login.json();
+  const headers = { Authorization: `Bearer ${token}` };
+  const company = `Paging Company ${stamp}`;
+  const ids: number[] = [];
+  for (let index = 0; index < 12; index++) {
+    const response = await request.post("/api/customers", { headers, data: { name: `Contact ${String(index + 1).padStart(2, "0")}`, company } });
+    ids.push((await response.json()).id);
+  }
+  try {
+    await page.goto("/login");
+    await page.evaluate((value) => localStorage.setItem("commonplace-token", value), token);
+    await page.goto(`/customers?company=${encodeURIComponent(company)}`);
+    await expect(page.getByText("Showing 1–10 of 12 customers")).toBeVisible();
+    await expect(page.getByRole("link", { name: "C0 Contact 01", exact: true })).toBeVisible();
+    await page.getByLabel("Next page").click();
+    await expect(page.getByText("Showing 11–12 of 12 customers")).toBeVisible();
+    await expect(page.getByRole("link", { name: "C1 Contact 11", exact: true })).toBeVisible();
+    await page.getByLabel("Rows per page").selectOption("20");
+    await expect(page.getByText("Showing 1–12 of 12 customers")).toBeVisible();
+    await expect(page.getByLabel("Filter by company")).toHaveValue(company);
+    await page.reload();
+    await expect(page.getByLabel("Rows per page")).toHaveValue("20");
+  } finally {
+    for (const id of ids) await request.delete(`/api/customers/${id}`, { headers });
+    await request.post("/api/auth/logout", { headers });
+  }
+});

@@ -1,0 +1,4329 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..8ef66c8
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,10 @@
++.venv/
++venv/
++__pycache__/
++*.pyc
++node_modules/
++frontend/dist/
++data/
++*.log
++.token
++.e2e/
+diff --git a/README.md b/README.md
+index 24967b9..98ad230 100644
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,10 @@
+-# App
++# Weather Display
++
++A small weather display: a Flask JSON API over a local SQLite store of weather
++reports, plus a React (TypeScript) web frontend served by the same process.
++The app never calls an outside weather service — it serves the reports it holds
++itself. Anyone can look up a city; signed-in users maintain the reports and
++every lookup is recorded.
+ 
+ ## Run contract
+ 
+@@ -10,6 +16,54 @@
+ ## Layout
+ 
+ - `backend/`: the Flask app (`backend/app.py`, served by gunicorn as `app:app`); dependencies in `backend/requirements.txt`.
++  - `backend/store.py` — SQLite schema, queries and seeding.
++  - `backend/security.py` — password hashing and token helpers.
+ - `frontend/`: a Vite project (React + TypeScript). `npm run build` writes `frontend/dist`, which the image copies next to the backend.
++- `tests/test_api.py` — end-to-end checks for the API (`python -m unittest discover -s tests`).
+ 
+ Dependencies are pinned: `backend/requirements.lock` holds the resolved versions and is installed as a pip constraints file. The frontend uses `frontend/package-lock.json` (`npm ci`). When you change dependencies, update the lock file as well (or remove it).
++
++## API
++
++| Method | Path | Notes |
++| --- | --- | --- |
++| `GET` | `/api/health` | `{"status": "ok"}` |
++| `POST` | `/api/auth/register` | `{"username", "password"}` → `201` |
++| `POST` | `/api/auth/login` | `{"username", "password"}` → `200 {"token": "..."}` |
++| `GET` | `/api/auth/me` | the signed-in user, needs a token |
++| `POST` | `/api/auth/logout` | drops the token |
++| `GET` | `/api/weather` | `{"items", "total", "page", "page_size"}`, ordered by city name |
++| `GET` | `/api/weather?city=…` | keeps only that city and records the lookup |
++| `POST` | `/api/weather` | adds a report (needs a token) |
++| `GET` | `/api/weather/{id}` | one report |
++| `PUT` | `/api/weather/{id}` | replaces a report, omitted optional fields are cleared (needs a token) |
++| `DELETE` | `/api/weather/{id}` | deletes a report (needs a token) |
++| `GET` | `/api/weather/recent` | `{"items"}` — the most recent lookups, newest first |
++
++Signed-in requests send `Authorization: Bearer <token>`; requests that need a
++signed-in user answer `401` without a valid token.
++
++A weather report is `{"id", "city", "country", "temperature_c", "condition",
++"humidity", "wind_kph", "observed_at"}` and a lookup is `{"id", "city", "found",
++"looked_up_at"}`. City names are unique ignoring case and `observed_at` is
++always set by the server. On first start the store is seeded with sample reports
++for six cities.
++
++## Frontend
++
++Registration and sign-in, a city search with a weather card, a Celsius/Fahrenheit
++switch that converts the shown temperatures in the browser, the five most recent
++lookups (clicking one repeats the search), and — for signed-in users — the list
++of reports with add and edit forms that surface the API's validation messages,
++plus delete after a confirmation. Styling is Tailwind CSS utility classes.
++
++## Development
++
++```bash
++# backend
++python -m venv .venv && .venv/bin/pip install -r backend/requirements.txt
++.venv/bin/python backend/app.py            # http://localhost:8000
++
++# frontend (proxies /api to localhost:8000)
++cd frontend && npm ci && npm run dev
++```
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..de75377 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,23 +1,382 @@
+-"""Flask entry point."""
++"""Flask entry point: JSON API for weather reports plus the built web frontend."""
+ 
++from __future__ import annotations
++
++import os
++from functools import wraps
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++
++import store
++from security import hash_password, new_token, verify_password
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+ 
++DEFAULT_PAGE_SIZE = 20
++MAX_PAGE_SIZE = 100
++DEFAULT_RECENT_LIMIT = 10
++MAX_RECENT_LIMIT = 100
++
+ app = Flask(__name__, static_folder=None)
+ 
+ 
++def get_db():
++    if "db" not in g:
++        g.db = store.connect()
++    return g.db
++
++
++def init_store():
++    conn = store.connect()
++    try:
++        store.init_db(conn)
++    finally:
++        conn.close()
++
++
++@app.teardown_appcontext
++def close_db(_exception=None):
++    conn = g.pop("db", None)
++    if conn is not None:
++        conn.close()
++
++
++def error_response(status: int, message: str, errors: dict | None = None):
++    payload: dict = {"error": message}
++    if errors:
++        payload["errors"] = errors
++    return jsonify(payload), status
++
++
++def validation_error(errors: dict):
++    first = next(iter(errors.values()), "validation failed")
++    return error_response(400, first, errors)
++
++
++def require_auth(view):
++    @wraps(view)
++    def wrapper(*args, **kwargs):
++        if g.get("current_user") is None:
++            return error_response(401, "authentication required")
++        return view(*args, **kwargs)
++
++    return wrapper
++
++
++@app.before_request
++def resolve_authentication():
++    g.current_user = None
++    header = request.headers.get("Authorization", "")
++    if not header:
++        return None
++    token = header[7:].strip() if header[:7].lower() == "bearer " else ""
++    if not token:
++        return error_response(401, "authentication required")
++    if request.path in ("/api/health", "/api/auth/login", "/api/auth/register"):
++        return None
++    user = store.find_user_by_token(get_db(), token)
++    if user is None:
++        return error_response(401, "invalid or expired token")
++    g.current_user = user
++    return None
++
++
++def json_body():
++    body = request.get_json(silent=True)
++    if body is None:
++        return {}
++    return body
++
++
++def as_number(value):
++    if isinstance(value, bool):
++        return None
++    if isinstance(value, (int, float)):
++        return float(value)
++    if isinstance(value, str):
++        try:
++            return float(value.strip())
++        except ValueError:
++            return None
++    return None
++
++
++def clean_text(value):
++    if value is None:
++        return None
++    text = str(value).strip()
++    return text or None
++
++
++def validate_report_payload(payload):
++    if not isinstance(payload, dict):
++        return {"body": "request body must be a JSON object"}
++
++    errors: dict = {}
++
++    city = payload.get("city")
++    if city is None or (isinstance(city, str) and not city.strip()):
++        errors["city"] = "city is required"
++    elif not isinstance(city, str):
++        errors["city"] = "city must be a string"
++    elif len(city.strip()) > 120:
++        errors["city"] = "city must be at most 120 characters"
++
++    for field in ("country", "condition"):
++        value = payload.get(field)
++        if value is None:
++            continue
++        if not isinstance(value, str):
++            errors[field] = f"{field} must be a string"
++        elif len(value.strip()) > 120:
++            errors[field] = f"{field} must be at most 120 characters"
++
++    temperature = payload.get("temperature_c")
++    if temperature is not None:
++        number = as_number(temperature)
++        if number is None:
++            errors["temperature_c"] = "temperature_c must be a number"
++        elif number < -100 or number > 70:
++            errors["temperature_c"] = "temperature_c must be between -100 and 70 degrees Celsius"
++
++    humidity = payload.get("humidity")
++    if humidity is not None:
++        number = as_number(humidity)
++        if number is None:
++            errors["humidity"] = "humidity must be a number"
++        elif number < 0 or number > 100:
++            errors["humidity"] = "humidity must be between 0 and 100"
++
++    wind = payload.get("wind_kph")
++    if wind is not None:
++        number = as_number(wind)
++        if number is None:
++            errors["wind_kph"] = "wind_kph must be a number"
++        elif number < 0:
++            errors["wind_kph"] = "wind_kph must be zero or greater"
++
++    return errors
++
++
++def clean_report_payload(payload):
++    return {
++        "city": clean_text(payload.get("city")),
++        "country": clean_text(payload.get("country")),
++        "temperature_c": as_number(payload.get("temperature_c")),
++        "condition": clean_text(payload.get("condition")),
++        "humidity": as_number(payload.get("humidity")),
++        "wind_kph": as_number(payload.get("wind_kph")),
++    }
++
++
++def positive_int_arg(name: str, default: int, maximum: int) -> int:
++    raw = request.args.get(name)
++    if raw is None or raw == "":
++        return default
++    try:
++        value = int(raw)
++    except (TypeError, ValueError):
++        return default
++    if value < 1:
++        return default
++    return min(value, maximum)
++
++
+ @app.get("/api/health")
+ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    payload = json_body()
++    if not isinstance(payload, dict):
++        return error_response(400, "request body must be a JSON object")
++
++    errors: dict = {}
++    username = payload.get("username")
++    password = payload.get("password")
++
++    if username is None or (isinstance(username, str) and not username.strip()):
++        errors["username"] = "username is required"
++    elif not isinstance(username, str):
++        errors["username"] = "username must be a string"
++    elif len(username.strip()) > 64:
++        errors["username"] = "username must be at most 64 characters"
++
++    if password is None or (isinstance(password, str) and not password):
++        errors["password"] = "password is required"
++    elif not isinstance(password, str):
++        errors["password"] = "password must be a string"
++    elif len(password) < 4:
++        errors["password"] = "password must be at least 4 characters"
++    elif len(password) > 256:
++        errors["password"] = "password must be at most 256 characters"
++
++    if errors:
++        return validation_error(errors)
++
++    username = username.strip()
++    conn = get_db()
++    if store.find_user_by_username(conn, username) is not None:
++        return error_response(409, "that username is already taken", {"username": "that username is already taken"})
++
++    user = store.create_user(conn, username, hash_password(password))
++    return jsonify({"id": user["id"], "username": user["username"]}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    payload = json_body()
++    if not isinstance(payload, dict):
++        return error_response(400, "request body must be a JSON object")
++
++    username = payload.get("username")
++    password = payload.get("password")
++
++    errors: dict = {}
++    if not isinstance(username, str) or not username.strip():
++        errors["username"] = "username is required"
++    if not isinstance(password, str) or not password:
++        errors["password"] = "password is required"
++    if errors:
++        return validation_error(errors)
++
++    conn = get_db()
++    row = store.find_user_by_username(conn, username.strip())
++    if row is None or not verify_password(password, row["password_hash"]):
++        return error_response(401, "invalid username or password")
++
++    token = new_token()
++    store.create_token(conn, row["id"], token)
++    return jsonify({"token": token, "username": row["username"], "id": row["id"]})
++
++
++@app.get("/api/auth/me")
++@require_auth
++def me():
++    return jsonify(g.current_user)
++
++
++@app.post("/api/auth/logout")
++@require_auth
++def logout():
++    header = request.headers.get("Authorization", "")
++    token = header[7:].strip() if header[:7].lower() == "bearer " else ""
++    store.delete_token(get_db(), token)
++    return jsonify({"ok": True})
++
++
++@app.get("/api/weather")
++def list_weather():
++    city = (request.args.get("city") or "").strip()
++    page = positive_int_arg("page", 1, 1_000_000)
++    page_size = positive_int_arg("page_size", DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE)
++
++    conn = get_db()
++    items, total = store.list_reports(conn, city=city or None, page=page, page_size=page_size)
++
++    if city:
++        found = store.find_report_by_city(conn, city) is not None
++        store.record_lookup(conn, city, found)
++
++    return jsonify({"items": items, "total": total, "page": page, "page_size": page_size})
++
++
++@app.post("/api/weather")
++@require_auth
++def create_weather():
++    payload = json_body()
++    errors = validate_report_payload(payload)
++    if errors:
++        return validation_error(errors)
++
++    data = clean_report_payload(payload)
++    conn = get_db()
++    if store.find_report_by_city(conn, data["city"]) is not None:
++        message = f"a report for {data['city']} already exists"
++        return error_response(409, message, {"city": message})
++
++    report = store.create_report(conn, data)
++    return jsonify(report), 201
++
++
++@app.get("/api/weather/recent")
++def recent_lookups():
++    limit = positive_int_arg("limit", DEFAULT_RECENT_LIMIT, MAX_RECENT_LIMIT)
++    items = store.recent_lookups(get_db(), limit)
++    return jsonify({"items": items})
++
++
++@app.get("/api/weather/<int:report_id>")
++def get_weather(report_id: int):
++    report = store.get_report(get_db(), report_id)
++    if report is None:
++        return error_response(404, "no weather report with that id")
++    return jsonify(report)
++
++
++@app.put("/api/weather/<int:report_id>")
++@require_auth
++def replace_weather(report_id: int):
++    conn = get_db()
++    existing = store.get_report(conn, report_id)
++    if existing is None:
++        return error_response(404, "no weather report with that id")
++
++    payload = json_body()
++    errors = validate_report_payload(payload)
++    if errors:
++        return validation_error(errors)
++
++    data = clean_report_payload(payload)
++    clash = store.find_report_by_city(conn, data["city"])
++    if clash is not None and clash["id"] != report_id:
++        message = f"a report for {data['city']} already exists"
++        return error_response(409, message, {"city": message})
++
++    observed_at = store.next_observed_at(existing["observed_at"])
++    report = store.replace_report(conn, report_id, data, observed_at)
++    return jsonify(report)
++
++
++@app.delete("/api/weather/<int:report_id>")
++@require_auth
++def delete_weather(report_id: int):
++    conn = get_db()
++    if not store.delete_report(conn, report_id):
++        return error_response(404, "no weather report with that id")
++    return jsonify({"deleted": True, "id": report_id})
++
++
++@app.errorhandler(404)
++def not_found(_error):
++    if request.path.startswith("/api/"):
++        return error_response(404, "not found")
++    return frontend("index.html")
++
++
++@app.errorhandler(405)
++def method_not_allowed(_error):
++    if request.path.startswith("/api/"):
++        return error_response(405, "method not allowed")
++    return error_response(405, "method not allowed")
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
++    if path.startswith("api/") or path == "api":
++        return error_response(404, "not found")
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
++
++
++init_store()
++
++
++if __name__ == "__main__":
++    port = int(os.environ.get("PORT", "8000"))
++    app.run(host="0.0.0.0", port=port)
+diff --git a/backend/security.py b/backend/security.py
+new file mode 100644
+index 0000000..6df1898
+--- /dev/null
++++ b/backend/security.py
+@@ -0,0 +1,35 @@
++"""Password hashing and bearer token helpers."""
++
++from __future__ import annotations
++
++import hashlib
++import hmac
++import secrets
++
++ITERATIONS = 120_000
++ALGORITHM = "pbkdf2_sha256"
++
++
++def hash_password(password: str) -> str:
++    salt = secrets.token_bytes(16)
++    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, ITERATIONS)
++    return f"{ALGORITHM}${ITERATIONS}${salt.hex()}${digest.hex()}"
++
++
++def verify_password(password: str, stored: str) -> bool:
++    if not stored:
++        return False
++    try:
++        algorithm, iterations, salt_hex, digest_hex = stored.split("$")
++        if algorithm != ALGORITHM:
++            return False
++        digest = hashlib.pbkdf2_hmac(
++            "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(iterations)
++        )
++    except (ValueError, TypeError):
++        return False
++    return hmac.compare_digest(digest.hex(), digest_hex)
++
++
++def new_token() -> str:
++    return secrets.token_urlsafe(32)
+diff --git a/backend/store.py b/backend/store.py
+new file mode 100644
+index 0000000..3e90424
+--- /dev/null
++++ b/backend/store.py
+@@ -0,0 +1,276 @@
++"""SQLite storage for weather reports, city lookups and accounts."""
++
++from __future__ import annotations
++
++import os
++import sqlite3
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++REPORT_FIELDS = ("id", "city", "country", "temperature_c", "condition", "humidity", "wind_kph", "observed_at")
++LOOKUP_FIELDS = ("id", "city", "found", "looked_up_at")
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL COLLATE NOCASE UNIQUE,
++    password_hash TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS tokens (
++    token TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS reports (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    city TEXT NOT NULL COLLATE NOCASE UNIQUE,
++    country TEXT,
++    temperature_c REAL,
++    condition TEXT,
++    humidity REAL,
++    wind_kph REAL,
++    observed_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS lookups (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    city TEXT NOT NULL,
++    found INTEGER NOT NULL DEFAULT 0,
++    looked_up_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS meta (
++    key TEXT PRIMARY KEY,
++    value TEXT NOT NULL
++);
++
++CREATE INDEX IF NOT EXISTS idx_reports_city ON reports(city COLLATE NOCASE);
++CREATE INDEX IF NOT EXISTS idx_lookups_looked_up_at ON lookups(looked_up_at DESC, id DESC);
++"""
++
++SAMPLE_REPORTS = (
++    ("Barcelona", "Spain", 24.5, "Sunny", 55, 11.0),
++    ("Berlin", "Germany", 18.2, "Cloudy", 72, 15.5),
++    ("Cairo", "Egypt", 33.8, "Clear", 24, 8.0),
++    ("Dublin", "Ireland", 12.4, "Light Rain", 84, 26.0),
++    ("Kyoto", "Japan", 21.0, "Partly Cloudy", 63, 9.5),
++    ("Lima", "Peru", 19.6, "Overcast", 78, 13.0),
++)
++
++
++def now_iso() -> str:
++    return _to_iso(datetime.now(timezone.utc))
++
++
++def _to_iso(moment: datetime) -> str:
++    return moment.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
++
++
++def parse_iso(value: str | None) -> datetime | None:
++    if not value:
++        return None
++    try:
++        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
++    except ValueError:
++        return None
++    if parsed.tzinfo is None:
++        parsed = parsed.replace(tzinfo=timezone.utc)
++    return parsed.astimezone(timezone.utc)
++
++
++def next_observed_at(previous: str | None) -> str:
++    """Server clock, never going backwards relative to the previous value."""
++    now = datetime.now(timezone.utc)
++    previous_moment = parse_iso(previous)
++    if previous_moment is not None and previous_moment >= now:
++        now = previous_moment + timedelta(milliseconds=1)
++    return _to_iso(now)
++
++
++def database_path() -> Path:
++    configured = os.environ.get("DATABASE_PATH")
++    if configured:
++        return Path(configured)
++    data_dir = Path(os.environ.get("DATA_DIR", "data"))
++    return data_dir / "weather.db"
++
++
++def connect(path: Path | None = None) -> sqlite3.Connection:
++    target = path or database_path()
++    target.parent.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(target, timeout=15, isolation_level=None)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA journal_mode=WAL")
++    conn.execute("PRAGMA foreign_keys=ON")
++    conn.execute("PRAGMA busy_timeout=15000")
++    return conn
++
++
++def init_db(conn: sqlite3.Connection) -> None:
++    conn.executescript(SCHEMA)
++    seed_sample_reports(conn)
++
++
++def seed_sample_reports(conn: sqlite3.Connection) -> None:
++    row = conn.execute("SELECT value FROM meta WHERE key = 'seeded'").fetchone()
++    if row is not None:
++        return
++    stamp = now_iso()
++    for city, country, temperature_c, condition, humidity, wind_kph in SAMPLE_REPORTS:
++        conn.execute(
++            """INSERT OR IGNORE INTO reports
++               (city, country, temperature_c, condition, humidity, wind_kph, observed_at)
++               VALUES (?, ?, ?, ?, ?, ?, ?)""",
++            (city, country, temperature_c, condition, humidity, wind_kph, stamp),
++        )
++    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded', ?)", (stamp,))
++
++
++def report_to_dict(row: sqlite3.Row) -> dict:
++    return {
++        "id": row["id"],
++        "city": row["city"],
++        "country": row["country"],
++        "temperature_c": row["temperature_c"],
++        "condition": row["condition"],
++        "humidity": row["humidity"],
++        "wind_kph": row["wind_kph"],
++        "observed_at": row["observed_at"],
++    }
++
++
++def lookup_to_dict(row: sqlite3.Row) -> dict:
++    return {
++        "id": row["id"],
++        "city": row["city"],
++        "found": bool(row["found"]),
++        "looked_up_at": row["looked_up_at"],
++    }
++
++
++def list_reports(
++    conn: sqlite3.Connection,
++    city: str | None = None,
++    page: int = 1,
++    page_size: int = 20,
++) -> tuple[list[dict], int]:
++    where = ""
++    params: list = []
++    if city:
++        where = " WHERE city = ? COLLATE NOCASE"
++        params.append(city)
++    total = conn.execute(f"SELECT COUNT(*) AS count FROM reports{where}", params).fetchone()["count"]
++    offset = (page - 1) * page_size
++    rows = conn.execute(
++        f"SELECT * FROM reports{where} ORDER BY city COLLATE NOCASE ASC, id ASC LIMIT ? OFFSET ?",
++        [*params, page_size, offset],
++    ).fetchall()
++    return [report_to_dict(row) for row in rows], total
++
++
++def get_report(conn: sqlite3.Connection, report_id: int) -> dict | None:
++    row = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
++    return report_to_dict(row) if row else None
++
++
++def find_report_by_city(conn: sqlite3.Connection, city: str) -> dict | None:
++    row = conn.execute("SELECT * FROM reports WHERE city = ? COLLATE NOCASE", (city,)).fetchone()
++    return report_to_dict(row) if row else None
++
++
++def create_report(conn: sqlite3.Connection, data: dict, observed_at: str | None = None) -> dict:
++    cursor = conn.execute(
++        """INSERT INTO reports (city, country, temperature_c, condition, humidity, wind_kph, observed_at)
++           VALUES (?, ?, ?, ?, ?, ?, ?)""",
++        (
++            data["city"],
++            data.get("country"),
++            data.get("temperature_c"),
++            data.get("condition"),
++            data.get("humidity"),
++            data.get("wind_kph"),
++            observed_at or now_iso(),
++        ),
++    )
++    return get_report(conn, cursor.lastrowid)  # type: ignore[return-value]
++
++
++def replace_report(conn: sqlite3.Connection, report_id: int, data: dict, observed_at: str) -> dict | None:
++    conn.execute(
++        """UPDATE reports
++           SET city = ?, country = ?, temperature_c = ?, condition = ?, humidity = ?, wind_kph = ?, observed_at = ?
++           WHERE id = ?""",
++        (
++            data["city"],
++            data.get("country"),
++            data.get("temperature_c"),
++            data.get("condition"),
++            data.get("humidity"),
++            data.get("wind_kph"),
++            observed_at,
++            report_id,
++        ),
++    )
++    return get_report(conn, report_id)
++
++
++def delete_report(conn: sqlite3.Connection, report_id: int) -> bool:
++    cursor = conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
++    return cursor.rowcount > 0
++
++
++def record_lookup(conn: sqlite3.Connection, city: str, found: bool) -> dict:
++    stamp = now_iso()
++    cursor = conn.execute(
++        "INSERT INTO lookups (city, found, looked_up_at) VALUES (?, ?, ?)",
++        (city, 1 if found else 0, stamp),
++    )
++    row = conn.execute("SELECT * FROM lookups WHERE id = ?", (cursor.lastrowid,)).fetchone()
++    return lookup_to_dict(row)
++
++
++def recent_lookups(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
++    rows = conn.execute(
++        "SELECT * FROM lookups ORDER BY looked_up_at DESC, id DESC LIMIT ?", (limit,)
++    ).fetchall()
++    return [lookup_to_dict(row) for row in rows]
++
++
++def create_user(conn: sqlite3.Connection, username: str, password_hash: str) -> dict:
++    stamp = now_iso()
++    cursor = conn.execute(
++        "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++        (username, password_hash, stamp),
++    )
++    row = conn.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
++    return {"id": row["id"], "username": row["username"], "created_at": row["created_at"]}
++
++
++def find_user_by_username(conn: sqlite3.Connection, username: str) -> sqlite3.Row | None:
++    return conn.execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
++
++
++def create_token(conn: sqlite3.Connection, user_id: int, token: str) -> None:
++    conn.execute(
++        "INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)",
++        (token, user_id, now_iso()),
++    )
++
++
++def find_user_by_token(conn: sqlite3.Connection, token: str) -> dict | None:
++    row = conn.execute(
++        """SELECT users.id AS id, users.username AS username
++           FROM tokens JOIN users ON users.id = tokens.user_id
++           WHERE tokens.token = ?""",
++        (token,),
++    ).fetchone()
++    if row is None:
++        return None
++    return {"id": row["id"], "username": row["username"]}
++
++
++def delete_token(conn: sqlite3.Connection, token: str) -> None:
++    conn.execute("DELETE FROM tokens WHERE token = ?", (token,))
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..2c3ab6f 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Weather Display</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..65e93fc 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,8 +10,130 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "^4.3.5",
++        "@testing-library/jest-dom": "^6.9.1",
++        "@testing-library/react": "^16.3.0",
++        "@testing-library/user-event": "^14.6.1",
++        "@types/react": "^19.3.0",
++        "@types/react-dom": "^19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
+-        "vite": "8.3.5"
++        "jsdom": "^31.0.0",
++        "tailwindcss": "^4.3.5",
++        "typescript": "^5.9.3",
++        "vite": "8.3.5",
++        "vitest": "^5.1.0"
++      }
++    },
++    "node_modules/@adobe/css-tools": {
++      "version": "4.5.0",
++      "resolved": "https://registry.npmjs.org/@adobe/css-tools/-/css-tools-4.5.0.tgz",
++      "integrity": "sha512-6OzddxPio9UiWTCemp4N8cYLV2ZN1ncRnV1cVGtve7dhPOtRkleRyx32GQCYSwDYgaHU3USMm84tNsvKzRCa1Q==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@babel/code-frame": {
++      "version": "7.29.7",
++      "resolved": "https://registry.npmjs.org/@babel/code-frame/-/code-frame-7.29.7.tgz",
++      "integrity": "sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "dependencies": {
++        "@babel/helper-validator-identifier": "^7.29.7",
++        "js-tokens": "^4.0.0",
++        "picocolors": "^1.1.1"
++      },
++      "engines": {
++        "node": ">=6.9.0"
++      }
++    },
++    "node_modules/@babel/helper-validator-identifier": {
++      "version": "7.29.7",
++      "resolved": "https://registry.npmjs.org/@babel/helper-validator-identifier/-/helper-validator-identifier-7.29.7.tgz",
++      "integrity": "sha512-qehxGkRj55h/ff8EMaJ+cYhyaKlHIxqYDn682wQD7RNp9UujOQsHog2uS0r2vzr4pW+sXf90NeeayjcNaX3fFg==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "engines": {
++        "node": ">=6.9.0"
++      }
++    },
++    "node_modules/@babel/runtime": {
++      "version": "7.29.13",
++      "resolved": "https://registry.npmjs.org/@babel/runtime/-/runtime-7.29.13.tgz",
++      "integrity": "sha512-v+oN26xP4YIlQsbQ/CbTH1WG5m/l/DjKKZNy/Kp3f/AFvbgt7Em/D0FeMM3O2hX0YzeN2M16W8lOpyhIkfCBcQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.9.0"
++      }
++    },
++    "node_modules/@exodus/bytes": {
++      "version": "1.16.0",
++      "resolved": "https://registry.npmjs.org/@exodus/bytes/-/bytes-1.16.0.tgz",
++      "integrity": "sha512-IcpW84uEn3N7ETtNZMlxKhfl6Pec8rUNGOTBtWbK1FKhJxIFAptZyVrvVRVBimAJxJCgc3PxepxkdWWG4DVzfA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
++      },
++      "peerDependencies": {
++        "@noble/hashes": "^1.8.0 || ^2.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@noble/hashes": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
+       }
+     },
+     "node_modules/@oxc-project/types": {
+@@ -304,79 +426,929 @@
+       "dev": true,
+       "license": "MIT"
+     },
+-    "node_modules/@vitejs/plugin-react": {
+-      "version": "6.2.1",
+-      "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+-      "integrity": "sha512-9KyWCij3r0+qLG3Q62vBmv0VyevmYibAtxaCIVK9o0k6CXgaajZRIe8tpfchQcdZArJ5b/7OrIz4W3b2uxVRDA==",
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+-        "@rolldown/pluginutils": "^1.0.1"
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
+       },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
+       },
+-      "peerDependencies": {
+-        "@rolldown/plugin-babel": "^0.1.7 || ^0.2.0 || ^0.3.0",
+-        "babel-plugin-react-compiler": "^1.0.0",
+-        "oxc-transform-react": ">=0.152.0 <0.157.0",
+-        "vite": "^8.0.0"
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
+       },
+-      "peerDependenciesMeta": {
+-        "@rolldown/plugin-babel": {
+-          "optional": true
+-        },
+-        "babel-plugin-react-compiler": {
+-          "optional": true
+-        },
+-        "oxc-transform-react": {
+-          "optional": true
+-        }
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
+       }
+     },
+-    "node_modules/detect-libc": {
+-      "version": "2.1.2",
+-      "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+-      "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@testing-library/dom": {
++      "version": "10.4.2",
++      "resolved": "https://registry.npmjs.org/@testing-library/dom/-/dom-10.4.2.tgz",
++      "integrity": "sha512-yzr2S9HyAIdhz2/6qHgbs665Q7PKVcDF05vsOlHPxG1mo36gKVesdYVeDLnXgfjJ03CrKRk08knc6+E/9m8v2Q==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "dependencies": {
++        "@babel/code-frame": "^7.10.4",
++        "@babel/runtime": "^7.12.5",
++        "@types/aria-query": "^5.0.1",
++        "aria-query": "5.3.0",
++        "dom-accessibility-api": "^0.5.9",
++        "lz-string": "^1.5.0",
++        "picocolors": "1.1.1",
++        "pretty-format": "^27.0.2"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@testing-library/jest-dom": {
++      "version": "6.9.1",
++      "resolved": "https://registry.npmjs.org/@testing-library/jest-dom/-/jest-dom-6.9.1.tgz",
++      "integrity": "sha512-zIcONa+hVtVSSep9UT3jZ5rizo2BsxgyDYU7WFD5eICBE7no3881HGeb/QkGfsJs6JTkY1aQhT7rIPC7e+0nnA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@adobe/css-tools": "^4.4.0",
++        "aria-query": "^5.0.0",
++        "css.escape": "^1.5.1",
++        "dom-accessibility-api": "^0.6.3",
++        "picocolors": "^1.1.1",
++        "redent": "^3.0.0"
++      },
++      "engines": {
++        "node": ">=14",
++        "npm": ">=6",
++        "yarn": ">=1"
++      }
++    },
++    "node_modules/@testing-library/jest-dom/node_modules/dom-accessibility-api": {
++      "version": "0.6.3",
++      "resolved": "https://registry.npmjs.org/dom-accessibility-api/-/dom-accessibility-api-0.6.3.tgz",
++      "integrity": "sha512-7ZgogeTnjuHbo+ct10G9Ffp0mif17idi0IyWNVA/wcwcm7NPOD/WEHVP3n7n3MhXqxoIYm8d6MuZohYWIZ4T3w==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@testing-library/react": {
++      "version": "16.3.0",
++      "resolved": "https://registry.npmjs.org/@testing-library/react/-/react-16.3.0.tgz",
++      "integrity": "sha512-kFSyxiEDwv1WLl2fgsq6pPBbw5aWKrsY2/noi1Id0TK0UParSF62oFQFGHXIyaG4pp2tEub/Zlel+fjjZILDsw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@babel/runtime": "^7.12.5"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "@testing-library/dom": "^10.0.0",
++        "@types/react": "^18.0.0 || ^19.0.0",
++        "@types/react-dom": "^18.0.0 || ^19.0.0",
++        "react": "^18.0.0 || ^19.0.0",
++        "react-dom": "^18.0.0 || ^19.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        },
++        "@types/react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@testing-library/user-event": {
++      "version": "14.6.1",
++      "resolved": "https://registry.npmjs.org/@testing-library/user-event/-/user-event-14.6.1.tgz",
++      "integrity": "sha512-vq7fv0rnt+QTXgPxr5Hjc210p6YKq2kmdziLgnsZGgLJ9e6VAShx1pACLuRjd/AS/sr7phAR58OIIpf0LlmQNw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=12",
++        "npm": ">=6"
++      },
++      "peerDependencies": {
++        "@testing-library/dom": ">=7.21.4"
++      }
++    },
++    "node_modules/@types/aria-query": {
++      "version": "5.0.4",
++      "resolved": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.4.tgz",
++      "integrity": "sha512-rfT93uj5s0PRL7EzccGMs3brplhcrghnDoV26NqKhCAS1hVo+WdNsPvE/yb6ilfr5hi2MEk6d5EWJTKdxg8jVw==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true
++    },
++    "node_modules/@types/chai": {
++      "version": "5.2.3",
++      "resolved": "https://registry.npmjs.org/@types/chai/-/chai-5.2.3.tgz",
++      "integrity": "sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/deep-eql": "*",
++        "assertion-error": "^2.0.1"
++      }
++    },
++    "node_modules/@types/deep-eql": {
++      "version": "4.0.2",
++      "resolved": "https://registry.npmjs.org/@types/deep-eql/-/deep-eql-4.0.2.tgz",
++      "integrity": "sha512-c9h9dVVMigMPc4bwTvC5dxqtqJZwQPePsWjPlpSOnojbor6pGqdk541lfA7AqFQr5pB1BRdq0juY9db81BwyFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/estree": {
++      "version": "1.0.10",
++      "resolved": "https://registry.npmjs.org/@types/estree/-/estree-1.0.10.tgz",
++      "integrity": "sha512-lTyOMnOcmRBzdCv6/4zUZCrEhV0xrqQiUZBZtVcbmLHBXKLnN8q89v/wKRF/Q0HbwVsqbIG3o5HDoFl9sduM+g==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
++    "node_modules/@vitejs/plugin-react": {
++      "version": "6.2.1",
++      "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
++      "integrity": "sha512-9KyWCij3r0+qLG3Q62vBmv0VyevmYibAtxaCIVK9o0k6CXgaajZRIe8tpfchQcdZArJ5b/7OrIz4W3b2uxVRDA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@rolldown/pluginutils": "^1.0.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      },
++      "peerDependencies": {
++        "@rolldown/plugin-babel": "^0.1.7 || ^0.2.0 || ^0.3.0",
++        "babel-plugin-react-compiler": "^1.0.0",
++        "oxc-transform-react": ">=0.152.0 <0.157.0",
++        "vite": "^8.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@rolldown/plugin-babel": {
++          "optional": true
++        },
++        "babel-plugin-react-compiler": {
++          "optional": true
++        },
++        "oxc-transform-react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@vitest/mocker": {
++      "version": "5.1.0",
++      "resolved": "https://registry.npmjs.org/@vitest/mocker/-/mocker-5.1.0.tgz",
++      "integrity": "sha512-5umB9/jlWcqVS6fsrFmv5Gdnpu6wAUio/lEOwAmvB7v+lFo/IW2B9FhAD0p19GCULTgMzLCdUmuCDCnAzWgppQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/trace-mapping": "0.3.31",
++        "@vitest/spy": "5.1.0",
++        "estree-walker": "^3.0.3",
++        "magic-string": "^1.4.3"
++      },
++      "funding": {
++        "url": "https://opencollective.com/vitest"
++      },
++      "peerDependencies": {
++        "msw": "^2.4.9 || ^3.0.0",
++        "vite": "^6.0.0 || ^7.0.0 || ^8.0.0"
++      },
++      "peerDependenciesMeta": {
++        "msw": {
++          "optional": true
++        },
++        "vite": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@vitest/spy": {
++      "version": "5.1.0",
++      "resolved": "https://registry.npmjs.org/@vitest/spy/-/spy-5.1.0.tgz",
++      "integrity": "sha512-2DPO5OMHWKrBngC+fCmTQqemNF0gidRhp3lxbBmRhW+M1XJrfgPpqNqWVevXtn2f2ufD5ZaR1B6B641aAlcX5A==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "url": "https://opencollective.com/vitest"
++      }
++    },
++    "node_modules/ansi-regex": {
++      "version": "5.0.1",
++      "resolved": "https://registry.npmjs.org/ansi-regex/-/ansi-regex-5.0.1.tgz",
++      "integrity": "sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/ansi-styles": {
++      "version": "5.2.0",
++      "resolved": "https://registry.npmjs.org/ansi-styles/-/ansi-styles-5.2.0.tgz",
++      "integrity": "sha512-Cxwpt2SfTzTtXcfOlzGEee8O+c+MmUgGrNiBcXnuWxuFJHe6a5Hz7qwhwe5OgaSYI0IJvkLqWX1ASG+cJOkEiA==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "engines": {
++        "node": ">=10"
++      },
++      "funding": {
++        "url": "https://github.com/chalk/ansi-styles?sponsor=1"
++      }
++    },
++    "node_modules/aria-query": {
++      "version": "5.3.0",
++      "resolved": "https://registry.npmjs.org/aria-query/-/aria-query-5.3.0.tgz",
++      "integrity": "sha512-b0P0sZPKtyu8HkeRAfCq0IfURZK+SuwMjY1UXGBU27wpAiTwQAIlq56IbIO+ytk/JjS1fMR14ee5WBBfKi5J6A==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "dequal": "^2.0.3"
++      }
++    },
++    "node_modules/assertion-error": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/assertion-error/-/assertion-error-2.0.1.tgz",
++      "integrity": "sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/bcp-47": {
++      "version": "2.1.2",
++      "resolved": "https://registry.npmjs.org/bcp-47/-/bcp-47-2.1.2.tgz",
++      "integrity": "sha512-wsv86UuNFuPnVieKLyECTT+CP1WSAHeoIg5P3xu2kA9Z+7fVPoKt7dxzSeEhtJel0AI+NW3fIW3KtTKQKUCngg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "is-alphabetical": "^2.0.0",
++        "is-alphanumerical": "^2.0.0",
++        "is-decimal": "^2.0.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/bcp-47-match": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/bcp-47-match/-/bcp-47-match-2.0.3.tgz",
++      "integrity": "sha512-JtTezzbAibu8G0R9op9zb3vcWZd9JF6M0xOYGPn0fNCd7wOpRB1mU2mH9T8gaBGbAAyIIVgB2G7xG0GP98zMAQ==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/chai": {
++      "version": "6.3.0",
++      "resolved": "https://registry.npmjs.org/chai/-/chai-6.3.0.tgz",
++      "integrity": "sha512-XWAtwJ6OHO+tj0EKCs0Y2UamnyOxseZWltU4x2U2wh8g4AigdjwvtUjvLP2tqkA/avxHEtzxNaqGq/YGNwckKg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/css.escape": {
++      "version": "1.5.1",
++      "resolved": "https://registry.npmjs.org/css.escape/-/css.escape-1.5.1.tgz",
++      "integrity": "sha512-YUifsXXuknHlUsmlgyY0PKzgPOr7/FjCePfHNt0jxm83wHZi44VDMQ7/fGNkjY3/jV1MC+1CmZbaHzugyeRtpg==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/data-urls": {
++      "version": "8.0.0",
++      "resolved": "https://registry.npmjs.org/data-urls/-/data-urls-8.0.0.tgz",
++      "integrity": "sha512-JQUCCK+/CAGbGGx618PlFZMXH81Jtj7t73CHv9dd/zVWvxgGT2zLFRjnKb+Ng46GIwcy+f7f88qd4duqllK+WQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "whatwg-mimetype": "^5.0.0",
++        "whatwg-url": "^17.1.2"
++      },
++      "engines": {
++        "node": "^22.14.0 || >=24.0.0"
++      }
++    },
++    "node_modules/decimal.js": {
++      "version": "10.6.0",
++      "resolved": "https://registry.npmjs.org/decimal.js/-/decimal.js-10.6.0.tgz",
++      "integrity": "sha512-YpgQiITW3JXGntzdUmyUR1V812Hn8T1YVXhCu+wO3OpS4eU9l4YdD3qjyiKdV6mvV29zapkMeD390UVEf2lkUg==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/dequal": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/dequal/-/dequal-2.0.3.tgz",
++      "integrity": "sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      }
++    },
++    "node_modules/detect-libc": {
++      "version": "2.1.2",
++      "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
++      "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/dom-accessibility-api": {
++      "version": "0.5.16",
++      "resolved": "https://registry.npmjs.org/dom-accessibility-api/-/dom-accessibility-api-0.5.16.tgz",
++      "integrity": "sha512-X7BJ2yElsnOJ30pZF4uIIDfBEVgF4XEBxL9Bxhy6dnrm5hkzqmsWHGTiHqRiITNhMyFLyAiWndIJP7Z1NTteDg==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true
++    },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
++    "node_modules/entities": {
++      "version": "9.0.0",
++      "resolved": "https://registry.npmjs.org/entities/-/entities-9.0.0.tgz",
++      "integrity": "sha512-oJFNDJg3kTPwAD1cNn2+WmUq4wFoo09npc3Ydf1D7ED4smRiWrsKnaLxykrTWgyGEcusc87P5dxlAleol9kpkg==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=20.19.0"
++      },
++      "funding": {
++        "url": "https://github.com/fb55/entities?sponsor=1"
++      }
++    },
++    "node_modules/es-module-lexer": {
++      "version": "2.3.2",
++      "resolved": "https://registry.npmjs.org/es-module-lexer/-/es-module-lexer-2.3.2.tgz",
++      "integrity": "sha512-poHGpORABojJJucnV9KbOavETW8lBVnphkW77ER5/BQ5Fz7oXSoCNek7IH3vR5nRjdsEz926ibFYX8KtLQmdyw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/estree-walker": {
++      "version": "3.0.3",
++      "resolved": "https://registry.npmjs.org/estree-walker/-/estree-walker-3.0.3.tgz",
++      "integrity": "sha512-7RUKfXgSMMkzt6ZuXmqapOurLGPPfgj6l9uRZ7lRGolvk0y2yocc35LdcxKC5PQZdn2DMqioAQ2NoWcrTKmm6g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/estree": "^1.0.0"
++      }
++    },
++    "node_modules/expect-type": {
++      "version": "1.4.0",
++      "resolved": "https://registry.npmjs.org/expect-type/-/expect-type-1.4.0.tgz",
++      "integrity": "sha512-KfYbmpRm0VbLjEvVa9yGwCi9GI34xvi7A/HXYWQO65CSD2u3MczUJSuwXKFIxlGsgBQizV9q5J9NHj4VG0n+pA==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=12.0.0"
++      }
++    },
++    "node_modules/fdir": {
++      "version": "6.5.0",
++      "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
++      "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=12.0.0"
++      },
++      "peerDependencies": {
++        "picomatch": "^3 || ^4"
++      },
++      "peerDependenciesMeta": {
++        "picomatch": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/fsevents": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
++      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
++      "dev": true,
++      "hasInstallScript": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
++      }
++    },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/html-encoding-sniffer": {
++      "version": "7.0.0",
++      "resolved": "https://registry.npmjs.org/html-encoding-sniffer/-/html-encoding-sniffer-7.0.0.tgz",
++      "integrity": "sha512-UikN5yr7xsCDAq87Or5or0PAlD3HJJOKVzM05az588WnpDJ4Ux7a2A53Qi6gofGg2/EtvF/H4hCi/TXfCW4Y6w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@exodus/bytes": "^1.15.1"
++      },
++      "engines": {
++        "node": "^22.13.0 || >=24.0.0"
++      }
++    },
++    "node_modules/indent-string": {
++      "version": "4.0.0",
++      "resolved": "https://registry.npmjs.org/indent-string/-/indent-string-4.0.0.tgz",
++      "integrity": "sha512-EdDDZu4A2OyIK7Lr/2zG+w5jmbuk1DVBnEwREQvBzspBJkCEbRa8GxU1lghYcaGJCnRWibjDXlq779X1/y5xwg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/is-alphabetical": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/is-alphabetical/-/is-alphabetical-2.0.1.tgz",
++      "integrity": "sha512-FWyyY60MeTNyeSRpkM2Iry0G9hpr7/9kD40mD/cGQEuilcZYS4okz8SN2Q6rLCJ8gbCt6fN+rC+6tMGS99LaxQ==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/is-alphanumerical": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/is-alphanumerical/-/is-alphanumerical-2.0.1.tgz",
++      "integrity": "sha512-hmbYhX/9MUMF5uh7tOXyK/n0ZvWpad5caBA17GsC6vyuCqaWliRG5K1qS9inmUhEMaOBIW7/whAnSwveW/LtZw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "is-alphabetical": "^2.0.0",
++        "is-decimal": "^2.0.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/is-decimal": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/is-decimal/-/is-decimal-2.0.1.tgz",
++      "integrity": "sha512-AAB9hiomQs5DXWcRB1rqsxGUstbRroFOPPVAomNk/3XHR5JyEZChOyTWe2oayKnsSsr/kcGqF+z6yuH6HHpN0A==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/is-potential-custom-element-name": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/is-potential-custom-element-name/-/is-potential-custom-element-name-1.0.1.tgz",
++      "integrity": "sha512-bCYeRA2rVibKZd+s2625gGnGF/t7DSqDs4dP7CrLA1m7jKWz6pps0LpYLJN8Q64HtmPKJ1hrN3nzPNKFEKOUiQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
+       "dev": true,
+-      "license": "Apache-2.0",
+-      "engines": {
+-        "node": ">=8"
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
+       }
+     },
+-    "node_modules/fdir": {
+-      "version": "6.5.0",
+-      "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+-      "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
++    "node_modules/js-tokens": {
++      "version": "4.0.0",
++      "resolved": "https://registry.npmjs.org/js-tokens/-/js-tokens-4.0.0.tgz",
++      "integrity": "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==",
+       "dev": true,
+       "license": "MIT",
++      "peer": true
++    },
++    "node_modules/jsdom": {
++      "version": "31.0.0",
++      "resolved": "https://registry.npmjs.org/jsdom/-/jsdom-31.0.0.tgz",
++      "integrity": "sha512-xAkhD9z1eyFC5+QUi9K24CaZJgdCQ2GOGLW1GdVDoQvkp/AxEH9TQ0pAplPOlIiV92hfcgnFOADZypbjgbBT6Q==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@exodus/bytes": "^1.16.0",
++        "bcp-47": "^2.1.2",
++        "bcp-47-match": "^2.0.3",
++        "data-urls": "^8.0.0",
++        "decimal.js": "^10.6.0",
++        "html-encoding-sniffer": "^7.0.0",
++        "is-potential-custom-element-name": "^1.0.1",
++        "lru-cache": "^11.5.3",
++        "parse5": "^8.1.0",
++        "parse5-parser-stream": "^8.1.0",
++        "saxes": "^6.0.0",
++        "tough-cookie": "^6.0.2",
++        "undici": "^8.12.3",
++        "w3c-xmlserializer": "^6.0.0",
++        "webidl-conversions": "^8.0.1",
++        "whatwg-mimetype": "^5.0.0",
++        "whatwg-url": "^17.3.0",
++        "xml-name-validator": "^5.0.0"
++      },
+       "engines": {
+-        "node": ">=12.0.0"
++        "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
+       },
+       "peerDependencies": {
+-        "picomatch": "^3 || ^4"
++        "@napi-rs/canvas": "^1.0.13"
+       },
+       "peerDependenciesMeta": {
+-        "picomatch": {
++        "@napi-rs/canvas": {
+           "optional": true
+         }
+       }
+     },
+-    "node_modules/fsevents": {
+-      "version": "2.3.3",
+-      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+-      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+-      "dev": true,
+-      "hasInstallScript": true,
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "darwin"
+-      ],
+-      "engines": {
+-        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+-      }
+-    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1622,47 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/lru-cache": {
++      "version": "11.5.3",
++      "resolved": "https://registry.npmjs.org/lru-cache/-/lru-cache-11.5.3.tgz",
++      "integrity": "sha512-U4N8FgzmWxc8k1VH8Kr6lQg18U7Fjvby6wXHVRX/ZZ7IwWbRMgrRbP0Wrb5q5NVinryp4SQampHKdvtecItxUg==",
++      "dev": true,
++      "license": "BlueOak-1.0.0",
++      "engines": {
++        "node": "20 || >=22"
++      }
++    },
++    "node_modules/lz-string": {
++      "version": "1.5.0",
++      "resolved": "https://registry.npmjs.org/lz-string/-/lz-string-1.5.0.tgz",
++      "integrity": "sha512-h5bgJWpxJNswbU7qCrV0tIKQCaS3blPDrqKWx+QxzuzL1zGUzij9XCWLrSLsJPu5t+eWA/ycetzYAO5IOMcWAQ==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "bin": {
++        "lz-string": "bin/bin.js"
++      }
++    },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
++    "node_modules/min-indent": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/min-indent/-/min-indent-1.0.1.tgz",
++      "integrity": "sha512-I9jwMn07Sy/IwOj3zVkVik2JTvgpaykDZEigL6Rx6N9LbMywwUSMtxET+7lVoDLLd3O3IXwJwvuuns8UB/HeAg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=4"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -669,6 +1682,46 @@
+         "node": "^10 || ^12 || ^13.7 || ^14 || >=15.0.1"
+       }
+     },
++    "node_modules/obug": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/obug/-/obug-3.0.0.tgz",
++      "integrity": "sha512-5vvB5+W7ePv+p3uqxi+RcW1XAzLW0/hxt3/4X4Lc4qHudzOhmBiBwOY6DRob4WnanAEGvNcLjF+KNOufrUoEQw==",
++      "dev": true,
++      "funding": [
++        "https://github.com/sponsors/sxzz",
++        "https://opencollective.com/debug"
++      ],
++      "license": "MIT",
++      "engines": {
++        "node": ">=12.20.0"
++      }
++    },
++    "node_modules/parse5": {
++      "version": "8.1.1",
++      "resolved": "https://registry.npmjs.org/parse5/-/parse5-8.1.1.tgz",
++      "integrity": "sha512-EcR/6WDcU7b2N3vQSxKALCk9lXGtUMQxXio008OEMBE0kavu/7JLfBEeFPzi43nMqVDSbEn3QCK+BMCc9zO//w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "entities": "^9.0.0"
++      },
++      "funding": {
++        "url": "https://github.com/inikulin/parse5?sponsor=1"
++      }
++    },
++    "node_modules/parse5-parser-stream": {
++      "version": "8.1.1",
++      "resolved": "https://registry.npmjs.org/parse5-parser-stream/-/parse5-parser-stream-8.1.1.tgz",
++      "integrity": "sha512-hMcVbbUJcQmP8rURWUdYrT1flRiBiBVjq/RYGguJpDUgIXSqdYKlE0CxthmdMWoSlBAuL5bUBa73g0pttSy7Hw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "parse5": "^8.1.1"
++      },
++      "funding": {
++        "url": "https://github.com/inikulin/parse5?sponsor=1"
++      }
++    },
+     "node_modules/picocolors": {
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
+@@ -718,6 +1771,32 @@
+         "node": "^10 || ^12 || >=14"
+       }
+     },
++    "node_modules/pretty-format": {
++      "version": "27.5.1",
++      "resolved": "https://registry.npmjs.org/pretty-format/-/pretty-format-27.5.1.tgz",
++      "integrity": "sha512-Qb1gy5OrP5+zDf2Bvnzdl3jsTf1qXVMazbvCoKhtKqVs4/YK4ozX4gKQJJVyNe+cajNPn0KoC0MC3FUmaHWEmQ==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true,
++      "dependencies": {
++        "ansi-regex": "^5.0.1",
++        "ansi-styles": "^5.0.0",
++        "react-is": "^17.0.1"
++      },
++      "engines": {
++        "node": "^10.13.0 || ^12.13.0 || ^14.15.0 || >=15.0.0"
++      }
++    },
++    "node_modules/punycode": {
++      "version": "2.3.1",
++      "resolved": "https://registry.npmjs.org/punycode/-/punycode-2.3.1.tgz",
++      "integrity": "sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      }
++    },
+     "node_modules/react": {
+       "version": "19.3.1",
+       "resolved": "https://registry.npmjs.org/react/-/react-19.3.1.tgz",
+@@ -739,6 +1818,28 @@
+         "react": "^19.3.1"
+       }
+     },
++    "node_modules/react-is": {
++      "version": "17.0.2",
++      "resolved": "https://registry.npmjs.org/react-is/-/react-is-17.0.2.tgz",
++      "integrity": "sha512-w2GsyukL62IJnlaff/nRegPQR94C/XXamvMWmSHRJ4y7Ts/4ocGRmTHvOs8PSE6pB3dWOrD/nueuU5sduBsQ4w==",
++      "dev": true,
++      "license": "MIT",
++      "peer": true
++    },
++    "node_modules/redent": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/redent/-/redent-3.0.0.tgz",
++      "integrity": "sha512-6tDA8g98We0zd0GvVeMT9arEOnTw9qM03L9cJXaCjrip1OO764RDBLBfrB4cwzNGDj5OA5ioymC9GkizgWJDUg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "indent-string": "^4.0.0",
++        "strip-indent": "^3.0.0"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/rolldown": {
+       "version": "1.2.16",
+       "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz",
+@@ -773,6 +1874,19 @@
+         "@rolldown/binding-win32-x64-msvc": "1.2.16"
+       }
+     },
++    "node_modules/saxes": {
++      "version": "6.0.0",
++      "resolved": "https://registry.npmjs.org/saxes/-/saxes-6.0.0.tgz",
++      "integrity": "sha512-xAg7SOnEhrm5zI3puOOKyy1OMcMlIJZYNJY7xLBwSze0UjhPLnWfj2GF2EpT0jmzaJKIWKHLsaSSajf35bcYnA==",
++      "dev": true,
++      "license": "ISC",
++      "dependencies": {
++        "xmlchars": "^2.2.0"
++      },
++      "engines": {
++        "node": ">=v12.22.7"
++      }
++    },
+     "node_modules/scheduler": {
+       "version": "0.28.0",
+       "resolved": "https://registry.npmjs.org/scheduler/-/scheduler-0.28.0.tgz",
+@@ -789,6 +1903,67 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/std-env": {
++      "version": "4.3.0",
++      "resolved": "https://registry.npmjs.org/std-env/-/std-env-4.3.0.tgz",
++      "integrity": "sha512-OtU/EgQ1kIm5KwqQpBC6ZEMXrZRui11w8zgfTWp8cdO9B8OaPsbA8bTHO2P+HNo1VlUTGMVBwPhydu6poeXiag==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/strip-indent": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/strip-indent/-/strip-indent-3.0.0.tgz",
++      "integrity": "sha512-laJTa3Jb+VQpaC6DseHhF7dXVqHTfJPCRDaEbid/drOhgitgYku/letMUqOXFoWV0zIIUbjpdH2t+tYj4bQMRQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "min-indent": "^1.0.0"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
++    "node_modules/tinybench": {
++      "version": "6.2.3",
++      "resolved": "https://registry.npmjs.org/tinybench/-/tinybench-6.2.3.tgz",
++      "integrity": "sha512-Al01C2JIBnO2CXCAPbpAl6sUiOZHeThGtHYNTa51JRw9PyWOCdr+9Ong05R4qg/Sk3+H645E8ov1h2c58ityNw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=20.0.0"
++      }
++    },
++    "node_modules/tinyexec": {
++      "version": "1.3.1",
++      "resolved": "https://registry.npmjs.org/tinyexec/-/tinyexec-1.3.1.tgz",
++      "integrity": "sha512-GCvB3aoys96IuDFBMcTB46JOR6mdMtAToqwiW8JlWhsoh1mhHi/xn9ss/Dg7N555GiJyEt2qzoG/NHCwM6h1EA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1981,76 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/tldts": {
++      "version": "7.4.19",
++      "resolved": "https://registry.npmjs.org/tldts/-/tldts-7.4.19.tgz",
++      "integrity": "sha512-48dH6aSpQnpbzDUc4vIQZ1VjB8tkK+e8c1yx05/SZK+rkssgjEOlxDd/yU8/a4vGYQ9vRgJr9dwMq9TJ0b3X2Q==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "tldts-core": "^7.4.19"
++      },
++      "bin": {
++        "tldts": "bin/cli.js"
++      }
++    },
++    "node_modules/tldts-core": {
++      "version": "7.4.20",
++      "resolved": "https://registry.npmjs.org/tldts-core/-/tldts-core-7.4.20.tgz",
++      "integrity": "sha512-C630TWXZCZmLq0F2bW4QqwnaaxCQ/svpAqvJwnC4JvgEM5ohhBnGsEzTLSOXcN+xjz+kEaHS5uoWIw2klnqd0A==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tough-cookie": {
++      "version": "6.1.0",
++      "resolved": "https://registry.npmjs.org/tough-cookie/-/tough-cookie-6.1.0.tgz",
++      "integrity": "sha512-FTxc8u8Kl2tz0Lat1u8ksvcy8bwHRyEMawwTWybo51JqaC6O7SvfuhAKg+Ld6VqyIe2QRJBzY9HA7y2WyFRT2w==",
++      "dev": true,
++      "license": "BSD-3-Clause",
++      "dependencies": {
++        "tldts": "^7.0.5"
++      },
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/tr46": {
++      "version": "7.0.0",
++      "resolved": "https://registry.npmjs.org/tr46/-/tr46-7.0.0.tgz",
++      "integrity": "sha512-BcDSDW+SIGWVOns1Zm6Yg91q9AEj7eaID0QDY9oIqJD1A8dscNwMcl9Sms2DeuWCNov1X0/oXanHGYQBSLwZsg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "punycode": "^2.3.1"
++      },
++      "engines": {
++        "node": "^22.14.0 || >=24.0.0"
++      }
++    },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
++    "node_modules/undici": {
++      "version": "8.12.4",
++      "resolved": "https://registry.npmjs.org/undici/-/undici-8.12.4.tgz",
++      "integrity": "sha512-8Mx+uNKKER2bA4AdtedkqRbwUCIJFr2nJckXRe5yrDqzePqwLP7VNcctN8/XdmDSbF7mS+jJKIszlL+vbam1VA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=22.19.0"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+@@ -883,6 +2128,167 @@
+           "optional": true
+         }
+       }
++    },
++    "node_modules/vitest": {
++      "version": "5.1.0",
++      "resolved": "https://registry.npmjs.org/vitest/-/vitest-5.1.0.tgz",
++      "integrity": "sha512-MzmNFnrwa8v8lF1bLxw3UJ4EREwVOVb75VqJZmUDRjJ6EluK/x9th7qTbaeDk41WxE1GxWqmTXcdsfobfH5sOA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/chai": "^5.2.2",
++        "@vitest/mocker": "5.1.0",
++        "chai": "^6.3.0",
++        "es-module-lexer": "^2.3.2",
++        "expect-type": "^1.4.0",
++        "magic-string": "^1.4.3",
++        "obug": "^3.0.0",
++        "picomatch": "^4.0.7",
++        "std-env": "^4.3.0",
++        "tinybench": "^6.2.2",
++        "tinyexec": "^1.3.1",
++        "tinyglobby": "^0.2.17",
++        "why-is-node-running": "3.2.1"
++      },
++      "bin": {
++        "vitest": "vitest.mjs"
++      },
++      "engines": {
++        "node": "^22.12.0 || ^24.0.0 || >=26.0.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/vitest"
++      },
++      "peerDependencies": {
++        "@edge-runtime/vm": "*",
++        "@opentelemetry/api": "^1.9.0",
++        "@types/node": "^22.0.0 || >=24.0.0",
++        "@vitest/browser-playwright": "5.1.0",
++        "@vitest/browser-preview": "5.1.0",
++        "@vitest/browser-webdriverio": "^5.0.0-beta.5 || >=5.0.0",
++        "@vitest/coverage-istanbul": "5.1.0",
++        "@vitest/coverage-v8": "5.1.0",
++        "@vitest/ui": "5.1.0",
++        "happy-dom": "*",
++        "jsdom": "*",
++        "vite": "^6.4.0 || ^7.0.0 || ^8.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@edge-runtime/vm": {
++          "optional": true
++        },
++        "@opentelemetry/api": {
++          "optional": true
++        },
++        "@types/node": {
++          "optional": true
++        },
++        "@vitest/browser-playwright": {
++          "optional": true
++        },
++        "@vitest/browser-preview": {
++          "optional": true
++        },
++        "@vitest/browser-webdriverio": {
++          "optional": true
++        },
++        "@vitest/coverage-istanbul": {
++          "optional": true
++        },
++        "@vitest/coverage-v8": {
++          "optional": true
++        },
++        "@vitest/ui": {
++          "optional": true
++        },
++        "happy-dom": {
++          "optional": true
++        },
++        "jsdom": {
++          "optional": true
++        },
++        "vite": {
++          "optional": false
++        }
++      }
++    },
++    "node_modules/w3c-xmlserializer": {
++      "version": "6.0.0",
++      "resolved": "https://registry.npmjs.org/w3c-xmlserializer/-/w3c-xmlserializer-6.0.0.tgz",
++      "integrity": "sha512-4Nsy8K5Tr6SPDH9jhKJOHf7ChDrc1zufZTVSF7x72hwuEXBqxqk9G6cK+K2NRUtB3iELRJqjXb4JPDMBjMTl2Q==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "xml-name-validator": "^5.0.0"
++      },
++      "engines": {
++        "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
++      }
++    },
++    "node_modules/webidl-conversions": {
++      "version": "8.0.1",
++      "resolved": "https://registry.npmjs.org/webidl-conversions/-/webidl-conversions-8.0.1.tgz",
++      "integrity": "sha512-BMhLD/Sw+GbJC21C/UgyaZX41nPt8bUTg+jWyDeg7e7YN4xOM05YPSIXceACnXVtqyEw/LMClUQMtMZ+PGGpqQ==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/whatwg-mimetype": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/whatwg-mimetype/-/whatwg-mimetype-5.0.0.tgz",
++      "integrity": "sha512-sXcNcHOC51uPGF0P/D4NVtrkjSU2fNsm9iog4ZvZJsL3rjoDAzXZhkm2MWt1y+PUdggKAYVoMAIYcs78wJ51Cw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/whatwg-url": {
++      "version": "17.3.0",
++      "resolved": "https://registry.npmjs.org/whatwg-url/-/whatwg-url-17.3.0.tgz",
++      "integrity": "sha512-KwOAJrpf+GTgBvcBQJcP38sMF0DsQKdwtG+TxM2pW44P6E5k0hDbWrDmyuJDIF0Uef0aQq0ZoJs+5oI+k8ddhg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@exodus/bytes": "^1.16.0",
++        "tr46": "^7.0.0",
++        "webidl-conversions": "^8.0.1"
++      },
++      "engines": {
++        "node": "^22.14.0 || >=24.0.0"
++      }
++    },
++    "node_modules/why-is-node-running": {
++      "version": "3.2.1",
++      "resolved": "https://registry.npmjs.org/why-is-node-running/-/why-is-node-running-3.2.1.tgz",
++      "integrity": "sha512-Tb2FUhB4vUsGQlfSquQLYkApkuPAFQXGFzxWKHHumVz2dK+X1RUm/HnID4+TfIGYJ1kTcwOaCk/buYCEJr6YjQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "why-is-node-running": "cli.js"
++      },
++      "engines": {
++        "node": ">=20.11"
++      }
++    },
++    "node_modules/xml-name-validator": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/xml-name-validator/-/xml-name-validator-5.0.0.tgz",
++      "integrity": "sha512-EvGK8EJ3DhaHfbRlETOWAS5pO9MZITeauHKJyb8wyajUfQUenkIg2MvLDTZ4T/TgIcm3HU0TFBgWWboAZ30UHg==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/xmlchars": {
++      "version": "2.2.0",
++      "resolved": "https://registry.npmjs.org/xmlchars/-/xmlchars-2.2.0.tgz",
++      "integrity": "sha512-JZnDKK8B0RCDw84FNdDAIpZK+JuJw+s7Lz8nksI7SIuU3UXJJslUthsi+uWBUYOwPFwW7W7PRLRfUKpxjtjFCw==",
++      "dev": true,
++      "license": "MIT"
+     }
+   }
+ }
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..5950185 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,26 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "vite build",
++    "typecheck": "tsc --noEmit",
++    "test": "vitest run"
+   },
+   "dependencies": {
+     "react": "19.3.1",
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "^4.3.5",
++    "@testing-library/jest-dom": "^6.9.1",
++    "@testing-library/react": "^16.3.0",
++    "@testing-library/user-event": "^14.6.1",
++    "@types/react": "^19.3.0",
++    "@types/react-dom": "^19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
+-    "vite": "8.3.5"
++    "jsdom": "^31.0.0",
++    "tailwindcss": "^4.3.5",
++    "typescript": "^5.9.3",
++    "vite": "8.3.5",
++    "vitest": "^5.1.0"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..5a560b6 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,160 @@
++import { useCallback, useEffect, useState } from "react";
++import {
++  ApiError,
++  currentUser,
++  getToken,
++  listReports,
++  logout,
++  onSessionEnded,
++  recentLookups,
++  setToken,
++} from "./api";
++import AuthPanel from "./components/AuthPanel";
++import RecentLookups from "./components/RecentLookups";
++import ReportsPanel from "./components/ReportsPanel";
++import SearchPanel from "./components/SearchPanel";
++import UnitToggle from "./components/UnitToggle";
++import WeatherCard from "./components/WeatherCard";
++import type { Lookup, Unit, WeatherReport } from "./types";
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [unit, setUnit] = useState<Unit>("C");
++  const [username, setUsername] = useState<string | null>(null);
++  const [report, setReport] = useState<WeatherReport | null>(null);
++  const [missingCity, setMissingCity] = useState<string | null>(null);
++  const [searching, setSearching] = useState(false);
++  const [searchError, setSearchError] = useState<string | null>(null);
++  const [lookups, setLookups] = useState<Lookup[]>([]);
++
++  const loadLookups = useCallback(async () => {
++    try {
++      const recent = await recentLookups(5);
++      setLookups(recent.items);
++    } catch {
++      /* the recent list is a convenience, ignore failures */
++    }
++  }, []);
++
++  useEffect(() => {
++    void loadLookups();
++  }, [loadLookups]);
++
++  useEffect(() => {
++    const token = getToken();
++    if (!token) return;
++    currentUser()
++      .then((user) => setUsername(user.username))
++      .catch(() => {
++        setToken(null);
++        setUsername(null);
++      });
++  }, []);
++
++  useEffect(
++    () =>
++      onSessionEnded(() => {
++        setUsername(null);
++      }),
++    [],
++  );
++
++  async function handleSearch(city: string) {
++    setSearching(true);
++    setSearchError(null);
++    try {
++      const data = await listReports({ city });
++      if (data.items.length > 0) {
++        setReport(data.items[0]);
++        setMissingCity(null);
++      } else {
++        setReport(null);
++        setMissingCity(city);
++      }
++    } catch (error) {
++      setReport(null);
++      setMissingCity(null);
++      setSearchError(
++        error instanceof ApiError ? error.message : "Could not reach the server. Please try again.",
++      );
++    } finally {
++      setSearching(false);
++      void loadLookups();
++    }
++  }
++
++  async function handleSignOut() {
++    try {
++      await logout();
++    } catch {
++      /* the local session is dropped either way */
++    }
++    setToken(null);
++    setUsername(null);
++  }
++
++  return (
++    <div className="min-h-screen bg-slate-100 text-slate-900">
++      <header className="border-b border-slate-200 bg-white">
++        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-4">
++          <div>
++            <h1 className="text-2xl font-bold tracking-tight">Weather Display</h1>
++            <p className="text-sm text-slate-500">
++              Current conditions served from our own store of weather reports.
++            </p>
++          </div>
++          <div className="flex items-center gap-3">
++            <UnitToggle unit={unit} onChange={setUnit} />
++            {username ? (
++              <div className="flex items-center gap-2">
++                <span
++                  data-testid="signed-in-user"
++                  className="rounded-full bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-700"
++                >
++                  Signed in as {username}
++                </span>
++                <button
++                  type="button"
++                  onClick={handleSignOut}
++                  className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
++                >
++                  Sign out
++                </button>
++              </div>
++            ) : null}
++          </div>
++        </div>
++      </header>
++
++      <main className="mx-auto grid max-w-6xl gap-6 px-4 py-6 lg:grid-cols-2">
++        <div className="space-y-6">
++          <SearchPanel onSearch={(city) => void handleSearch(city)} busy={searching} />
++
++          {searchError && (
++            <p role="alert" className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">
++              {searchError}
++            </p>
++          )}
++
++          {report ? (
++            <WeatherCard report={report} unit={unit} />
++          ) : missingCity ? (
++            <p
++              data-testid="no-weather-data"
++              className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-6 text-center text-slate-600"
++            >
++              No weather data for {missingCity}
++            </p>
++          ) : null}
++
++          <RecentLookups lookups={lookups} onSelect={(city) => void handleSearch(city)} />
++        </div>
++
++        <div>{username ? <ReportsPanel unit={unit} /> : <AuthPanel onSignedIn={setUsername} />}</div>
++      </main>
++
++      <footer className="mx-auto max-w-6xl px-4 pb-8 text-center text-xs text-slate-400">
++        Every city lookup is recorded. Temperatures are stored in degrees Celsius.
++      </footer>
++    </div>
++  );
+ }
+diff --git a/frontend/src/__tests__/App.test.tsx b/frontend/src/__tests__/App.test.tsx
+new file mode 100644
+index 0000000..d00f9ff
+--- /dev/null
++++ b/frontend/src/__tests__/App.test.tsx
+@@ -0,0 +1,333 @@
++import { render, screen, waitFor, within } from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import { beforeEach, describe, expect, it, vi } from "vitest";
++import App from "../App";
++
++interface StoredReport {
++  id: number;
++  city: string;
++  country: string | null;
++  temperature_c: number | null;
++  condition: string | null;
++  humidity: number | null;
++  wind_kph: number | null;
++  observed_at: string;
++}
++
++interface StoredLookup {
++  id: number;
++  city: string;
++  found: boolean;
++  looked_up_at: string;
++}
++
++const SEED: StoredReport[] = [
++  {
++    id: 1,
++    city: "Berlin",
++    country: "Germany",
++    temperature_c: 18,
++    condition: "Cloudy",
++    humidity: 72,
++    wind_kph: 15,
++    observed_at: "2026-01-01T10:00:00Z",
++  },
++  {
++    id: 2,
++    city: "Kyoto",
++    country: "Japan",
++    temperature_c: 21,
++    condition: "Partly Cloudy",
++    humidity: 63,
++    wind_kph: 9.5,
++    observed_at: "2026-01-01T11:00:00Z",
++  },
++];
++
++function jsonResponse(payload: unknown, status = 200): Response {
++  return {
++    ok: status >= 200 && status < 300,
++    status,
++    text: async () => JSON.stringify(payload),
++  } as unknown as Response;
++}
++
++function installFakeApi() {
++  let reports = SEED.map((report) => ({ ...report }));
++  let lookups: StoredLookup[] = [];
++  let nextReportId = 10;
++  let nextLookupId = 100;
++  let token: string | null = null;
++  const calls: string[] = [];
++
++  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
++    const url = typeof input === "string" ? input : String(input);
++    const method = (init?.method ?? "GET").toUpperCase();
++    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
++    calls.push(`${method} ${url}`);
++
++    if (url.startsWith("/api/auth/register")) {
++      if (!body?.username || !body?.password) {
++        return jsonResponse(
++          { error: "username is required", errors: { username: "username is required" } },
++          400,
++        );
++      }
++      token = "fake-token";
++      return jsonResponse({ id: 1, username: body.username }, 201);
++    }
++
++    if (url.startsWith("/api/auth/login")) {
++      if (body?.username !== "demo" || body?.password !== "secret123") {
++        return jsonResponse({ error: "invalid username or password" }, 401);
++      }
++      token = "fake-token";
++      return jsonResponse({ token, username: body.username }, 200);
++    }
++
++    if (url.startsWith("/api/auth/logout")) {
++      token = null;
++      return jsonResponse({ ok: true });
++    }
++
++    if (url.startsWith("/api/auth/me")) {
++      if (!token) return jsonResponse({ error: "invalid or expired token" }, 401);
++      return jsonResponse({ id: 1, username: "demo" });
++    }
++
++    if (url.startsWith("/api/weather/recent")) {
++      return jsonResponse({ items: lookups.slice(0, 5) });
++    }
++
++    if (url.startsWith("/api/weather")) {
++      const parsed = new URL(url, "http://localhost");
++      const city = parsed.searchParams.get("city");
++
++      if (method === "GET" && city !== null) {
++        const matches = reports.filter(
++          (report) => report.city.toLowerCase() === city.trim().toLowerCase(),
++        );
++        lookups = [
++          {
++            id: nextLookupId++,
++            city: city.trim(),
++            found: matches.length > 0,
++            looked_up_at: new Date().toISOString(),
++          },
++          ...lookups,
++        ];
++        return jsonResponse({
++          items: matches,
++          total: matches.length,
++          page: 1,
++          page_size: 20,
++        });
++      }
++
++      if (method === "GET") {
++        return jsonResponse({
++          items: reports,
++          total: reports.length,
++          page: 1,
++          page_size: 20,
++        });
++      }
++
++      if (method === "POST" || method === "PUT") {
++        const missingCity = !body?.city || !String(body.city).trim();
++        const badTemperature =
++          body?.temperature_c !== undefined && typeof body.temperature_c !== "number";
++        if (missingCity || badTemperature) {
++          const errors: Record<string, string> = {};
++          if (missingCity) errors.city = "city is required";
++          if (badTemperature) errors.temperature_c = "temperature_c must be a number";
++          return jsonResponse(
++            { error: Object.values(errors)[0], errors },
++            400,
++          );
++        }
++        const clash = reports.find(
++          (report) =>
++            report.city.toLowerCase() === String(body.city).trim().toLowerCase() &&
++            report.id !== body.id,
++        );
++        if (clash) {
++          return jsonResponse(
++            { error: `a report for ${body.city} already exists`, errors: { city: "duplicate" } },
++            409,
++          );
++        }
++        const cleaned = {
++          city: String(body.city).trim(),
++          country: body.country ?? null,
++          temperature_c: body.temperature_c ?? null,
++          condition: body.condition ?? null,
++          humidity: body.humidity ?? null,
++          wind_kph: body.wind_kph ?? null,
++        };
++        if (method === "POST") {
++          const created: StoredReport = {
++            id: nextReportId++,
++            ...cleaned,
++            observed_at: new Date().toISOString(),
++          };
++          reports = [...reports, created];
++          return jsonResponse(created, 201);
++        }
++        const index = reports.findIndex((report) => report.id === body.id);
++        const updated: StoredReport = {
++          ...reports[index],
++          ...cleaned,
++          observed_at: new Date().toISOString(),
++        };
++        reports = reports.map((report) => (report.id === body.id ? updated : report));
++        return jsonResponse(updated);
++      }
++
++      if (method === "DELETE") {
++        const id = Number(url.split("/").pop());
++        const exists = reports.some((report) => report.id === id);
++        if (!exists) return jsonResponse({ error: "no weather report with that id" }, 404);
++        reports = reports.filter((report) => report.id !== id);
++        return jsonResponse({ deleted: true, id });
++      }
++    }
++
++    return jsonResponse({ error: "not found" }, 404);
++  });
++
++  vi.stubGlobal("fetch", fetchMock);
++  return { calls, fetchMock };
++}
++
++describe("weather display", () => {
++  beforeEach(() => {
++    vi.unstubAllGlobals();
++  });
++
++  it("shows a weather card for a city that has data", async () => {
++    installFakeApi();
++    const user = userEvent.setup();
++    render(<App />);
++
++    await user.type(screen.getByLabelText("Search city"), "Berlin");
++    await user.click(screen.getByRole("button", { name: "Search" }));
++
++    const card = await screen.findByTestId("weather-card");
++    expect(within(card).getByTestId("weather-city")).toHaveTextContent("Berlin");
++    expect(within(card).getByTestId("weather-temperature")).toHaveTextContent("18.0°C");
++    expect(within(card).getByTestId("weather-humidity")).toHaveTextContent("72%");
++    expect(within(card).getByTestId("weather-wind")).toHaveTextContent("15 km/h");
++    expect(within(card).getByTestId("weather-observed")).not.toBeEmptyDOMElement();
++  });
++
++  it("converts the temperature when the unit switch is flipped", async () => {
++    installFakeApi();
++    const user = userEvent.setup();
++    render(<App />);
++
++    await user.type(screen.getByLabelText("Search city"), "Berlin");
++    await user.click(screen.getByRole("button", { name: "Search" }));
++    await screen.findByTestId("weather-card");
++
++    await user.click(screen.getByRole("button", { name: "°F" }));
++
++    expect(screen.getByTestId("weather-temperature")).toHaveTextContent("64.4°F");
++  });
++
++  it("shows a message when a city has no data", async () => {
++    installFakeApi();
++    const user = userEvent.setup();
++    render(<App />);
++
++    await user.type(screen.getByLabelText("Search city"), "Atlantis");
++    await user.click(screen.getByRole("button", { name: "Search" }));
++
++    expect(await screen.findByTestId("no-weather-data")).toHaveTextContent(
++      "No weather data for Atlantis",
++    );
++  });
++
++  it("lists recent lookups and repeats the search when one is clicked", async () => {
++    const api = installFakeApi();
++    const user = userEvent.setup();
++    render(<App />);
++
++    await user.type(screen.getByLabelText("Search city"), "Kyoto");
++    await user.click(screen.getByRole("button", { name: "Search" }));
++
++    const recent = await screen.findByTestId("recent-lookups");
++    expect(within(recent).getByText("Kyoto")).toBeInTheDocument();
++
++    const before = api.calls.filter((call) => call.includes("city=Kyoto")).length;
++    await user.click(within(recent).getByText("Kyoto"));
++    await waitFor(() => {
++      const after = api.calls.filter((call) => call.includes("city=Kyoto")).length;
++      expect(after).toBeGreaterThan(before);
++    });
++  });
++
++  it("registers a user, shows the username and signs out again", async () => {
++    installFakeApi();
++    const user = userEvent.setup();
++    render(<App />);
++
++    await user.click(screen.getByRole("tab", { name: "Register" }));
++    await user.type(screen.getByLabelText("Username"), "demo");
++    await user.type(screen.getByLabelText("Password"), "secret123");
++    await user.click(screen.getByRole("button", { name: "Create account" }));
++
++    expect(await screen.findByTestId("signed-in-user")).toHaveTextContent("Signed in as demo");
++
++    await user.click(screen.getByRole("button", { name: "Sign out" }));
++    await waitFor(() => {
++      expect(screen.queryByTestId("signed-in-user")).not.toBeInTheDocument();
++    });
++  });
++
++  it("adds a report and shows the validation message from the api", async () => {
++    installFakeApi();
++    const user = userEvent.setup();
++    render(<App />);
++
++    await user.click(screen.getByRole("tab", { name: "Register" }));
++    await user.type(screen.getByLabelText("Username"), "demo");
++    await user.type(screen.getByLabelText("Password"), "secret123");
++    await user.click(screen.getByRole("button", { name: "Create account" }));
++    await screen.findByTestId("signed-in-user");
++
++    await user.click(screen.getByRole("button", { name: "Add report" }));
++    expect((await screen.findAllByText("city is required")).length).toBeGreaterThan(0);
++
++    await user.type(screen.getByLabelText("City"), "Oslo");
++    await user.type(screen.getByLabelText("Country"), "Norway");
++    await user.type(screen.getByLabelText("Temperature (°C)"), "5.2");
++    await user.click(screen.getByRole("button", { name: "Add report" }));
++
++    expect(await screen.findByText("Added a report for Oslo.")).toBeInTheDocument();
++    expect(await screen.findByText("Oslo")).toBeInTheDocument();
++  });
++
++  it("deletes a report once the confirmation is accepted", async () => {
++    installFakeApi();
++    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
++    const user = userEvent.setup();
++    render(<App />);
++
++    await user.click(screen.getByRole("tab", { name: "Register" }));
++    await user.type(screen.getByLabelText("Username"), "demo");
++    await user.type(screen.getByLabelText("Password"), "secret123");
++    await user.click(screen.getByRole("button", { name: "Create account" }));
++    await screen.findByTestId("signed-in-user");
++
++    const list = await screen.findByTestId("report-list");
++    expect(within(list).getByText("Berlin")).toBeInTheDocument();
++
++    await user.click(within(list).getAllByRole("button", { name: "Delete" })[0]);
++
++    expect(confirmSpy).toHaveBeenCalled();
++    await waitFor(() => {
++      expect(within(screen.getByTestId("report-list")).queryByText("Berlin")).not.toBeInTheDocument();
++    });
++  });
++});
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..a84e1f7
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,165 @@
++import type {
++  Lookup,
++  PagedReports,
++  RecentLookups,
++  ReportInput,
++  WeatherReport,
++} from "./types";
++
++const TOKEN_KEY = "weather-display.token";
++const SESSION_ENDED_EVENT = "weather-display:session-ended";
++
++export class ApiError extends Error {
++  status: number;
++  errors: Record<string, string>;
++
++  constructor(status: number, message: string, errors: Record<string, string> = {}) {
++    super(message);
++    this.name = "ApiError";
++    this.status = status;
++    this.errors = errors;
++  }
++}
++
++export function getToken(): string | null {
++  try {
++    return window.localStorage.getItem(TOKEN_KEY);
++  } catch {
++    return null;
++  }
++}
++
++export function setToken(token: string | null): void {
++  try {
++    if (token) {
++      window.localStorage.setItem(TOKEN_KEY, token);
++    } else {
++      window.localStorage.removeItem(TOKEN_KEY);
++    }
++  } catch {
++    /* storage unavailable, the session simply stays in memory */
++  }
++}
++
++export function onSessionEnded(listener: () => void): () => void {
++  const handler = () => listener();
++  window.addEventListener(SESSION_ENDED_EVENT, handler);
++  return () => window.removeEventListener(SESSION_ENDED_EVENT, handler);
++}
++
++function parseBody(text: string): unknown {
++  if (!text) return null;
++  try {
++    return JSON.parse(text);
++  } catch {
++    return null;
++  }
++}
++
++async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
++  const headers: Record<string, string> = {};
++  if (options.body !== undefined) {
++    headers["Content-Type"] = "application/json";
++  }
++  const token = getToken();
++  if (token) {
++    headers["Authorization"] = `Bearer ${token}`;
++  }
++
++  const response = await fetch(path, { ...options, headers });
++  if (response.status === 204) {
++    return undefined as T;
++  }
++
++  const payload = parseBody(await response.text());
++  if (!response.ok) {
++    const record = (payload ?? {}) as { error?: string; errors?: Record<string, string> };
++    const message = record.error ?? `Request failed (${response.status})`;
++    if (response.status === 401 && token) {
++      setToken(null);
++      window.dispatchEvent(new Event(SESSION_ENDED_EVENT));
++    }
++    throw new ApiError(response.status, message, record.errors ?? {});
++  }
++  return payload as T;
++}
++
++function reportBody(input: ReportInput): Record<string, unknown> {
++  const body: Record<string, unknown> = { city: input.city };
++  const optional: Record<string, string> = {
++    country: input.country,
++    condition: input.condition,
++    temperature_c: input.temperature_c,
++    humidity: input.humidity,
++    wind_kph: input.wind_kph,
++  };
++  Object.entries(optional).forEach(([key, value]) => {
++    if (value.trim() !== "") {
++      body[key] = key === "country" || key === "condition" ? value.trim() : Number(value);
++    }
++  });
++  return body;
++}
++
++export async function register(username: string, password: string) {
++  return request<{ id: number; username: string }>("/api/auth/register", {
++    method: "POST",
++    body: JSON.stringify({ username, password }),
++  });
++}
++
++export async function login(username: string, password: string) {
++  return request<{ token: string; username: string }>("/api/auth/login", {
++    method: "POST",
++    body: JSON.stringify({ username, password }),
++  });
++}
++
++export async function logout() {
++  await request<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
++}
++
++export async function currentUser() {
++  return request<{ id: number; username: string }>("/api/auth/me");
++}
++
++export async function listReports(params: {
++  city?: string;
++  page?: number;
++  pageSize?: number;
++}): Promise<PagedReports> {
++  const query = new URLSearchParams();
++  if (params.city) query.set("city", params.city);
++  if (params.page) query.set("page", String(params.page));
++  if (params.pageSize) query.set("page_size", String(params.pageSize));
++  const suffix = query.toString() ? `?${query.toString()}` : "";
++  return request<PagedReports>(`/api/weather${suffix}`);
++}
++
++export async function getReport(id: number) {
++  return request<WeatherReport>(`/api/weather/${id}`);
++}
++
++export async function createReport(input: ReportInput) {
++  return request<WeatherReport>("/api/weather", {
++    method: "POST",
++    body: JSON.stringify(reportBody(input)),
++  });
++}
++
++export async function updateReport(id: number, input: ReportInput) {
++  return request<WeatherReport>(`/api/weather/${id}`, {
++    method: "PUT",
++    body: JSON.stringify(reportBody(input)),
++  });
++}
++
++export async function deleteReport(id: number) {
++  return request<{ deleted: boolean; id: number }>(`/api/weather/${id}`, { method: "DELETE" });
++}
++
++export async function recentLookups(limit = 5): Promise<RecentLookups> {
++  return request<RecentLookups>(`/api/weather/recent?limit=${limit}`);
++}
++
++export type { Lookup, PagedReports, RecentLookups, ReportInput, WeatherReport };
+diff --git a/frontend/src/components/AuthPanel.tsx b/frontend/src/components/AuthPanel.tsx
+new file mode 100644
+index 0000000..0f168b5
+--- /dev/null
++++ b/frontend/src/components/AuthPanel.tsx
+@@ -0,0 +1,140 @@
++import { useState } from "react";
++import type { FormEvent } from "react";
++import { ApiError, login, register, setToken } from "../api";
++
++interface AuthPanelProps {
++  onSignedIn: (username: string) => void;
++}
++
++type Mode = "login" | "register";
++
++export default function AuthPanel({ onSignedIn }: AuthPanelProps) {
++  const [mode, setMode] = useState<Mode>("login");
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [errors, setErrors] = useState<Record<string, string>>({});
++  const [message, setMessage] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  function switchMode(next: Mode) {
++    setMode(next);
++    setErrors({});
++    setMessage(null);
++  }
++
++  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
++    event.preventDefault();
++    setBusy(true);
++    setErrors({});
++    setMessage(null);
++    try {
++      if (mode === "register") {
++        const created = await register(username.trim(), password);
++        const session = await login(username.trim(), password);
++        setToken(session.token);
++        onSignedIn(session.username ?? created.username);
++      } else {
++        const session = await login(username.trim(), password);
++        setToken(session.token);
++        onSignedIn(session.username);
++      }
++    } catch (error) {
++      if (error instanceof ApiError) {
++        setErrors(error.errors);
++        setMessage(error.message);
++      } else {
++        setMessage("Could not reach the server. Please try again.");
++      }
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  const isRegister = mode === "register";
++
++  return (
++    <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
++      <h2 className="text-lg font-semibold text-slate-900">Your account</h2>
++      <p className="mt-1 text-sm text-slate-500">
++        Sign in to add, edit and remove weather reports. Anyone can look up a city.
++      </p>
++
++      <div className="mt-4 inline-flex rounded-lg bg-slate-100 p-1" role="tablist">
++        <button
++          type="button"
++          role="tab"
++          aria-selected={!isRegister}
++          onClick={() => switchMode("login")}
++          className={`rounded-md px-3 py-1.5 text-sm font-medium ${
++            !isRegister ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
++          }`}
++        >
++          Sign in
++        </button>
++        <button
++          type="button"
++          role="tab"
++          aria-selected={isRegister}
++          onClick={() => switchMode("register")}
++          className={`rounded-md px-3 py-1.5 text-sm font-medium ${
++            isRegister ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
++          }`}
++        >
++          Register
++        </button>
++      </div>
++
++      <form className="mt-4 space-y-4" onSubmit={handleSubmit} noValidate>
++        <div>
++          <label className="block text-sm font-medium text-slate-700" htmlFor="auth-username">
++            Username
++          </label>
++          <input
++            id="auth-username"
++            name="username"
++            type="text"
++            autoComplete="username"
++            value={username}
++            onChange={(event) => setUsername(event.target.value)}
++            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
++          />
++          {errors.username && (
++            <p className="mt-1 text-sm text-rose-600">{errors.username}</p>
++          )}
++        </div>
++
++        <div>
++          <label className="block text-sm font-medium text-slate-700" htmlFor="auth-password">
++            Password
++          </label>
++          <input
++            id="auth-password"
++            name="password"
++            type="password"
++            autoComplete={isRegister ? "new-password" : "current-password"}
++            value={password}
++            onChange={(event) => setPassword(event.target.value)}
++            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
++          />
++          {errors.password && (
++            <p className="mt-1 text-sm text-rose-600">{errors.password}</p>
++          )}
++        </div>
++
++        {message && (
++          <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">
++            {message}
++          </p>
++        )}
++
++        <button
++          type="submit"
++          disabled={busy}
++          className="w-full rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
++        >
++          {busy ? "Please wait…" : isRegister ? "Create account" : "Sign in"}
++        </button>
++      </form>
++    </section>
++  );
++}
+diff --git a/frontend/src/components/RecentLookups.tsx b/frontend/src/components/RecentLookups.tsx
+new file mode 100644
+index 0000000..72f1aa8
+--- /dev/null
++++ b/frontend/src/components/RecentLookups.tsx
+@@ -0,0 +1,44 @@
++import { formatTimestamp } from "../format";
++import type { Lookup } from "../types";
++
++interface RecentLookupsProps {
++  lookups: Lookup[];
++  onSelect: (city: string) => void;
++}
++
++export default function RecentLookups({ lookups, onSelect }: RecentLookupsProps) {
++  return (
++    <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
++      <h2 className="text-lg font-semibold text-slate-900">Recent lookups</h2>
++      <p className="mt-1 text-sm text-slate-500">The five most recent city searches.</p>
++
++      {lookups.length === 0 ? (
++        <p className="mt-4 text-sm text-slate-500">No lookups yet.</p>
++      ) : (
++        <ul className="mt-4 divide-y divide-slate-100" data-testid="recent-lookups">
++          {lookups.map((lookup) => (
++            <li key={lookup.id}>
++              <button
++                type="button"
++                onClick={() => onSelect(lookup.city)}
++                className="flex w-full items-center justify-between gap-3 py-2 text-left transition hover:bg-slate-50"
++              >
++                <span className="font-medium text-slate-800">{lookup.city}</span>
++                <span className="flex items-center gap-2 text-xs text-slate-500">
++                  <span
++                    className={`rounded-full px-2 py-0.5 font-semibold ${
++                      lookup.found ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"
++                    }`}
++                  >
++                    {lookup.found ? "found" : "no data"}
++                  </span>
++                  <span>{formatTimestamp(lookup.looked_up_at)}</span>
++                </span>
++              </button>
++            </li>
++          ))}
++        </ul>
++      )}
++    </section>
++  );
++}
+diff --git a/frontend/src/components/ReportForm.tsx b/frontend/src/components/ReportForm.tsx
+new file mode 100644
+index 0000000..1fff4c9
+--- /dev/null
++++ b/frontend/src/components/ReportForm.tsx
+@@ -0,0 +1,185 @@
++import { useState } from "react";
++import type { FormEvent } from "react";
++import { ApiError } from "../api";
++import type { ReportInput } from "../types";
++
++export const EMPTY_REPORT: ReportInput = {
++  city: "",
++  country: "",
++  temperature_c: "",
++  condition: "",
++  humidity: "",
++  wind_kph: "",
++};
++
++interface FieldProps {
++  id: string;
++  label: string;
++  value: string;
++  onChange: (value: string) => void;
++  error?: string;
++  type?: string;
++  step?: string;
++  placeholder?: string;
++}
++
++function Field({ id, label, value, onChange, error, type = "text", step, placeholder }: FieldProps) {
++  return (
++    <div>
++      <label htmlFor={id} className="block text-sm font-medium text-slate-700">
++        {label}
++      </label>
++      <input
++        id={id}
++        name={id}
++        type={type}
++        step={step}
++        placeholder={placeholder}
++        value={value}
++        onChange={(event) => onChange(event.target.value)}
++        aria-invalid={Boolean(error)}
++        className={`mt-1 w-full rounded-lg border px-3 py-2 text-slate-900 outline-none focus:ring-2 ${
++          error
++            ? "border-rose-400 focus:border-rose-500 focus:ring-rose-100"
++            : "border-slate-300 focus:border-sky-500 focus:ring-sky-100"
++        }`}
++      />
++      {error && <p className="mt-1 text-sm text-rose-600">{error}</p>}
++    </div>
++  );
++}
++
++interface ReportFormProps {
++  title: string;
++  submitLabel: string;
++  initial?: ReportInput;
++  onSubmit: (input: ReportInput) => Promise<void>;
++  onCancel?: () => void;
++}
++
++export default function ReportForm({
++  title,
++  submitLabel,
++  initial,
++  onSubmit,
++  onCancel,
++}: ReportFormProps) {
++  const [values, setValues] = useState<ReportInput>(initial ?? EMPTY_REPORT);
++  const [errors, setErrors] = useState<Record<string, string>>({});
++  const [message, setMessage] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  function update(field: keyof ReportInput) {
++    return (value: string) => setValues((current) => ({ ...current, [field]: value }));
++  }
++
++  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
++    event.preventDefault();
++    setBusy(true);
++    setErrors({});
++    setMessage(null);
++    try {
++      await onSubmit(values);
++      if (!initial) {
++        setValues(EMPTY_REPORT);
++      }
++    } catch (error) {
++      if (error instanceof ApiError) {
++        setErrors(error.errors);
++        setMessage(error.message);
++      } else {
++        setMessage("Could not reach the server. Please try again.");
++      }
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <form className="space-y-4" onSubmit={handleSubmit} noValidate>
++      <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">{title}</h3>
++
++      <div className="grid gap-4 sm:grid-cols-2">
++        <Field
++          id="city"
++          label="City"
++          value={values.city}
++          onChange={update("city")}
++          error={errors.city}
++          placeholder="Berlin"
++        />
++        <Field
++          id="country"
++          label="Country"
++          value={values.country}
++          onChange={update("country")}
++          error={errors.country}
++          placeholder="Germany"
++        />
++        <Field
++          id="temperature_c"
++          label="Temperature (°C)"
++          type="number"
++          step="0.1"
++          value={values.temperature_c}
++          onChange={update("temperature_c")}
++          error={errors.temperature_c}
++          placeholder="18.5"
++        />
++        <Field
++          id="condition"
++          label="Condition"
++          value={values.condition}
++          onChange={update("condition")}
++          error={errors.condition}
++          placeholder="Cloudy"
++        />
++        <Field
++          id="humidity"
++          label="Humidity (%)"
++          type="number"
++          step="1"
++          value={values.humidity}
++          onChange={update("humidity")}
++          error={errors.humidity}
++          placeholder="70"
++        />
++        <Field
++          id="wind_kph"
++          label="Wind (km/h)"
++          type="number"
++          step="0.1"
++          value={values.wind_kph}
++          onChange={update("wind_kph")}
++          error={errors.wind_kph}
++          placeholder="12"
++        />
++      </div>
++
++      {message && (
++        <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">
++          {message}
++        </p>
++      )}
++
++      <div className="flex items-center gap-2">
++        <button
++          type="submit"
++          disabled={busy}
++          className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
++        >
++          {busy ? "Saving…" : submitLabel}
++        </button>
++        {onCancel && (
++          <button
++            type="button"
++            onClick={onCancel}
++            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
++          >
++            Cancel
++          </button>
++        )}
++      </div>
++    </form>
++  );
++}
+diff --git a/frontend/src/components/ReportsPanel.tsx b/frontend/src/components/ReportsPanel.tsx
+new file mode 100644
+index 0000000..64ff0e6
+--- /dev/null
++++ b/frontend/src/components/ReportsPanel.tsx
+@@ -0,0 +1,199 @@
++import { useCallback, useEffect, useState } from "react";
++import { ApiError, createReport, deleteReport, listReports, updateReport } from "../api";
++import { formatTemperature, formatTimestamp } from "../format";
++import type { ReportInput, Unit, WeatherReport } from "../types";
++import ReportForm from "./ReportForm";
++
++const PAGE_SIZE = 10;
++
++interface ReportsPanelProps {
++  unit: Unit;
++}
++
++export default function ReportsPanel({ unit }: ReportsPanelProps) {
++  const [items, setItems] = useState<WeatherReport[]>([]);
++  const [total, setTotal] = useState(0);
++  const [page, setPage] = useState(1);
++  const [loading, setLoading] = useState(false);
++  const [editing, setEditing] = useState<WeatherReport | null>(null);
++  const [notice, setNotice] = useState<string | null>(null);
++  const [failure, setFailure] = useState<string | null>(null);
++
++  const load = useCallback(async (targetPage: number) => {
++    setLoading(true);
++    try {
++      const page_data = await listReports({ page: targetPage, pageSize: PAGE_SIZE });
++      setItems(page_data.items);
++      setTotal(page_data.total);
++      setPage(page_data.page);
++      setFailure(null);
++    } catch (error) {
++      setFailure(error instanceof ApiError ? error.message : "Could not load the reports.");
++    } finally {
++      setLoading(false);
++    }
++  }, []);
++
++  useEffect(() => {
++    void load(1);
++  }, [load]);
++
++  async function handleCreate(input: ReportInput) {
++    await createReport(input);
++    setNotice(`Added a report for ${input.city.trim()}.`);
++    setFailure(null);
++    await load(1);
++  }
++
++  async function handleUpdate(id: number, input: ReportInput) {
++    await updateReport(id, input);
++    setNotice(`Updated the report for ${input.city.trim()}.`);
++    setFailure(null);
++    setEditing(null);
++    await load(page);
++  }
++
++  async function handleDelete(report: WeatherReport) {
++    const confirmed = window.confirm(
++      `Delete the weather report for ${report.city}? This cannot be undone.`,
++    );
++    if (!confirmed) return;
++    try {
++      await deleteReport(report.id);
++      setNotice(`Deleted the report for ${report.city}.`);
++      setFailure(null);
++      if (items.length === 1 && page > 1) {
++        await load(page - 1);
++      } else {
++        await load(page);
++      }
++    } catch (error) {
++      setFailure(error instanceof ApiError ? error.message : "Could not delete the report.");
++    }
++  }
++
++  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
++
++  return (
++    <div className="space-y-6">
++      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
++        <h2 className="text-lg font-semibold text-slate-900">Manage weather reports</h2>
++        <p className="mt-1 text-sm text-slate-500">
++          Add a report, edit the details of an existing one, or remove it.
++        </p>
++        <div className="mt-4">
++          <ReportForm title="Add a report" submitLabel="Add report" onSubmit={handleCreate} />
++        </div>
++      </section>
++
++      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
++        <div className="flex items-center justify-between gap-3">
++          <h2 className="text-lg font-semibold text-slate-900">Reports</h2>
++          <span className="text-sm text-slate-500" data-testid="reports-count">
++            {total} report{total === 1 ? "" : "s"}
++          </span>
++        </div>
++
++        {notice && (
++          <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{notice}</p>
++        )}
++        {failure && (
++          <p role="alert" className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">
++            {failure}
++          </p>
++        )}
++
++        {loading && <p className="mt-4 text-sm text-slate-500">Loading reports…</p>}
++
++        {!loading && items.length === 0 && (
++          <p className="mt-4 text-sm text-slate-500">No reports yet. Add one above.</p>
++        )}
++
++        <ul className="mt-4 divide-y divide-slate-100" data-testid="report-list">
++          {items.map((report) => (
++            <li key={report.id} className="py-3">
++              {editing?.id === report.id ? (
++                <ReportForm
++                  title={`Edit ${report.city}`}
++                  submitLabel="Save changes"
++                  initial={{
++                    city: report.city,
++                    country: report.country ?? "",
++                    temperature_c: report.temperature_c === null ? "" : String(report.temperature_c),
++                    condition: report.condition ?? "",
++                    humidity: report.humidity === null ? "" : String(report.humidity),
++                    wind_kph: report.wind_kph === null ? "" : String(report.wind_kph),
++                  }}
++                  onSubmit={(input) => handleUpdate(report.id, input)}
++                  onCancel={() => setEditing(null)}
++                />
++              ) : (
++                <div className="flex flex-wrap items-center justify-between gap-3">
++                  <div>
++                    <p className="font-semibold text-slate-900">
++                      {report.city}
++                      {report.country ? (
++                        <span className="ml-2 text-sm font-normal text-slate-500">
++                          {report.country}
++                        </span>
++                      ) : null}
++                    </p>
++                    <p className="text-sm text-slate-600">
++                      {formatTemperature(report.temperature_c, unit)}
++                      {report.condition ? ` · ${report.condition}` : ""}
++                      {report.humidity !== null ? ` · ${report.humidity}% humidity` : ""}
++                      {report.wind_kph !== null ? ` · ${report.wind_kph} km/h wind` : ""}
++                    </p>
++                    <p className="text-xs text-slate-400">
++                      Observed {formatTimestamp(report.observed_at)}
++                    </p>
++                  </div>
++                  <div className="flex items-center gap-2">
++                    <button
++                      type="button"
++                      onClick={() => setEditing(report)}
++                      className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
++                    >
++                      Edit
++                    </button>
++                    <button
++                      type="button"
++                      onClick={() => handleDelete(report)}
++                      className="rounded-lg border border-rose-300 px-3 py-1.5 text-sm font-medium text-rose-600 transition hover:bg-rose-50"
++                    >
++                      Delete
++                    </button>
++                  </div>
++                </div>
++              )}
++            </li>
++          ))}
++        </ul>
++
++        {total > PAGE_SIZE && (
++          <div className="mt-4 flex items-center justify-between text-sm text-slate-600">
++            <button
++              type="button"
++              disabled={page <= 1}
++              onClick={() => void load(page - 1)}
++              className="rounded-lg border border-slate-300 px-3 py-1.5 font-medium transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
++            >
++              Previous
++            </button>
++            <span>
++              Page {page} of {totalPages}
++            </span>
++            <button
++              type="button"
++              disabled={page >= totalPages}
++              onClick={() => void load(page + 1)}
++              className="rounded-lg border border-slate-300 px-3 py-1.5 font-medium transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
++            >
++              Next
++            </button>
++          </div>
++        )}
++      </section>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/SearchPanel.tsx b/frontend/src/components/SearchPanel.tsx
+new file mode 100644
+index 0000000..ea04908
+--- /dev/null
++++ b/frontend/src/components/SearchPanel.tsx
+@@ -0,0 +1,45 @@
++import { useState } from "react";
++import type { FormEvent } from "react";
++
++interface SearchPanelProps {
++  onSearch: (city: string) => void;
++  busy: boolean;
++}
++
++export default function SearchPanel({ onSearch, busy }: SearchPanelProps) {
++  const [city, setCity] = useState("");
++
++  function handleSubmit(event: FormEvent<HTMLFormElement>) {
++    event.preventDefault();
++    const trimmed = city.trim();
++    if (!trimmed) return;
++    onSearch(trimmed);
++  }
++
++  return (
++    <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
++      <h2 className="text-lg font-semibold text-slate-900">Look up a city</h2>
++      <p className="mt-1 text-sm text-slate-500">
++        Every lookup is recorded so you can repeat it from your recent searches.
++      </p>
++      <form className="mt-4 flex gap-2" onSubmit={handleSubmit}>
++        <input
++          type="text"
++          name="city"
++          aria-label="Search city"
++          placeholder="Search a city…"
++          value={city}
++          onChange={(event) => setCity(event.target.value)}
++          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
++        />
++        <button
++          type="submit"
++          disabled={busy || city.trim() === ""}
++          className="shrink-0 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
++        >
++          {busy ? "Searching…" : "Search"}
++        </button>
++      </form>
++    </section>
++  );
++}
+diff --git a/frontend/src/components/UnitToggle.tsx b/frontend/src/components/UnitToggle.tsx
+new file mode 100644
+index 0000000..a776948
+--- /dev/null
++++ b/frontend/src/components/UnitToggle.tsx
+@@ -0,0 +1,32 @@
++import type { Unit } from "../types";
++
++interface UnitToggleProps {
++  unit: Unit;
++  onChange: (unit: Unit) => void;
++}
++
++export default function UnitToggle({ unit, onChange }: UnitToggleProps) {
++  return (
++    <div
++      className="inline-flex items-center rounded-full border border-slate-300 bg-slate-100 p-1"
++      role="group"
++      aria-label="Temperature unit"
++    >
++      {(["C", "F"] as Unit[]).map((option) => (
++        <button
++          key={option}
++          type="button"
++          onClick={() => onChange(option)}
++          aria-pressed={unit === option}
++          className={`rounded-full px-3 py-1 text-sm font-semibold transition ${
++            unit === option
++              ? "bg-sky-600 text-white shadow-sm"
++              : "text-slate-600 hover:text-slate-900"
++          }`}
++        >
++          °{option}
++        </button>
++      ))}
++    </div>
++  );
++}
+diff --git a/frontend/src/components/WeatherCard.tsx b/frontend/src/components/WeatherCard.tsx
+new file mode 100644
+index 0000000..e7591c8
+--- /dev/null
++++ b/frontend/src/components/WeatherCard.tsx
+@@ -0,0 +1,58 @@
++import { formatTemperature, formatTimestamp } from "../format";
++import type { Unit, WeatherReport } from "../types";
++
++interface WeatherCardProps {
++  report: WeatherReport;
++  unit: Unit;
++}
++
++export default function WeatherCard({ report, unit }: WeatherCardProps) {
++  const temperature = formatTemperature(report.temperature_c, unit);
++
++  return (
++    <section
++      data-testid="weather-card"
++      className="rounded-2xl border border-slate-200 bg-gradient-to-br from-sky-500 to-blue-600 p-6 text-white shadow-sm"
++    >
++      <div className="flex flex-wrap items-start justify-between gap-4">
++        <div>
++          <h2 className="text-2xl font-bold" data-testid="weather-city">
++            {report.city}
++          </h2>
++          <p className="text-sm text-sky-100">{report.country ?? "Unknown country"}</p>
++        </div>
++        <div className="text-right">
++          <p className="text-4xl font-bold" data-testid="weather-temperature">
++            {temperature}
++          </p>
++          <p className="text-sm text-sky-100">{report.condition ?? "Unknown conditions"}</p>
++        </div>
++      </div>
++
++      <dl className="mt-6 grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
++        <div className="rounded-lg bg-white/10 px-3 py-2">
++          <dt className="text-sky-100">Humidity</dt>
++          <dd className="font-semibold" data-testid="weather-humidity">
++            {report.humidity === null ? "—" : `${report.humidity}%`}
++          </dd>
++        </div>
++        <div className="rounded-lg bg-white/10 px-3 py-2">
++          <dt className="text-sky-100">Wind</dt>
++          <dd className="font-semibold" data-testid="weather-wind">
++            {report.wind_kph === null ? "—" : `${report.wind_kph} km/h`}
++          </dd>
++        </div>
++        <div className="rounded-lg bg-white/10 px-3 py-2">
++          <dt className="text-sky-100">Conditions</dt>
++          <dd className="font-semibold">{report.condition ?? "—"}</dd>
++        </div>
++        <div className="rounded-lg bg-white/10 px-3 py-2">
++          <dt className="text-sky-100">Observed</dt>
++          <dd className="font-semibold" data-testid="weather-observed">
++            {formatTimestamp(report.observed_at)}
++          </dd>
++        </div>
++      </dl>
++    </section>
++  );
++}
+diff --git a/frontend/src/format.ts b/frontend/src/format.ts
+new file mode 100644
+index 0000000..377aa8c
+--- /dev/null
++++ b/frontend/src/format.ts
+@@ -0,0 +1,31 @@
++import type { Unit } from "./types";
++
++export function celsiusToFahrenheit(celsius: number): number {
++  return (celsius * 9) / 5 + 32;
++}
++
++export function convertTemperature(celsius: number | null, unit: Unit): number | null {
++  if (celsius === null || celsius === undefined || Number.isNaN(celsius)) {
++    return null;
++  }
++  return unit === "F" ? celsiusToFahrenheit(celsius) : celsius;
++}
++
++export function formatTemperature(celsius: number | null, unit: Unit): string {
++  const value = convertTemperature(celsius, unit);
++  if (value === null) {
++    return "—";
++  }
++  return `${value.toFixed(1)}°${unit}`;
++}
++
++export function formatTimestamp(value: string | null | undefined): string {
++  if (!value) {
++    return "—";
++  }
++  const date = new Date(value);
++  if (Number.isNaN(date.getTime())) {
++    return value;
++  }
++  return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..c2a145c 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
++import { StrictMode } from "react";
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <StrictMode>
++    <App />
++  </StrictMode>,
++);
+diff --git a/frontend/src/test/setup.ts b/frontend/src/test/setup.ts
+new file mode 100644
+index 0000000..27627da
+--- /dev/null
++++ b/frontend/src/test/setup.ts
+@@ -0,0 +1,8 @@
++import "@testing-library/jest-dom/vitest";
++import { cleanup } from "@testing-library/react";
++import { afterEach } from "vitest";
++
++afterEach(() => {
++  cleanup();
++  window.localStorage.clear();
++});
+diff --git a/frontend/src/types.ts b/frontend/src/types.ts
+new file mode 100644
+index 0000000..f966d33
+--- /dev/null
++++ b/frontend/src/types.ts
+@@ -0,0 +1,39 @@
++export interface WeatherReport {
++  id: number;
++  city: string;
++  country: string | null;
++  temperature_c: number | null;
++  condition: string | null;
++  humidity: number | null;
++  wind_kph: number | null;
++  observed_at: string;
++}
++
++export interface Lookup {
++  id: number;
++  city: string;
++  found: boolean;
++  looked_up_at: string;
++}
++
++export interface PagedReports {
++  items: WeatherReport[];
++  total: number;
++  page: number;
++  page_size: number;
++}
++
++export interface RecentLookups {
++  items: Lookup[];
++}
++
++export interface ReportInput {
++  city: string;
++  country: string;
++  temperature_c: string;
++  condition: string;
++  humidity: string;
++  wind_kph: string;
++}
++
++export type Unit = "C" | "F";
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..2d88ec4
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,22 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "useDefineForClassFields": true,
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "skipLibCheck": true,
++    "moduleResolution": "bundler",
++    "allowImportingTsExtensions": true,
++    "resolveJsonModule": true,
++    "isolatedModules": true,
++    "moduleDetection": "force",
++    "noEmit": true,
++    "jsx": "react-jsx",
++    "strict": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "noFallthroughCasesInSwitch": true,
++    "types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"]
++  },
++  "include": ["src", "vite.config.ts", "vitest.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });
+diff --git a/frontend/vitest.config.ts b/frontend/vitest.config.ts
+new file mode 100644
+index 0000000..c06c230
+--- /dev/null
++++ b/frontend/vitest.config.ts
+@@ -0,0 +1,12 @@
++import react from "@vitejs/plugin-react";
++import { defineConfig } from "vitest/config";
++
++export default defineConfig({
++  plugins: [react()],
++  test: {
++    environment: "jsdom",
++    globals: true,
++    setupFiles: ["./src/test/setup.ts"],
++    include: ["src/**/*.test.tsx", "src/**/*.test.ts"],
++  },
++});
+diff --git a/tests/test_api.py b/tests/test_api.py
+new file mode 100644
+index 0000000..6d836a5
+--- /dev/null
++++ b/tests/test_api.py
+@@ -0,0 +1,271 @@
++"""End-to-end checks for the weather API.
++
++Run with:  python -m unittest discover -s tests
++"""
++
++import os
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++BACKEND = Path(__file__).resolve().parent.parent / "backend"
++sys.path.insert(0, str(BACKEND))
++
++_TMP_DIR = tempfile.mkdtemp(prefix="weather-tests-")
++os.environ["DATABASE_PATH"] = str(Path(_TMP_DIR) / "weather.db")
++
++import app as weather_app  # noqa: E402
++import store  # noqa: E402
++
++
++class ApiTestCase(unittest.TestCase):
++    def setUp(self):
++        weather_app.app.config["TESTING"] = True
++        self.client = weather_app.app.test_client()
++        self.conn = store.connect()
++        self.conn.execute("DELETE FROM reports")
++        self.conn.execute("DELETE FROM lookups")
++        self.conn.execute("DELETE FROM tokens")
++        self.conn.execute("DELETE FROM users")
++        self.conn.execute("DELETE FROM meta WHERE key = 'seeded'")
++        store.seed_sample_reports(self.conn)
++
++    def tearDown(self):
++        self.conn.close()
++
++    def register(self, username="alice", password="secret123"):
++        response = self.client.post(
++            "/api/auth/register", json={"username": username, "password": password}
++        )
++        self.assertEqual(response.status_code, 201, response.get_json())
++        return response.get_json()
++
++    def login(self, username="alice", password="secret123"):
++        response = self.client.post(
++            "/api/auth/login", json={"username": username, "password": password}
++        )
++        self.assertEqual(response.status_code, 200, response.get_json())
++        return response.get_json()["token"]
++
++    def auth(self, token):
++        return {"Authorization": f"Bearer {token}"}
++
++
++class HealthAndSeedTests(ApiTestCase):
++    def test_health(self):
++        response = self.client.get("/api/health")
++        self.assertEqual(response.status_code, 200)
++        self.assertEqual(response.get_json(), {"status": "ok"})
++
++    def test_sample_reports_seeded(self):
++        response = self.client.get("/api/weather")
++        self.assertEqual(response.status_code, 200)
++        body = response.get_json()
++        self.assertGreaterEqual(body["total"], 5)
++        cities = [item["city"] for item in body["items"]]
++        self.assertEqual(cities, sorted(cities, key=str.lower))
++        for item in body["items"]:
++            self.assertEqual(
++                sorted(item.keys()),
++                sorted(
++                    [
++                        "id",
++                        "city",
++                        "country",
++                        "temperature_c",
++                        "condition",
++                        "humidity",
++                        "wind_kph",
++                        "observed_at",
++                    ]
++                ),
++            )
++
++    def test_pagination(self):
++        response = self.client.get("/api/weather?page=1&page_size=2")
++        body = response.get_json()
++        self.assertEqual(len(body["items"]), 2)
++        self.assertEqual(body["page"], 1)
++        self.assertEqual(body["page_size"], 2)
++        self.assertGreaterEqual(body["total"], 5)
++
++
++class AuthTests(ApiTestCase):
++    def test_register_and_login(self):
++        created = self.register()
++        self.assertEqual(created["username"], "alice")
++        token = self.login()
++        self.assertTrue(token)
++
++    def test_duplicate_username(self):
++        self.register()
++        response = self.client.post(
++            "/api/auth/register", json={"username": "ALICE", "password": "secret123"}
++        )
++        self.assertEqual(response.status_code, 409)
++        self.assertIn("error", response.get_json())
++
++    def test_login_wrong_password(self):
++        self.register()
++        response = self.client.post(
++            "/api/auth/login", json={"username": "alice", "password": "nope"}
++        )
++        self.assertEqual(response.status_code, 401)
++
++    def test_protected_route_requires_token(self):
++        response = self.client.post("/api/weather", json={"city": "Paris"})
++        self.assertEqual(response.status_code, 401)
++        response = self.client.get("/api/weather", headers=self.auth("nonsense"))
++        self.assertEqual(response.status_code, 401)
++
++    def test_me_endpoint(self):
++        self.register()
++        token = self.login()
++        response = self.client.get("/api/auth/me", headers=self.auth(token))
++        self.assertEqual(response.status_code, 200)
++        self.assertEqual(response.get_json()["username"], "alice")
++
++
++class WeatherWriteTests(ApiTestCase):
++    def setUp(self):
++        super().setUp()
++        self.register()
++        self.token = self.login()
++        self.headers = self.auth(self.token)
++
++    def test_create_report(self):
++        response = self.client.post(
++            "/api/weather",
++            headers=self.headers,
++            json={
++                "city": "Paris",
++                "country": "France",
++                "temperature_c": 21.5,
++                "condition": "Sunny",
++                "humidity": 60,
++                "wind_kph": 9.5,
++            },
++        )
++        self.assertEqual(response.status_code, 201, response.get_json())
++        body = response.get_json()
++        self.assertEqual(body["city"], "Paris")
++        self.assertEqual(body["temperature_c"], 21.5)
++        self.assertTrue(body["observed_at"])
++
++    def test_city_unique_ignoring_case(self):
++        payload = {"city": "Paris", "temperature_c": 20}
++        self.assertEqual(
++            self.client.post("/api/weather", headers=self.headers, json=payload).status_code, 201
++        )
++        response = self.client.post(
++            "/api/weather", headers=self.headers, json={"city": "pArIs", "temperature_c": 20}
++        )
++        self.assertEqual(response.status_code, 409)
++
++    def test_validation_messages(self):
++        response = self.client.post("/api/weather", headers=self.headers, json={})
++        self.assertEqual(response.status_code, 400)
++        body = response.get_json()
++        self.assertIn("city", body["errors"])
++        self.assertTrue(body["errors"]["city"])
++
++        response = self.client.post(
++            "/api/weather",
++            headers=self.headers,
++            json={"city": "Oslo", "temperature_c": "warm", "humidity": 900},
++        )
++        self.assertEqual(response.status_code, 400)
++        self.assertIn("temperature_c", response.get_json()["errors"])
++        self.assertIn("humidity", response.get_json()["errors"])
++
++    def test_replace_report_clears_omitted_fields(self):
++        created = self.client.post(
++            "/api/weather",
++            headers=self.headers,
++            json={
++                "city": "Paris",
++                "country": "France",
++                "temperature_c": 21.5,
++                "condition": "Sunny",
++                "humidity": 60,
++                "wind_kph": 9.5,
++            },
++        ).get_json()
++
++        response = self.client.put(
++            f"/api/weather/{created['id']}",
++            headers=self.headers,
++            json={"city": "Paris", "temperature_c": 25},
++        )
++        self.assertEqual(response.status_code, 200, response.get_json())
++        body = response.get_json()
++        self.assertEqual(body["temperature_c"], 25.0)
++        self.assertIsNone(body["country"])
++        self.assertIsNone(body["condition"])
++        self.assertIsNone(body["humidity"])
++        self.assertIsNone(body["wind_kph"])
++        self.assertNotEqual(body["observed_at"], created["observed_at"])
++
++    def test_replace_missing_report(self):
++        response = self.client.put("/api/weather/9999", headers=self.headers, json={"city": "X"})
++        self.assertEqual(response.status_code, 404)
++
++    def test_get_and_delete_report(self):
++        created = self.client.post(
++            "/api/weather", headers=self.headers, json={"city": "Paris", "temperature_c": 20}
++        ).get_json()
++
++        response = self.client.get(f"/api/weather/{created['id']}")
++        self.assertEqual(response.status_code, 200)
++        self.assertEqual(response.get_json()["city"], "Paris")
++
++        response = self.client.delete(f"/api/weather/{created['id']}", headers=self.headers)
++        self.assertIn(response.status_code, (200, 204))
++        self.assertEqual(self.client.get(f"/api/weather/{created['id']}").status_code, 404)
++
++    def test_delete_requires_auth(self):
++        created = self.client.post(
++            "/api/weather", headers=self.headers, json={"city": "Paris", "temperature_c": 20}
++        ).get_json()
++        response = self.client.delete(f"/api/weather/{created['id']}")
++        self.assertEqual(response.status_code, 401)
++
++
++class LookupTests(ApiTestCase):
++    def test_lookup_is_recorded(self):
++        self.client.get("/api/weather?city=Berlin")
++        response = self.client.get("/api/weather/recent?limit=5")
++        self.assertEqual(response.status_code, 200)
++        items = response.get_json()["items"]
++        self.assertEqual(len(items), 1)
++        self.assertEqual(items[0]["city"], "Berlin")
++        self.assertTrue(items[0]["found"])
++        self.assertIn("looked_up_at", items[0])
++
++    def test_lookup_not_found(self):
++        self.client.get("/api/weather?city=Atlantis")
++        items = self.client.get("/api/weather/recent").get_json()["items"]
++        self.assertEqual(len(items), 1)
++        self.assertFalse(items[0]["found"])
++
++    def test_lookup_filters_list(self):
++        response = self.client.get("/api/weather?city=berlin")
++        body = response.get_json()
++        self.assertEqual(body["total"], 1)
++        self.assertEqual(body["items"][0]["city"], "Berlin")
++
++    def test_recent_is_newest_first(self):
++        for city in ("Berlin", "Cairo", "Dublin"):
++            self.client.get(f"/api/weather?city={city}")
++        items = self.client.get("/api/weather/recent?limit=5").get_json()["items"]
++        self.assertEqual([item["city"] for item in items], ["Dublin", "Cairo", "Berlin"])
++
++    def test_list_without_city_records_nothing(self):
++        self.client.get("/api/weather")
++        items = self.client.get("/api/weather/recent").get_json()["items"]
++        self.assertEqual(items, [])
++
++
++if __name__ == "__main__":
++    unittest.main()

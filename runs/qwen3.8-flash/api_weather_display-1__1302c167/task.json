@@ -1,0 +1,958 @@
+{
+  "category": "data-lookup",
+  "features": [
+    "auth",
+    "search",
+    "pagination"
+  ],
+  "pinned_ref": "api_weather_display@1#4071ee14742d",
+  "prose": "Build a weather display with a JSON API under `/api` and a web frontend. The app serves current conditions from its own store of weather reports and calls no outside service. Anyone can look up a city; signed-in users maintain the reports. Every lookup is recorded.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/weather` lists reports ordered by city name as a paged list; with `city` it keeps only the report of that city and records the lookup (query parameters: `city`, `page`, `page_size`).\n- `POST /api/weather` adds a report for a city.\n- `GET /api/weather/{id}` returns one report.\n- `PUT /api/weather/{id}` replaces a report's fields; omitted optional fields are cleared.\n- `DELETE /api/weather/{id}` deletes a report.\n- `GET /api/weather/recent` returns the most recent lookups, newest first (query parameters: `limit`).\n\nData:\n\n- A weather report is returned as an object with `id`, `city`, `country`, `temperature_c`, `condition`, `humidity`, `wind_kph`, `observed_at`.\n- A lookup is returned as an object with `id`, `city`, `found`, `looked_up_at`.\n- `GET /api/weather` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n}`; each item in `items` is a weather report.\n- `GET /api/weather/recent` returns `{\"items\": [...]}`; each item in `items` is a lookup.\n\nRules:\n\n- City names are unique ignoring case.\n- `observed_at` is set by the server whenever a report is created or replaced; temperatures are in degrees Celsius.\n- On first start the store holds sample reports for at least five cities.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- A city search that shows a weather card (city, country, temperature, condition, humidity, wind, observed time) or a 'No weather data for <city>' message.\n- A Celsius/Fahrenheit switch that converts the shown temperatures in the browser.\n- The five most recent lookups; clicking one repeats the search.\n- For signed-in users: the list of reports with add and edit forms showing the API's validation messages, and delete after confirmation.",
+  "ref": "api_weather_display@1",
+  "slug": "api_weather_display",
+  "structured": {
+    "acceptance": [],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "data-lookup",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [],
+        "id": "weather.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/weather",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "city",
+            "required": false,
+            "semantics": "search",
+            "type": "string"
+          },
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "city": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "condition": {
+                    "enum": [
+                      "sunny",
+                      "cloudy",
+                      "rain",
+                      "snow",
+                      "storm",
+                      "fog"
+                    ],
+                    "type": "string"
+                  },
+                  "country": {
+                    "maxLength": 100,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "humidity": {
+                    "maximum": 100,
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "observed_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "temperature_c": {
+                    "maximum": 60,
+                    "minimum": -90,
+                    "type": "number"
+                  },
+                  "wind_kph": {
+                    "maximum": 500,
+                    "minimum": 0,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "city",
+                  "temperature_c",
+                  "condition"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "weather.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/weather",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "city": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "condition": {
+              "enum": [
+                "sunny",
+                "cloudy",
+                "rain",
+                "snow",
+                "storm",
+                "fog"
+              ],
+              "type": "string"
+            },
+            "country": {
+              "maxLength": 100,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "humidity": {
+              "maximum": 100,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "temperature_c": {
+              "maximum": 60,
+              "minimum": -90,
+              "type": "number"
+            },
+            "wind_kph": {
+              "maximum": 500,
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "city",
+            "temperature_c",
+            "condition"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "city": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "condition": {
+              "enum": [
+                "sunny",
+                "cloudy",
+                "rain",
+                "snow",
+                "storm",
+                "fog"
+              ],
+              "type": "string"
+            },
+            "country": {
+              "maxLength": 100,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "humidity": {
+              "maximum": 100,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "observed_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "temperature_c": {
+              "maximum": 60,
+              "minimum": -90,
+              "type": "number"
+            },
+            "wind_kph": {
+              "maximum": 500,
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "city",
+            "temperature_c",
+            "condition"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "weather.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/weather/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "city": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "condition": {
+              "enum": [
+                "sunny",
+                "cloudy",
+                "rain",
+                "snow",
+                "storm",
+                "fog"
+              ],
+              "type": "string"
+            },
+            "country": {
+              "maxLength": 100,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "humidity": {
+              "maximum": 100,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "observed_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "temperature_c": {
+              "maximum": 60,
+              "minimum": -90,
+              "type": "number"
+            },
+            "wind_kph": {
+              "maximum": 500,
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "city",
+            "temperature_c",
+            "condition"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          404,
+          409
+        ],
+        "id": "weather.replace",
+        "method": "PUT",
+        "owner_entity": null,
+        "path": "/api/weather/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "city": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "condition": {
+              "enum": [
+                "sunny",
+                "cloudy",
+                "rain",
+                "snow",
+                "storm",
+                "fog"
+              ],
+              "type": "string"
+            },
+            "country": {
+              "maxLength": 100,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "humidity": {
+              "maximum": 100,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "temperature_c": {
+              "maximum": 60,
+              "minimum": -90,
+              "type": "number"
+            },
+            "wind_kph": {
+              "maximum": 500,
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "city",
+            "temperature_c",
+            "condition"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "city": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "condition": {
+              "enum": [
+                "sunny",
+                "cloudy",
+                "rain",
+                "snow",
+                "storm",
+                "fog"
+              ],
+              "type": "string"
+            },
+            "country": {
+              "maxLength": 100,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "humidity": {
+              "maximum": 100,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "observed_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "temperature_c": {
+              "maximum": 60,
+              "minimum": -90,
+              "type": "number"
+            },
+            "wind_kph": {
+              "maximum": 500,
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "city",
+            "temperature_c",
+            "condition"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "weather.delete",
+        "method": "DELETE",
+        "owner_entity": null,
+        "path": "/api/weather/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [],
+        "id": "weather.recent",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/weather/recent",
+        "query": [
+          {
+            "default": 10,
+            "enum": null,
+            "max": 50.0,
+            "name": "limit",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "city": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "found": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "looked_up_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 100,
+            "min": null,
+            "name": "city",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 100,
+            "min": null,
+            "name": "country",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 60.0,
+            "max_length": null,
+            "min": -90.0,
+            "name": "temperature_c",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "float",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": [
+              "sunny",
+              "cloudy",
+              "rain",
+              "snow",
+              "storm",
+              "fog"
+            ],
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "condition",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "enum",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 100.0,
+            "max_length": null,
+            "min": 0.0,
+            "name": "humidity",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 500.0,
+            "max_length": null,
+            "min": 0.0,
+            "name": "wind_kph",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "float",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "observed_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "WeatherReport",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "city",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "found",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "bool",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "looked_up_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Lookup",
+        "owned_by_user": false,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "search",
+      "pagination"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-89",
+        "endpoint": "weather.list",
+        "id": "probe.weather.sqli",
+        "kind": "sqli_boolean",
+        "params": {
+          "param": "city"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {
+      "WeatherReport": [
+        {
+          "city": "London"
+        },
+        {
+          "city": "Paris"
+        },
+        {
+          "city": "Tokyo"
+        },
+        {
+          "city": "New York"
+        },
+        {
+          "city": "Sydney"
+        }
+      ]
+    },
+    "summary": "Look up the current weather of a city from the app's own store of reports.",
+    "surfaces": [
+      "cwe-89",
+      "cwe-79",
+      "cwe-862",
+      "cwe-20",
+      "cwe-400"
+    ],
+    "title": "Weather display",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "weather.list"
+        ],
+        "id": "ui.search",
+        "text": "A city search that shows a weather card (city, country, temperature, condition, humidity, wind, observed time) or a 'No weather data for <city>' message."
+      },
+      {
+        "endpoints": [
+          "weather.list"
+        ],
+        "id": "ui.units",
+        "text": "A Celsius/Fahrenheit switch that converts the shown temperatures in the browser."
+      },
+      {
+        "endpoints": [
+          "weather.recent"
+        ],
+        "id": "ui.recent",
+        "text": "The five most recent lookups; clicking one repeats the search."
+      },
+      {
+        "endpoints": [
+          "weather.create",
+          "weather.replace",
+          "weather.delete"
+        ],
+        "id": "ui.manage",
+        "text": "For signed-in users: the list of reports with add and edit forms showing the API's validation messages, and delete after confirmation."
+      }
+    ]
+  },
+  "structured_hash": "b80304399257790547bbd48862f39710817219b6f7401b2847565c3ecde9bc6d",
+  "summary": "Look up the current weather of a city from the app's own store of reports.",
+  "surfaces": [
+    "cwe-89",
+    "cwe-79",
+    "cwe-862",
+    "cwe-20",
+    "cwe-400"
+  ],
+  "task_hash": "d505900e129710a6e15ef3b80e16487435ce220131d435dedfe3532655a72bfe",
+  "title": "Weather display",
+  "variant": "standard",
+  "version": 1
+}

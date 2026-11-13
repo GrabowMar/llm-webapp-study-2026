@@ -1,0 +1,992 @@
+{
+  "category": "booking",
+  "features": [
+    "auth",
+    "ownership",
+    "filter",
+    "scheduling",
+    "admin"
+  ],
+  "pinned_ref": "booking_reservations@1#da691fca4ba8",
+  "prose": "Build a restaurant reservation app with a JSON API under `/api` and a web frontend. Every time slot (a date plus a time) seats at most 20 guests. Anyone can see how full the slots of a day are; signed-in users book, change and cancel their own reservations; the admin sees every reservation.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `POST /api/reservations` books a slot for the signed-in user.\n- `GET /api/reservations` lists the signed-in user's reservations, earliest first (query parameters: `date`).\n- `GET /api/reservations/{id}` returns one reservation.\n- `PUT /api/reservations/{id}` replaces a reservation's fields; an omitted `notes` is cleared.\n- `DELETE /api/reservations/{id}` cancels a reservation and frees its seats.\n- `GET /api/availability` lists, for one day, every slot with at least one reservation, earliest first, with `booked` and `remaining` seats (query parameters: `date`).\n- `GET /api/admin/reservations` lists every reservation of every user, for the admin (query parameters: `date`, `page`, `page_size`).\n\nData:\n\n- A reservation is returned as an object with `id`, `name`, `email`, `date`, `time`, `party_size`, `notes`, `created_at`.\n- `GET /api/reservations` returns `{\"items\": [...], \"total\": n}`; each item in `items` is a reservation.\n- `GET /api/availability` returns `{\"items\": [...]}`; each item in `items` is an object with `time`, `booked` and `remaining`.\n- `GET /api/admin/reservations` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n}`; each item in `items` is a reservation.\n\nRules:\n\n- Each user sees and changes only their own reservations; another user's reservation behaves as if it did not exist.\n- A slot holds at most 20 guests over all its reservations; a booking or change that would exceed that is refused and changes nothing.\n- When a reservation is replaced, its own guests are not counted twice.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- A day picker showing that day's booked slots and remaining seats.\n- A booking form (name, email, date, time, party size, notes) that shows the API's messages, including a full slot.\n- The user's reservations grouped by date, with edit and cancel actions; cancel asks for confirmation.\n- For the admin: every reservation of the chosen day with the guest total.",
+  "ref": "booking_reservations@1",
+  "slug": "booking_reservations",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "reservations.create",
+        "expect": {
+          "header_contains": null,
+          "json_contains": null,
+          "json_schema": null,
+          "max_ms": null,
+          "status": 409
+        },
+        "id": "reservations.capacity.enforced",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": {
+            "date": "2099-01-01",
+            "email": "c@example.com",
+            "name": "C",
+            "party_size": 1,
+            "time": "19:00"
+          },
+          "method": "POST",
+          "path": "/api/reservations",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [
+          {
+            "actor": null,
+            "capture": {},
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "date": "2099-01-01",
+                "email": "a@example.com",
+                "name": "A",
+                "party_size": 12,
+                "time": "19:00"
+              },
+              "method": "POST",
+              "path": "/api/reservations",
+              "query": {}
+            }
+          },
+          {
+            "actor": null,
+            "capture": {},
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "date": "2099-01-01",
+                "email": "b@example.com",
+                "name": "B",
+                "party_size": 8,
+                "time": "19:00"
+              },
+              "method": "POST",
+              "path": "/api/reservations",
+              "query": {}
+            }
+          }
+        ],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "booking",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "reservations.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/reservations",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "date": {
+              "format": "date",
+              "type": "string"
+            },
+            "email": {
+              "format": "email",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "notes": {
+              "maxLength": 500,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "party_size": {
+              "maximum": 12,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "time": {
+              "maxLength": 5,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "email",
+            "date",
+            "time",
+            "party_size"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "date": {
+              "format": "date",
+              "type": "string"
+            },
+            "email": {
+              "format": "email",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "notes": {
+              "maxLength": 500,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "party_size": {
+              "maximum": 12,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "time": {
+              "maxLength": 5,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "email",
+            "date",
+            "time",
+            "party_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "reservations.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/reservations",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "date",
+            "required": false,
+            "semantics": "filter",
+            "type": "date"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "created_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "date": {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  "email": {
+                    "format": "email",
+                    "maxLength": 254,
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "name": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "notes": {
+                    "maxLength": 500,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "party_size": {
+                    "maximum": 12,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "time": {
+                    "maxLength": 5,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "email",
+                  "date",
+                  "time",
+                  "party_size"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "reservations.get",
+        "method": "GET",
+        "owner_entity": "Reservation",
+        "path": "/api/reservations/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "date": {
+              "format": "date",
+              "type": "string"
+            },
+            "email": {
+              "format": "email",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "notes": {
+              "maxLength": 500,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "party_size": {
+              "maximum": 12,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "time": {
+              "maxLength": 5,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "email",
+            "date",
+            "time",
+            "party_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          400,
+          404,
+          409
+        ],
+        "id": "reservations.replace",
+        "method": "PUT",
+        "owner_entity": "Reservation",
+        "path": "/api/reservations/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "date": {
+              "format": "date",
+              "type": "string"
+            },
+            "email": {
+              "format": "email",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "notes": {
+              "maxLength": 500,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "party_size": {
+              "maximum": 12,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "time": {
+              "maxLength": 5,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "email",
+            "date",
+            "time",
+            "party_size"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "date": {
+              "format": "date",
+              "type": "string"
+            },
+            "email": {
+              "format": "email",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "notes": {
+              "maxLength": 500,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "party_size": {
+              "maximum": 12,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "time": {
+              "maxLength": 5,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "email",
+            "date",
+            "time",
+            "party_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "reservations.cancel",
+        "method": "DELETE",
+        "owner_entity": "Reservation",
+        "path": "/api/reservations/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [],
+        "id": "availability.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/availability",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "date",
+            "required": false,
+            "semantics": "filter",
+            "type": "date"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "booked": {
+                    "type": "integer"
+                  },
+                  "remaining": {
+                    "type": "integer"
+                  },
+                  "time": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "time",
+                  "booked",
+                  "remaining"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [],
+        "id": "admin.reservations",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/admin/reservations",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "date",
+            "required": false,
+            "semantics": "filter",
+            "type": "date"
+          },
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "created_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "date": {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  "email": {
+                    "format": "email",
+                    "maxLength": 254,
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "name": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "notes": {
+                    "maxLength": 500,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "party_size": {
+                    "maximum": 12,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "time": {
+                    "maxLength": 5,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "email",
+                  "date",
+                  "time",
+                  "party_size"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 100,
+            "min": null,
+            "name": "name",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 254,
+            "min": null,
+            "name": "email",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "email",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "date",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "date",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 5,
+            "min": null,
+            "name": "time",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 12.0,
+            "max_length": null,
+            "min": 1.0,
+            "name": "party_size",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 500,
+            "min": null,
+            "name": "notes",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "text",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "created_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Reservation",
+        "owned_by_user": true,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "ownership",
+      "filter",
+      "scheduling",
+      "admin"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-639",
+        "endpoint": "reservations.get",
+        "id": "probe.reservations.idor",
+        "kind": "idor_enumeration",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-798",
+        "endpoint": null,
+        "id": "probe.reservations.default_admin",
+        "kind": "default_credential",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Reserve a restaurant table for a date and time, with a public view of how full each slot is.",
+    "surfaces": [
+      "cwe-639",
+      "cwe-862",
+      "cwe-20",
+      "cwe-362",
+      "cwe-79",
+      "cwe-89",
+      "cwe-798"
+    ],
+    "title": "Table reservations",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "availability.get"
+        ],
+        "id": "ui.day",
+        "text": "A day picker showing that day's booked slots and remaining seats."
+      },
+      {
+        "endpoints": [
+          "reservations.create"
+        ],
+        "id": "ui.book",
+        "text": "A booking form (name, email, date, time, party size, notes) that shows the API's messages, including a full slot."
+      },
+      {
+        "endpoints": [
+          "reservations.list",
+          "reservations.replace",
+          "reservations.cancel"
+        ],
+        "id": "ui.mine",
+        "text": "The user's reservations grouped by date, with edit and cancel actions; cancel asks for confirmation."
+      },
+      {
+        "endpoints": [
+          "admin.reservations"
+        ],
+        "id": "ui.admin",
+        "text": "For the admin: every reservation of the chosen day with the guest total."
+      }
+    ]
+  },
+  "structured_hash": "96ec5967094588fa5e196c6eff00dddec75443767f7d9c0ada7ec7f69a469256",
+  "summary": "Reserve a restaurant table for a date and time, with a public view of how full each slot is.",
+  "surfaces": [
+    "cwe-639",
+    "cwe-862",
+    "cwe-20",
+    "cwe-362",
+    "cwe-79",
+    "cwe-89",
+    "cwe-798"
+  ],
+  "task_hash": "e3602bdbc597053848161d2536f273c67ae1e9cbbc127886574e463d7b2e8696",
+  "title": "Table reservations",
+  "variant": "standard",
+  "version": 1
+}

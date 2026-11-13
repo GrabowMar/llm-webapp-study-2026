@@ -1,0 +1,504 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 682,
+  "completed_at": "2026-11-11T00:51:42.599857+00:00",
+  "condition_id": 99,
+  "condition_label": "local-opencode-go/minimax-m3",
+  "config_fingerprint": "873f0ef1c6d50b80652a728e758f031f9ba9645c1d785ff6834c111a3753f406",
+  "cost_usd": 0.0,
+  "duration": 624.246165,
+  "fingerprints": {
+    "config_fingerprint": "873f0ef1c6d50b80652a728e758f031f9ba9645c1d785ff6834c111a3753f406",
+    "prompt_hash": "01f0956fa9bd9994da7b341af6a35e3b046ace356dc409a75adfbf57043f9ffb",
+    "run_fingerprint": "c8beda0c5b03fbbf1d9536f16d38036cbdb08ecb4ea97f9bd4c3906b848fdce7",
+    "task_hash": "918ebb67346c067318829fb1d7b5f48dc474505fd44c22f7cbc890e7f37607d7",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "b5eca159-7c9a-41bc-b435-ce3a26b2bf3a",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/minimax-m3",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-11T00:51:22.202988+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 795,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 11,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 111,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 104,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "tasks.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "tasks.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "tasks.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "tasks.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "tasks.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "tasks.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "tasks.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "tasks.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "tasks.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "tasks.create.invalid.too_long",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "tasks.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "tasks.create.invalid.enum",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "tasks.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "tasks.get.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "tasks.update",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "tasks.update.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "tasks.update",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "tasks.update.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "tasks.update",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "tasks.update.invalid.too_long",
+          "ms": 12,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "tasks.update",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "tasks.update.invalid.enum",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "tasks.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "tasks.delete.ok",
+          "ms": 2,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"deleted\":true,\"id\":7}\n",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "tasks.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "tasks.delete.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "tasks.update",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "tasks.move.reorders",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 16,
+        "agent_pass_rate": 0.9375,
+        "agent_passed": 15,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 3,
+            "passed": 3
+          },
+          "functional": {
+            "n": 8,
+            "passed": 7
+          },
+          "validation": {
+            "n": 5,
+            "passed": 5
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.9375,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 1,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.9375
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-79",
+          "endpoint": "tasks.create",
+          "evidence": "payload not served unescaped as HTML",
+          "id": "probe.tasks.xss",
+          "kind": "xss_stored",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 2565,
+  "loc_model": 2565,
+  "model": "minimax-m3",
+  "model_id": "local-opencode-go/minimax-m3",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "c8beda0c5b03fbbf1d9536f16d38036cbdb08ecb4ea97f9bd4c3906b848fdce7",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-11T00:41:18.353692+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "workflow_task_board@1",
+  "tokens_used": 3732420,
+  "tree_hash": "6a4a2420959faba78f84d73751247f79d676f4b70b92ee26152490f1fe3aedff",
+  "truncated": true,
+  "unit": "task:workflow_task_board@1",
+  "usable": true
+}

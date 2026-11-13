@@ -1,0 +1,842 @@
+{
+  "category": "workflow",
+  "features": [
+    "auth",
+    "filter",
+    "sort"
+  ],
+  "pinned_ref": "workflow_task_board@1#677c438f61a2",
+  "prose": "Build a shared kanban board with a JSON API under `/api` and a web frontend. Anyone can view the board; signed-in users create, edit, move, reorder and delete tasks across the columns To Do, In Progress and Done.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/tasks` lists tasks ordered by column (`todo`, `in_progress`, `done`) and then position, with `counts` per status (query parameters: `status`, `priority`).\n- `POST /api/tasks` creates a task at the end of its column.\n- `GET /api/tasks/{id}` returns one task.\n- `PATCH /api/tasks/{id}` changes only the fields it is given, including moving the task to another column or position.\n- `DELETE /api/tasks/{id}` deletes a task and closes the gap in its column.\n\nData:\n\n- A task is returned as an object with `id`, `title`, `description`, `status`, `priority`, `position`, `updated_at`.\n- `GET /api/tasks` returns `{\"items\": [...], \"total\": n, \"counts\": {...}}`; each item in `items` is a task.\n\nRules:\n\n- Any signed-in user may change any task.\n- `position` is a task's 1-based place within its column; each column's tasks always hold positions 1 to n without gaps.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- Three columns with task cards (title, priority badge) and per-column counts, plus a priority filter.\n- For signed-in users: drag and drop between and within columns that saves the new column and position.\n- Create and edit dialogs showing the API's validation messages; delete with confirmation.",
+  "ref": "workflow_task_board@1",
+  "slug": "workflow_task_board",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "tasks.update",
+        "expect": {
+          "header_contains": null,
+          "json_contains": {
+            "position": 1,
+            "status": "done"
+          },
+          "json_schema": null,
+          "max_ms": null,
+          "status": 200
+        },
+        "id": "tasks.move.reorders",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": {
+            "position": 1
+          },
+          "method": "PATCH",
+          "path": "/api/tasks/{bid}",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [
+          {
+            "actor": null,
+            "capture": {},
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "status": "done",
+                "title": "zz a"
+              },
+              "method": "POST",
+              "path": "/api/tasks",
+              "query": {}
+            }
+          },
+          {
+            "actor": null,
+            "capture": {
+              "bid": "$.id"
+            },
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "status": "done",
+                "title": "zz b"
+              },
+              "method": "POST",
+              "path": "/api/tasks",
+              "query": {}
+            }
+          }
+        ],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "workflow",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [],
+        "id": "tasks.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/tasks",
+        "query": [
+          {
+            "default": null,
+            "enum": [
+              "todo",
+              "in_progress",
+              "done"
+            ],
+            "max": null,
+            "name": "status",
+            "required": false,
+            "semantics": "filter",
+            "type": "enum"
+          },
+          {
+            "default": null,
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "max": null,
+            "name": "priority",
+            "required": false,
+            "semantics": "filter",
+            "type": "enum"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "counts": {
+              "type": "object"
+            },
+            "items": {
+              "items": {
+                "properties": {
+                  "description": {
+                    "maxLength": 2000,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "position": {
+                    "minimum": 1,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "priority": {
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      null
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "todo",
+                      "in_progress",
+                      "done",
+                      null
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "updated_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "title"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "counts"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "tasks.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/tasks",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 2000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "priority": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "enum": [
+                "todo",
+                "in_progress",
+                "done",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 2000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "position": {
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "priority": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "enum": [
+                "todo",
+                "in_progress",
+                "done",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "tasks.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/tasks/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 2000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "position": {
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "priority": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "enum": [
+                "todo",
+                "in_progress",
+                "done",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          404
+        ],
+        "id": "tasks.update",
+        "method": "PATCH",
+        "owner_entity": null,
+        "path": "/api/tasks/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 2000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "position": {
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "priority": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "enum": [
+                "todo",
+                "in_progress",
+                "done",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 2000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "position": {
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "priority": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "enum": [
+                "todo",
+                "in_progress",
+                "done",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "tasks.delete",
+        "method": "DELETE",
+        "owner_entity": null,
+        "path": "/api/tasks/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 200,
+            "min": null,
+            "name": "title",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 2000,
+            "min": null,
+            "name": "description",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "text",
+            "unique": false
+          },
+          {
+            "default": "todo",
+            "enum": [
+              "todo",
+              "in_progress",
+              "done"
+            ],
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "status",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "enum",
+            "unique": false
+          },
+          {
+            "default": "medium",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "priority",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "enum",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": 1.0,
+            "name": "position",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "updated_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Task",
+        "owned_by_user": false,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "filter",
+      "sort"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-79",
+        "endpoint": "tasks.create",
+        "id": "probe.tasks.xss",
+        "kind": "xss_stored",
+        "params": {
+          "field": "title",
+          "view_endpoint": "tasks.list"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "A shared kanban board where tasks move through To Do, In Progress and Done.",
+    "surfaces": [
+      "cwe-862",
+      "cwe-79",
+      "cwe-20",
+      "cwe-362",
+      "cwe-89"
+    ],
+    "title": "Kanban board",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "tasks.list"
+        ],
+        "id": "ui.board",
+        "text": "Three columns with task cards (title, priority badge) and per-column counts, plus a priority filter."
+      },
+      {
+        "endpoints": [
+          "tasks.update"
+        ],
+        "id": "ui.drag",
+        "text": "For signed-in users: drag and drop between and within columns that saves the new column and position."
+      },
+      {
+        "endpoints": [
+          "tasks.create",
+          "tasks.update",
+          "tasks.delete"
+        ],
+        "id": "ui.forms",
+        "text": "Create and edit dialogs showing the API's validation messages; delete with confirmation."
+      }
+    ]
+  },
+  "structured_hash": "eba1e94fae2a6ae76a94e06b0cfd4a022abefe8743a5000f146a2c57c4b933db",
+  "summary": "A shared kanban board where tasks move through To Do, In Progress and Done.",
+  "surfaces": [
+    "cwe-862",
+    "cwe-79",
+    "cwe-20",
+    "cwe-362",
+    "cwe-89"
+  ],
+  "task_hash": "918ebb67346c067318829fb1d7b5f48dc474505fd44c22f7cbc890e7f37607d7",
+  "title": "Kanban board",
+  "variant": "standard",
+  "version": 1
+}

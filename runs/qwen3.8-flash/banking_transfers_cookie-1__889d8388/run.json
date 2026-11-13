@@ -1,0 +1,495 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 643,
+  "completed_at": "2026-11-10T21:30:30.371202+00:00",
+  "condition_id": 98,
+  "condition_label": "local-opencode-go/qwen3.8-flash",
+  "config_fingerprint": "129a3705a513feba8451cada775fa2e03692d1a619dd163847e411f49af73ef8",
+  "cost_usd": 0.0,
+  "duration": 1091.128271,
+  "fingerprints": {
+    "config_fingerprint": "129a3705a513feba8451cada775fa2e03692d1a619dd163847e411f49af73ef8",
+    "prompt_hash": "6d8f357cd9fd695a9afc232a76616b00fb3bc53b3af91478f2703e066e984aa6",
+    "run_fingerprint": "e14e12940150c6442951a614a575efad938cf5d0eb3b7bd5179b5cc9b97efe80",
+    "task_hash": "2e53b363c5a9fe96e5a89a763e9e85878455b533b24f1aea7d6dae0543c96654",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "889d8388-e574-4203-95dc-0c0e31aac3a0",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/qwen3.8-flash",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-10T21:30:15.914817+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 759,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 11,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 85,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 79,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "account.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "account.get.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "account.get",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "account.get.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "transfers.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "transfers.create.ok",
+          "ms": 1,
+          "note": "status 403",
+          "observed": {
+            "body": "{\"error\":\"invalid or missing CSRF token\",\"message\":\"invalid or missing CSRF token\"}\n",
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "transfers.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "transfers.create.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "transfers.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "transfers.create.invalid.missing",
+          "ms": 1,
+          "note": "status 403",
+          "observed": {
+            "body": "{\"error\":\"invalid or missing CSRF token\",\"message\":\"invalid or missing CSRF token\"}\n",
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "transfers.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "transfers.create.invalid.too_long",
+          "ms": 1,
+          "note": "status 403",
+          "observed": {
+            "body": "{\"error\":\"invalid or missing CSRF token\",\"message\":\"invalid or missing CSRF token\"}\n",
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "transfers.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "transfers.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "transfers.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "transfers.list.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "transfers.list",
+          "expected": null,
+          "id": "transfers.list.page_size",
+          "ms": null,
+          "note": "setup 0: POST /api/transfers answered 403, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "transfers.get",
+          "expected": null,
+          "id": "transfers.get.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/transfers answered 403, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "transfers.get",
+          "expected": null,
+          "id": "transfers.get.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/transfers answered 403, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "transfers.get",
+          "expected": null,
+          "id": "transfers.get.other_user",
+          "ms": null,
+          "note": "setup 0: POST /api/transfers answered 403, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "persistence",
+          "endpoint": "transfers.get",
+          "expected": null,
+          "id": "transfers.get.persists",
+          "ms": null,
+          "note": "setup 0: POST /api/transfers answered 403, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "transfers.create",
+          "expected": {
+            "status": [
+              409
+            ]
+          },
+          "id": "transfers.insufficient",
+          "ms": 1,
+          "note": "status 403",
+          "observed": {
+            "body": "{\"error\":\"invalid or missing CSRF token\",\"message\":\"invalid or missing CSRF token\"}\n",
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 16,
+        "agent_pass_rate": 0.4375,
+        "agent_passed": 7,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 4,
+            "passed": 3
+          },
+          "functional": {
+            "n": 7,
+            "passed": 4
+          },
+          "ownership": {
+            "n": 1,
+            "passed": 0
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 0
+          },
+          "persistence": {
+            "n": 1,
+            "passed": 0
+          },
+          "validation": {
+            "n": 2,
+            "passed": 0
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.4375,
+        "probes_exploited": 0,
+        "probes_skipped": 2,
+        "probes_tested": 0,
+        "regression_pass_rate": null,
+        "sec_pass": null,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.4375
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-352",
+          "endpoint": "transfers.create",
+          "evidence": "precondition checks did not pass: transfers.create.ok",
+          "id": "probe.transfers.csrf",
+          "kind": "csrf_missing",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        },
+        {
+          "cwe": "cwe-639",
+          "endpoint": "transfers.get",
+          "evidence": "precondition checks did not pass: transfers.get.ok",
+          "id": "probe.transfers.idor",
+          "kind": "idor_enumeration",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 922,
+  "loc_model": 922,
+  "model": "qwen3.8-flash",
+  "model_id": "local-opencode-go/qwen3.8-flash",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "e14e12940150c6442951a614a575efad938cf5d0eb3b7bd5179b5cc9b97efe80",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-10T21:12:19.242931+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "banking_transfers_cookie@1",
+  "tokens_used": 2106268,
+  "tree_hash": "e24cb33d3f6442746d075a2ddcc8dc541c58a7020342569744bb1cac6172e19b",
+  "truncated": true,
+  "unit": "task:banking_transfers_cookie@1",
+  "usable": true
+}

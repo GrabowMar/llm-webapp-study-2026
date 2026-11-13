@@ -1,0 +1,435 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 742,
+  "completed_at": "2026-11-11T06:06:34.225909+00:00",
+  "condition_id": 96,
+  "condition_label": "local-opencode-go/mimo-v2.6-flash",
+  "config_fingerprint": "c24caeb34d2acaa4a165f76abd1c7c3b56d4fb490959e369e3efeae377a8e1ee",
+  "cost_usd": 0.0,
+  "duration": 1045.911239,
+  "fingerprints": {
+    "config_fingerprint": "c24caeb34d2acaa4a165f76abd1c7c3b56d4fb490959e369e3efeae377a8e1ee",
+    "prompt_hash": "f6e644eac1324b19641be3907b8477d2dc224d7b56a438da740f4cc51b0329c8",
+    "run_fingerprint": "0ad0650985891042c9a254c79ab8b41e184af9c958f6cfcc61f793f37dd3bea2",
+    "task_hash": "93a806861fe3a4fa625d02208b25538ddcb07dc6b2e9a43ce7bb885d9fb699a3",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "22374b65-de9a-4906-81b7-26fc80e3ab7a",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/mimo-v2.6-flash",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-11T06:06:06.554530+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 854,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 13,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 108,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 124,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "tracks.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "tracks.list.ok",
+          "ms": 6,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "tracks.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "tracks.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "tracks.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "tracks.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "tracks.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "tracks.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "tracks.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "tracks.create.invalid.too_long",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "tracks.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "tracks.get.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "tracks.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "tracks.delete.ok",
+          "ms": 3,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"id\":3,\"ok\":true}\n",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "tracks.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "tracks.delete.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "tracks.delete",
+          "expected": {
+            "status": [
+              403,
+              404
+            ]
+          },
+          "id": "tracks.delete.other_user",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "tracks.play",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "tracks.play.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 12,
+        "agent_pass_rate": 0.9166666666666666,
+        "agent_passed": 11,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 2,
+            "passed": 2
+          },
+          "functional": {
+            "n": 7,
+            "passed": 6
+          },
+          "ownership": {
+            "n": 1,
+            "passed": 1
+          },
+          "validation": {
+            "n": 2,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.9166666666666666,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 2,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.9166666666666666
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-89",
+          "endpoint": "tracks.list",
+          "evidence": "tautology payloads returned no extra rows",
+          "id": "probe.tracks.sqli",
+          "kind": "sqli_boolean",
+          "skip_reason": null,
+          "status": "not_exploited"
+        },
+        {
+          "cwe": "cwe-79",
+          "endpoint": "tracks.create",
+          "evidence": "payload not served unescaped as HTML",
+          "id": "probe.tracks.xss",
+          "kind": "xss_stored",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1373,
+  "loc_model": 1373,
+  "model": "mimo-v2.6-flash",
+  "model_id": "local-opencode-go/mimo-v2.6-flash",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "0ad0650985891042c9a254c79ab8b41e184af9c958f6cfcc61f793f37dd3bea2",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-11T05:49:08.314670+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "media_audio_player@1",
+  "tokens_used": 2951633,
+  "tree_hash": "c98c10beee0a50624d960dedae53eabd189d8178cc216741c944848e0c46e8c4",
+  "truncated": false,
+  "unit": "task:media_audio_player@1",
+  "usable": true
+}

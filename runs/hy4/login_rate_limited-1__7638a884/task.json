@@ -1,0 +1,505 @@
+{
+  "category": "authentication",
+  "features": [
+    "auth",
+    "rate-limit",
+    "admin"
+  ],
+  "pinned_ref": "login_rate_limited@1#5f246c987139",
+  "prose": "Build an account service with a JSON API under `/api` and a web frontend that protects sign-in against guessing. A username is locked for 15 minutes after 5 consecutive failed sign-ins, and each client may make at most 20 sign-in attempts per minute. The admin can unlock a username early.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/me` returns the signed-in account's `id`, `username` and `last_login_at`.\n- `GET /api/me/login-attempts` lists the account's 20 most recent sign-in attempts, newest first, each with `at` and `success`.\n- `GET /api/admin/locks` lists the currently locked usernames with `locked_until`, for the admin.\n- `POST /api/admin/locks/{username}/unlock` unlocks a username and resets its failure count, for the admin.\n\nData:\n\n- `GET /api/me/login-attempts` returns `{\"items\": [...]}`; each item in `items` is an object with `at` and `success`.\n- `GET /api/admin/locks` returns `{\"items\": [...]}`; each item in `items` is an object with `username` and `locked_until`.\n\nRules:\n\n- After 5 consecutive failed sign-ins for a username, every sign-in for it, even with the right password, answers 429 for 15 minutes; a successful sign-in resets the count.\n- A client that makes more than 20 sign-in attempts within one minute gets 429 for the rest of that minute.\n- A 429 response carries a `Retry-After` header with the number of seconds to wait.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- When sign-in is refused because of the lockout or the attempt limit, the form says so and shows when to try again.\n- An account page with the last sign-in time and the recent sign-in attempts.\n- For the admin: the locked usernames with an 'Unlock' button.",
+  "ref": "login_rate_limited@1",
+  "slug": "login_rate_limited",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "anon",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "auth.login",
+        "expect": {
+          "header_contains": {
+            "Retry-After": ""
+          },
+          "json_contains": null,
+          "json_schema": null,
+          "max_ms": null,
+          "status": 429
+        },
+        "id": "login.lockout",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": {
+            "password": "right-pass-1",
+            "username": "zz_lock"
+          },
+          "method": "POST",
+          "path": "/api/auth/login",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [
+          {
+            "actor": "anon",
+            "capture": {},
+            "expect_status": [
+              201,
+              409
+            ],
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "password": "right-pass-1",
+                "username": "zz_lock"
+              },
+              "method": "POST",
+              "path": "/api/auth/register",
+              "query": {}
+            }
+          },
+          {
+            "actor": "anon",
+            "capture": {},
+            "expect_status": [
+              401,
+              429
+            ],
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "password": "wrong",
+                "username": "zz_lock"
+              },
+              "method": "POST",
+              "path": "/api/auth/login",
+              "query": {}
+            }
+          },
+          {
+            "actor": "anon",
+            "capture": {},
+            "expect_status": [
+              401,
+              429
+            ],
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "password": "wrong",
+                "username": "zz_lock"
+              },
+              "method": "POST",
+              "path": "/api/auth/login",
+              "query": {}
+            }
+          },
+          {
+            "actor": "anon",
+            "capture": {},
+            "expect_status": [
+              401,
+              429
+            ],
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "password": "wrong",
+                "username": "zz_lock"
+              },
+              "method": "POST",
+              "path": "/api/auth/login",
+              "query": {}
+            }
+          },
+          {
+            "actor": "anon",
+            "capture": {},
+            "expect_status": [
+              401,
+              429
+            ],
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "password": "wrong",
+                "username": "zz_lock"
+              },
+              "method": "POST",
+              "path": "/api/auth/login",
+              "query": {}
+            }
+          },
+          {
+            "actor": "anon",
+            "capture": {},
+            "expect_status": [
+              401,
+              429
+            ],
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "password": "wrong",
+                "username": "zz_lock"
+              },
+              "method": "POST",
+              "path": "/api/auth/login",
+              "query": {}
+            }
+          }
+        ],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "authentication",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 8,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "me.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/me",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "id": [
+              "integer",
+              "string"
+            ],
+            "last_login_at": [
+              "string",
+              "null"
+            ],
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "username"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "me.attempts",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/me/login-attempts",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "at": {
+                    "type": "string"
+                  },
+                  "success": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "at",
+                  "success"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [],
+        "id": "admin.locks",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/admin/locks",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "locked_until": {
+                    "type": "string"
+                  },
+                  "username": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "username",
+                  "locked_until"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "admin.unlock",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/admin/locks/{username}/unlock",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "rate-limit",
+      "admin"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-307",
+        "endpoint": "auth.login",
+        "id": "probe.login.rate_limit",
+        "kind": "rate_limit_missing",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-798",
+        "endpoint": null,
+        "id": "probe.login.default_admin",
+        "kind": "default_credential",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-256",
+        "endpoint": null,
+        "id": "probe.login.plaintext_password",
+        "kind": "plaintext_password_db",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "An account service that locks a username after repeated failed sign-ins and limits sign-in attempts.",
+    "surfaces": [
+      "cwe-307",
+      "cwe-770",
+      "cwe-204",
+      "cwe-287",
+      "cwe-521",
+      "cwe-256",
+      "cwe-798",
+      "cwe-916"
+    ],
+    "title": "Sign-in with lockout",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "auth.login"
+        ],
+        "id": "ui.locked",
+        "text": "When sign-in is refused because of the lockout or the attempt limit, the form says so and shows when to try again."
+      },
+      {
+        "endpoints": [
+          "me.get",
+          "me.attempts"
+        ],
+        "id": "ui.account",
+        "text": "An account page with the last sign-in time and the recent sign-in attempts."
+      },
+      {
+        "endpoints": [
+          "admin.locks",
+          "admin.unlock"
+        ],
+        "id": "ui.admin",
+        "text": "For the admin: the locked usernames with an 'Unlock' button."
+      }
+    ]
+  },
+  "structured_hash": "7879ca88ba1575dd8ccd34d7eb2ee2c46c23e2f5dce1785ae4a090da8af291a4",
+  "summary": "An account service that locks a username after repeated failed sign-ins and limits sign-in attempts.",
+  "surfaces": [
+    "cwe-307",
+    "cwe-770",
+    "cwe-204",
+    "cwe-287",
+    "cwe-521",
+    "cwe-256",
+    "cwe-798",
+    "cwe-916"
+  ],
+  "task_hash": "3c2eb378683c94ba826e7c2d56acf154cc6e7f7a7bc06e139e189102fdfb81ac",
+  "title": "Sign-in with lockout",
+  "variant": "standard",
+  "version": 1
+}

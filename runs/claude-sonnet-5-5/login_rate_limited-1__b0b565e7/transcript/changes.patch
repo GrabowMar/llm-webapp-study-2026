@@ -1,0 +1,1841 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..b1c7050
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,5 @@
++node_modules
++dist
++__pycache__
++data/
++.scratch
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..cab7c1e 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,210 @@
+-"""Flask entry point."""
++"""Account service: registration, sign-in with lockout, admin unlock."""
+ 
++import hashlib
++import math
++import os
++import secrets
++import sqlite3
++import time
++from datetime import datetime, timezone
++from functools import wraps
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.middleware.proxy_fix import ProxyFix
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR") or Path.cwd() / "data")
++DB_PATH = DATA_DIR / "app.db"
++
++ADMIN_USERNAME = "admin"
++MAX_FAILURES = 5
++LOCK_SECONDS = 15 * 60
++RATE_LIMIT = 20
++RATE_WINDOW = 60
++TOKEN_TTL = 7 * 24 * 3600
++USERNAME_MAX = 64
++PASSWORD_MAX = 256
++ATTEMPTS_KEPT = 100
+ 
+ app = Flask(__name__, static_folder=None)
++app.json.sort_keys = False
++
++_proxies = int(os.environ.get("TRUSTED_PROXY_COUNT") or 0)
++if _proxies > 0:
++    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=_proxies)
++
++_DUMMY_HASH = generate_password_hash(secrets.token_hex(8))
++
++
++def now() -> float:
++    return time.time()
++
++
++def iso(ts: float) -> str:
++    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
++    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
++
++
++def connect() -> sqlite3.Connection:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA journal_mode=WAL")
++    conn.execute("PRAGMA foreign_keys=ON")
++    return conn
++
++
++def db() -> sqlite3.Connection:
++    if "db" not in g:
++        g.db = connect()
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc):
++    conn = g.pop("db", None)
++    if conn is not None:
++        conn.close()
++
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE,
++    password_hash TEXT,
++    created_at REAL NOT NULL,
++    last_login_at REAL
++);
++CREATE TABLE IF NOT EXISTS tokens (
++    token_hash TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    expires_at REAL NOT NULL
++);
++CREATE TABLE IF NOT EXISTS login_attempts (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    at REAL NOT NULL,
++    success INTEGER NOT NULL
++);
++CREATE INDEX IF NOT EXISTS idx_attempts_user ON login_attempts(user_id, id);
++CREATE TABLE IF NOT EXISTS login_failures (
++    username TEXT PRIMARY KEY,
++    count INTEGER NOT NULL DEFAULT 0,
++    locked_until REAL
++);
++CREATE TABLE IF NOT EXISTS rate_limits (
++    client TEXT PRIMARY KEY,
++    window_start REAL NOT NULL,
++    count INTEGER NOT NULL
++);
++"""
++
++
++def init_db() -> None:
++    conn = connect()
++    try:
++        conn.executescript(SCHEMA)
++        conn.execute("BEGIN IMMEDIATE")
++        password = os.environ.get("ADMIN_PASSWORD") or ""
++        row = conn.execute(
++            "SELECT id, password_hash FROM users WHERE username = ?",
++            (ADMIN_USERNAME,),
++        ).fetchone()
++        if password:
++            if row is None:
++                conn.execute(
++                    "INSERT INTO users (username, password_hash, created_at)"
++                    " VALUES (?, ?, ?)",
++                    (ADMIN_USERNAME, generate_password_hash(password), now()),
++                )
++            elif not row["password_hash"] or not check_password_hash(
++                row["password_hash"], password
++            ):
++                conn.execute(
++                    "UPDATE users SET password_hash = ? WHERE id = ?",
++                    (generate_password_hash(password), row["id"]),
++                )
++                conn.execute("DELETE FROM tokens WHERE user_id = ?", (row["id"],))
++        elif row is not None:
++            conn.execute(
++                "UPDATE users SET password_hash = NULL WHERE id = ?", (row["id"],)
++            )
++            conn.execute("DELETE FROM tokens WHERE user_id = ?", (row["id"],))
++        conn.execute("DELETE FROM tokens WHERE expires_at < ?", (now(),))
++        conn.execute("COMMIT")
++    finally:
++        conn.close()
++
++
++init_db()
++
++
++def error(status: int, code: str, message: str, **extra):
++    resp = jsonify({"error": code, "message": message, **extra})
++    resp.status_code = status
++    return resp
++
++
++def too_many(code: str, message: str, retry_after: float):
++    seconds = max(1, math.ceil(retry_after))
++    resp = error(
++        429,
++        code,
++        message,
++        retry_after=seconds,
++        retry_at=iso(now() + seconds),
++    )
++    resp.headers["Retry-After"] = str(seconds)
++    return resp
++
++
++def hash_token(token: str) -> str:
++    return hashlib.sha256(token.encode()).hexdigest()
++
++
++def current_user():
++    header = request.headers.get("Authorization", "")
++    scheme, _, token = header.partition(" ")
++    token = token.strip()
++    if scheme.lower() != "bearer" or not token:
++        return None
++    row = db().execute(
++        "SELECT u.id, u.username, u.last_login_at, t.token_hash"
++        " FROM tokens t JOIN users u ON u.id = t.user_id"
++        " WHERE t.token_hash = ? AND t.expires_at > ?",
++        (hash_token(token), now()),
++    ).fetchone()
++    return row
++
++
++def require_auth(admin: bool = False):
++    def decorator(fn):
++        @wraps(fn)
++        def wrapper(*args, **kwargs):
++            user = current_user()
++            if user is None:
++                return error(401, "unauthorized", "Sign-in required")
++            if admin and user["username"] != ADMIN_USERNAME:
++                return error(403, "forbidden", "Admin only")
++            g.user = user
++            return fn(*args, **kwargs)
++
++        return wrapper
++
++    return decorator
++
++
++def read_credentials():
++    body = request.get_json(silent=True)
++    if not isinstance(body, dict):
++        return None
++    username = body.get("username")
++    password = body.get("password")
++    if not isinstance(username, str) or not isinstance(password, str):
++        return None
++    return username, password
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +212,231 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    creds = read_credentials()
++    if creds is None:
++        return error(400, "invalid_request", "username and password are required")
++    username, password = creds
++    if not username.strip() or len(username) > USERNAME_MAX:
++        return error(
++            400, "invalid_username", f"Username must be 1-{USERNAME_MAX} characters"
++        )
++    if username != username.strip():
++        return error(400, "invalid_username", "Username must not have surrounding spaces")
++    if not password or len(password) > PASSWORD_MAX:
++        return error(
++            400, "invalid_password", f"Password must be 1-{PASSWORD_MAX} characters"
++        )
++    if username == ADMIN_USERNAME:
++        return error(409, "username_taken", "Username is already taken")
++    pw_hash = generate_password_hash(password)
++    conn = db()
++    conn.execute("BEGIN IMMEDIATE")
++    try:
++        cur = conn.execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, pw_hash, now()),
++        )
++        conn.execute("DELETE FROM login_failures WHERE username = ?", (username,))
++        conn.execute("COMMIT")
++    except sqlite3.IntegrityError:
++        conn.execute("ROLLBACK")
++        return error(409, "username_taken", "Username is already taken")
++    except Exception:
++        conn.execute("ROLLBACK")
++        raise
++    resp = jsonify({"id": cur.lastrowid, "username": username})
++    resp.status_code = 201
++    return resp
++
++
++@app.post("/api/auth/login")
++def login():
++    conn = db()
++    client = request.remote_addr or "unknown"
++    conn.execute("BEGIN IMMEDIATE")
++    try:
++        result = _login(conn, client)
++        conn.execute("COMMIT")
++        return result
++    except Exception:
++        conn.execute("ROLLBACK")
++        raise
++
++
++def _login(conn: sqlite3.Connection, client: str):
++    t = now()
++
++    conn.execute("DELETE FROM rate_limits WHERE window_start <= ?", (t - RATE_WINDOW,))
++    rl = conn.execute(
++        "SELECT window_start, count FROM rate_limits WHERE client = ?", (client,)
++    ).fetchone()
++    if rl is None:
++        conn.execute(
++            "INSERT INTO rate_limits (client, window_start, count) VALUES (?, ?, 1)",
++            (client, t),
++        )
++    elif rl["count"] >= RATE_LIMIT:
++        return too_many(
++            "rate_limited",
++            "Too many sign-in attempts. Try again later.",
++            rl["window_start"] + RATE_WINDOW - t,
++        )
++    else:
++        conn.execute(
++            "UPDATE rate_limits SET count = count + 1 WHERE client = ?", (client,)
++        )
++
++    creds = read_credentials()
++    if creds is None:
++        return error(400, "invalid_request", "username and password are required")
++    username, password = creds
++    if len(username) > USERNAME_MAX or len(password) > PASSWORD_MAX:
++        return error(401, "invalid_credentials", "Invalid username or password")
++
++    fail = conn.execute(
++        "SELECT count, locked_until FROM login_failures WHERE username = ?",
++        (username,),
++    ).fetchone()
++    count = 0
++    if fail is not None:
++        count = fail["count"]
++        if fail["locked_until"] is not None:
++            if fail["locked_until"] > t:
++                return too_many(
++                    "account_locked",
++                    "Too many failed sign-ins for this username.",
++                    fail["locked_until"] - t,
++                )
++            count = 0
++            conn.execute(
++                "UPDATE login_failures SET count = 0, locked_until = NULL"
++                " WHERE username = ?",
++                (username,),
++            )
++
++    user = conn.execute(
++        "SELECT id, password_hash FROM users WHERE username = ?", (username,)
++    ).fetchone()
++    stored = user["password_hash"] if user is not None else None
++    ok = check_password_hash(stored or _DUMMY_HASH, password) and bool(stored)
++
++    if user is not None:
++        conn.execute(
++            "INSERT INTO login_attempts (user_id, at, success) VALUES (?, ?, ?)",
++            (user["id"], t, 1 if ok else 0),
++        )
++        conn.execute(
++            "DELETE FROM login_attempts WHERE user_id = ? AND id <= ("
++            " SELECT id FROM login_attempts WHERE user_id = ?"
++            " ORDER BY id DESC LIMIT 1 OFFSET ?)",
++            (user["id"], user["id"], ATTEMPTS_KEPT),
++        )
++
++    if ok:
++        conn.execute("DELETE FROM login_failures WHERE username = ?", (username,))
++        token = secrets.token_urlsafe(32)
++        conn.execute(
++            "INSERT INTO tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
++            (hash_token(token), user["id"], t + TOKEN_TTL),
++        )
++        conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (t, user["id"]))
++        conn.execute("DELETE FROM tokens WHERE expires_at < ?", (t,))
++        return jsonify({"token": token})
++
++    count += 1
++    locked_until = t + LOCK_SECONDS if count >= MAX_FAILURES else None
++    conn.execute(
++        "INSERT INTO login_failures (username, count, locked_until) VALUES (?, ?, ?)"
++        " ON CONFLICT(username) DO UPDATE SET"
++        " count = excluded.count, locked_until = excluded.locked_until",
++        (username, count, locked_until),
++    )
++    return error(401, "invalid_credentials", "Invalid username or password")
++
++
++@app.post("/api/auth/logout")
++@require_auth()
++def logout():
++    db().execute("DELETE FROM tokens WHERE token_hash = ?", (g.user["token_hash"],))
++    return "", 204
++
++
++@app.get("/api/me")
++@require_auth()
++def me():
++    u = g.user
++    last = u["last_login_at"]
++    return {
++        "id": u["id"],
++        "username": u["username"],
++        "last_login_at": iso(last) if last is not None else None,
++        "is_admin": u["username"] == ADMIN_USERNAME,
++    }
++
++
++@app.get("/api/me/login-attempts")
++@require_auth()
++def my_attempts():
++    rows = db().execute(
++        "SELECT at, success FROM login_attempts WHERE user_id = ?"
++        " ORDER BY id DESC LIMIT 20",
++        (g.user["id"],),
++    ).fetchall()
++    return {"items": [{"at": iso(r["at"]), "success": bool(r["success"])} for r in rows]}
++
++
++@app.get("/api/admin/locks")
++@require_auth(admin=True)
++def list_locks():
++    rows = db().execute(
++        "SELECT username, locked_until FROM login_failures"
++        " WHERE locked_until IS NOT NULL AND locked_until > ?"
++        " ORDER BY locked_until, username",
++        (now(),),
++    ).fetchall()
++    return {
++        "items": [
++            {"username": r["username"], "locked_until": iso(r["locked_until"])}
++            for r in rows
++        ]
++    }
++
++
++@app.post("/api/admin/locks/<path:username>/unlock")
++@require_auth(admin=True)
++def unlock(username: str):
++    conn = db()
++    conn.execute("BEGIN IMMEDIATE")
++    try:
++        conn.execute("DELETE FROM login_failures WHERE username = ?", (username,))
++        conn.execute("COMMIT")
++    except Exception:
++        conn.execute("ROLLBACK")
++        raise
++    return {"username": username, "unlocked": True}
++
++
++@app.errorhandler(404)
++def not_found(_e):
++    if request.path.startswith("/api/"):
++        return error(404, "not_found", "Not found")
++    return _e
++
++
++@app.errorhandler(405)
++def method_not_allowed(e):
++    if request.path.startswith("/api/"):
++        return error(405, "method_not_allowed", "Method not allowed")
++    return e
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
++    if path.startswith("api/"):
++        return error(404, "not_found", "Not found")
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..7e27b83 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,9 +3,9 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Accounts</title>
+   </head>
+-  <body>
++  <body class="bg-slate-100 text-slate-900">
+     <div id="root"></div>
+     <script type="module" src="/src/main.tsx"></script>
+   </body>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..91b8c83 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -6,19 +6,68 @@
+     "": {
+       "name": "app-frontend",
+       "dependencies": {
++        "@tailwindcss/vite": "4.3.5",
+         "react": "19.3.1",
+-        "react-dom": "19.3.1"
++        "react-dom": "19.3.1",
++        "tailwindcss": "4.3.5"
+       },
+       "devDependencies": {
++        "@types/react": "19.3.0",
++        "@types/react-dom": "19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "typescript": "5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+       "integrity": "sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==",
+-      "dev": true,
+       "license": "MIT",
+       "funding": {
+         "url": "https://github.com/sponsors/oxc-project"
+@@ -31,7 +80,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -48,7 +96,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -65,7 +112,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -82,7 +128,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -99,7 +144,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -116,7 +160,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -133,7 +176,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -153,7 +195,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -173,7 +214,6 @@
+       "cpu": [
+         "ppc64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -193,7 +233,6 @@
+       "cpu": [
+         "s390x"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -213,7 +252,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -233,7 +271,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -253,7 +290,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -270,7 +306,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -287,7 +322,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -301,9 +335,357 @@
+       "version": "1.0.1",
+       "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
+       "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
+-      "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,21 +716,39 @@
+         }
+       }
+     },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+       "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
+-      "dev": true,
+       "license": "Apache-2.0",
+       "engines": {
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+       "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
+-      "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=12.0.0"
+@@ -366,7 +766,6 @@
+       "version": "2.3.3",
+       "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+       "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+-      "dev": true,
+       "hasInstallScript": true,
+       "license": "MIT",
+       "optional": true,
+@@ -377,11 +776,25 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+       "integrity": "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+-      "dev": true,
+       "license": "MPL-2.0",
+       "dependencies": {
+         "detect-libc": "^2.0.3"
+@@ -414,7 +827,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -435,7 +847,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -456,7 +867,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -477,7 +887,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -498,7 +907,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -519,7 +927,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -543,7 +950,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -567,7 +973,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -591,7 +996,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -615,7 +1019,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -636,7 +1039,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -650,11 +1052,19 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+       "integrity": "sha512-uKdg2G3GNCKQn9byYOpxbGqrT2fGO5KRt5J/8b3pok8rT6qxGWF6hxMyJiEYtAf+FVyYuD9hRaDqX5uPFYJ4ZQ==",
+-      "dev": true,
+       "funding": [
+         {
+           "type": "github",
+@@ -673,14 +1083,12 @@
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
+       "integrity": "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==",
+-      "dev": true,
+       "license": "ISC"
+     },
+     "node_modules/picomatch": {
+       "version": "4.0.7",
+       "resolved": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz",
+       "integrity": "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==",
+-      "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=12"
+@@ -693,7 +1101,6 @@
+       "version": "8.5.32",
+       "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.32.tgz",
+       "integrity": "sha512-LJlKCCAUFKOuZxipUdYw1NzIITEsPcgyOG9LkvRJvuKj/bRzbuRY0ARXvL0pWGpsZvn8jku+LMep2eU0seHp8g==",
+-      "dev": true,
+       "funding": [
+         {
+           "type": "opencollective",
+@@ -743,7 +1150,6 @@
+       "version": "1.2.16",
+       "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz",
+       "integrity": "sha512-bWvlMpFKiTfDKfnK7FC2MPgPeWCf/Kpwsq49ApdW+FQaBZb6O6dZ4MAPbPUjp7hYQrw/RobqCzn64BRrQecGHw==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "@oxc-project/types": "=0.156.0",
+@@ -783,17 +1189,34 @@
+       "version": "1.2.2",
+       "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz",
+       "integrity": "sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==",
+-      "dev": true,
+       "license": "BSD-3-Clause",
+       "engines": {
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+       "integrity": "sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "fdir": "^6.5.0",
+@@ -806,11 +1229,24 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+       "integrity": "sha512-z1YpjieJ9g0ebTmQpLBv/oq9E3F9EIlOe+7LahW8SrE3LTiG3udBRUXQOlYXP9b+IC2q2phHeVxj9xGlw34OEQ==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "lightningcss": "^1.33.0",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..b6f65fc 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,19 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "tsc && vite build"
+   },
+   "dependencies": {
++    "@tailwindcss/vite": "4.3.5",
+     "react": "19.3.1",
+-    "react-dom": "19.3.1"
++    "react-dom": "19.3.1",
++    "tailwindcss": "4.3.5"
+   },
+   "devDependencies": {
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "typescript": "5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/Account.tsx b/frontend/src/Account.tsx
+new file mode 100644
+index 0000000..b368700
+--- /dev/null
++++ b/frontend/src/Account.tsx
+@@ -0,0 +1,50 @@
++import { useEffect, useState } from "react";
++import { api, type Attempt, type Me } from "./api";
++
++export default function Account() {
++  const [me, setMe] = useState<Me | null>(null);
++  const [attempts, setAttempts] = useState<Attempt[]>([]);
++  const [error, setError] = useState<string | null>(null);
++
++  useEffect(() => {
++    Promise.all([
++      api<Me>("/me"),
++      api<{ items: Attempt[] }>("/me/login-attempts"),
++    ])
++      .then(([m, a]) => {
++        setMe(m);
++        setAttempts(a.items);
++      })
++      .catch((e) => setError(e.message));
++  }, []);
++
++  return (
++    <section className="rounded bg-white p-4 shadow">
++      <h2 className="mb-2 text-lg font-semibold">Account</h2>
++      {error && <p className="text-sm text-red-600">{error}</p>}
++      {me && (
++        <p className="mb-4 text-sm">
++          Last sign-in:{" "}
++          <span data-testid="last-login">
++            {me.last_login_at ? new Date(me.last_login_at).toLocaleString() : "never"}
++          </span>
++        </p>
++      )}
++      <h3 className="mb-1 font-medium">Recent sign-in attempts</h3>
++      {attempts.length === 0 ? (
++        <p className="text-sm text-slate-500">No attempts yet.</p>
++      ) : (
++        <ul className="divide-y divide-slate-200 text-sm" data-testid="attempts">
++          {attempts.map((a, i) => (
++            <li key={i} className="flex justify-between py-1">
++              <span>{new Date(a.at).toLocaleString()}</span>
++              <span className={a.success ? "text-green-700" : "text-red-600"}>
++                {a.success ? "Success" : "Failed"}
++              </span>
++            </li>
++          ))}
++        </ul>
++      )}
++    </section>
++  );
++}
+diff --git a/frontend/src/AdminLocks.tsx b/frontend/src/AdminLocks.tsx
+new file mode 100644
+index 0000000..d48790e
+--- /dev/null
++++ b/frontend/src/AdminLocks.tsx
+@@ -0,0 +1,57 @@
++import { useCallback, useEffect, useState } from "react";
++import { api, type Lock } from "./api";
++
++export default function AdminLocks() {
++  const [locks, setLocks] = useState<Lock[]>([]);
++  const [error, setError] = useState<string | null>(null);
++
++  const load = useCallback(() => {
++    api<{ items: Lock[] }>("/admin/locks")
++      .then((r) => setLocks(r.items))
++      .catch((e) => setError(e.message));
++  }, []);
++
++  useEffect(load, [load]);
++
++  const unlock = async (username: string) => {
++    setError(null);
++    try {
++      await api(`/admin/locks/${encodeURIComponent(username)}/unlock`, { method: "POST" });
++    } catch (e) {
++      setError(e instanceof Error ? e.message : "Unlock failed");
++    }
++    load();
++  };
++
++  return (
++    <section className="rounded bg-white p-4 shadow">
++      <div className="mb-2 flex items-center justify-between">
++        <h2 className="text-lg font-semibold">Locked usernames</h2>
++        <button onClick={load} className="text-sm text-indigo-600 hover:underline">
++          Refresh
++        </button>
++      </div>
++      {error && <p className="text-sm text-red-600">{error}</p>}
++      {locks.length === 0 ? (
++        <p className="text-sm text-slate-500">No usernames are locked.</p>
++      ) : (
++        <ul className="divide-y divide-slate-200 text-sm">
++          {locks.map((l) => (
++            <li key={l.username} className="flex items-center justify-between py-2">
++              <span>
++                <strong>{l.username}</strong> until{" "}
++                {new Date(l.locked_until).toLocaleTimeString()}
++              </span>
++              <button
++                onClick={() => unlock(l.username)}
++                className="rounded bg-red-600 px-3 py-1 text-white hover:bg-red-700"
++              >
++                Unlock
++              </button>
++            </li>
++          ))}
++        </ul>
++      )}
++    </section>
++  );
++}
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..8b8a064 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,66 @@
++import { useCallback, useEffect, useState } from "react";
++import { ApiError, api, getToken, setToken, type Me } from "./api";
++import AuthForms from "./AuthForms";
++import Account from "./Account";
++import AdminLocks from "./AdminLocks";
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [me, setMe] = useState<Me | null>(null);
++  const [loading, setLoading] = useState(!!getToken());
++
++  const loadMe = useCallback(async () => {
++    try {
++      setMe(await api<Me>("/me"));
++    } catch (e) {
++      if (e instanceof ApiError && e.status === 401) setToken(null);
++      setMe(null);
++    } finally {
++      setLoading(false);
++    }
++  }, []);
++
++  useEffect(() => {
++    if (getToken()) loadMe();
++  }, [loadMe]);
++
++  const signOut = async () => {
++    try {
++      await api("/auth/logout", { method: "POST" });
++    } catch {
++      // token may already be invalid
++    }
++    setToken(null);
++    setMe(null);
++  };
++
++  return (
++    <div className="mx-auto min-h-screen max-w-2xl px-4 py-8">
++      <header className="mb-6 flex items-center justify-between">
++        <h1 className="text-2xl font-bold">Accounts</h1>
++        {me && (
++          <div className="flex items-center gap-3">
++            <span className="text-sm">
++              Signed in as <strong data-testid="current-user">{me.username}</strong>
++            </span>
++            <button
++              onClick={signOut}
++              className="rounded bg-slate-700 px-3 py-1 text-sm text-white hover:bg-slate-800"
++            >
++              Sign out
++            </button>
++          </div>
++        )}
++      </header>
++      {loading ? (
++        <p>Loading…</p>
++      ) : me ? (
++        <div className="space-y-6">
++          <Account />
++          {me.is_admin && <AdminLocks />}
++        </div>
++      ) : (
++        <AuthForms onSignedIn={loadMe} />
++      )}
++    </div>
++  );
+ }
+diff --git a/frontend/src/AuthForms.tsx b/frontend/src/AuthForms.tsx
+new file mode 100644
+index 0000000..1368c47
+--- /dev/null
++++ b/frontend/src/AuthForms.tsx
+@@ -0,0 +1,172 @@
++import { useEffect, useState, type FormEvent } from "react";
++import { ApiError, api, setToken } from "./api";
++
++type Refusal = { message: string; retryAt: string; retryAfter: number };
++
++function formatWhen(iso: string) {
++  return new Date(iso).toLocaleTimeString();
++}
++
++function Refused({ refusal }: { refusal: Refusal }) {
++  const [left, setLeft] = useState(refusal.retryAfter);
++  useEffect(() => {
++    const end = new Date(refusal.retryAt).getTime();
++    const tick = () => setLeft(Math.max(0, Math.ceil((end - Date.now()) / 1000)));
++    tick();
++    const id = setInterval(tick, 1000);
++    return () => clearInterval(id);
++  }, [refusal]);
++  const mins = Math.floor(left / 60);
++  const secs = left % 60;
++  return (
++    <div
++      role="alert"
++      data-testid="lockout-message"
++      className="rounded border border-amber-400 bg-amber-50 p-3 text-sm text-amber-900"
++    >
++      <p className="font-semibold">{refusal.message}</p>
++      <p>
++        Try again at {formatWhen(refusal.retryAt)}
++        {left > 0 ? ` (in ${mins}m ${String(secs).padStart(2, "0")}s)` : " (now)"}.
++      </p>
++    </div>
++  );
++}
++
++const input = "w-full rounded border border-slate-300 px-2 py-1";
++const button =
++  "rounded bg-indigo-600 px-4 py-1.5 text-white hover:bg-indigo-700 disabled:opacity-50";
++
++export default function AuthForms({ onSignedIn }: { onSignedIn: () => void }) {
++  const [loginUser, setLoginUser] = useState("");
++  const [loginPass, setLoginPass] = useState("");
++  const [loginError, setLoginError] = useState<string | null>(null);
++  const [refusal, setRefusal] = useState<Refusal | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  const [regUser, setRegUser] = useState("");
++  const [regPass, setRegPass] = useState("");
++  const [regError, setRegError] = useState<string | null>(null);
++  const [regOk, setRegOk] = useState(false);
++
++  const login = async (e: FormEvent) => {
++    e.preventDefault();
++    setLoginError(null);
++    setRefusal(null);
++    setBusy(true);
++    try {
++      const { token } = await api<{ token: string }>("/auth/login", {
++        method: "POST",
++        body: { username: loginUser, password: loginPass },
++      });
++      setToken(token);
++      setLoginPass("");
++      onSignedIn();
++    } catch (err) {
++      if (err instanceof ApiError && err.status === 429 && err.retryAt) {
++        const locked = err.code === "account_locked";
++        setRefusal({
++          message: locked
++            ? "This username is locked after too many failed sign-ins."
++            : "Too many sign-in attempts from this client.",
++          retryAt: err.retryAt,
++          retryAfter: err.retryAfter ?? 0,
++        });
++      } else {
++        setLoginError(err instanceof Error ? err.message : "Sign-in failed");
++      }
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const register = async (e: FormEvent) => {
++    e.preventDefault();
++    setRegError(null);
++    setRegOk(false);
++    try {
++      await api("/auth/register", {
++        method: "POST",
++        body: { username: regUser, password: regPass },
++      });
++      setRegOk(true);
++      setRegPass("");
++    } catch (err) {
++      setRegError(err instanceof Error ? err.message : "Registration failed");
++    }
++  };
++
++  return (
++    <div className="grid gap-6 sm:grid-cols-2">
++      <form onSubmit={login} className="space-y-3 rounded bg-white p-4 shadow" aria-label="Sign in">
++        <h2 className="text-lg font-semibold">Sign in</h2>
++        <label className="block text-sm">
++          Username
++          <input
++            className={input}
++            name="username"
++            autoComplete="username"
++            value={loginUser}
++            onChange={(e) => setLoginUser(e.target.value)}
++            required
++          />
++        </label>
++        <label className="block text-sm">
++          Password
++          <input
++            className={input}
++            type="password"
++            name="password"
++            autoComplete="current-password"
++            value={loginPass}
++            onChange={(e) => setLoginPass(e.target.value)}
++            required
++          />
++        </label>
++        {refusal && <Refused refusal={refusal} />}
++        {loginError && (
++          <p role="alert" className="text-sm text-red-600">
++            {loginError}
++          </p>
++        )}
++        <button className={button} disabled={busy}>
++          Sign in
++        </button>
++      </form>
++
++      <form onSubmit={register} className="space-y-3 rounded bg-white p-4 shadow" aria-label="Register">
++        <h2 className="text-lg font-semibold">Register</h2>
++        <label className="block text-sm">
++          Username
++          <input
++            className={input}
++            name="username"
++            autoComplete="off"
++            value={regUser}
++            onChange={(e) => setRegUser(e.target.value)}
++            required
++          />
++        </label>
++        <label className="block text-sm">
++          Password
++          <input
++            className={input}
++            type="password"
++            name="password"
++            autoComplete="new-password"
++            value={regPass}
++            onChange={(e) => setRegPass(e.target.value)}
++            required
++          />
++        </label>
++        {regError && (
++          <p role="alert" className="text-sm text-red-600">
++            {regError}
++          </p>
++        )}
++        {regOk && <p className="text-sm text-green-700">Account created. You can sign in now.</p>}
++        <button className={button}>Register</button>
++      </form>
++    </div>
++  );
++}
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..4492b0c
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,77 @@
++export class ApiError extends Error {
++  status: number;
++  code: string;
++  retryAfter: number | null;
++  retryAt: string | null;
++
++  constructor(
++    status: number,
++    code: string,
++    message: string,
++    retryAfter: number | null,
++    retryAt: string | null,
++  ) {
++    super(message);
++    this.status = status;
++    this.code = code;
++    this.retryAfter = retryAfter;
++    this.retryAt = retryAt;
++  }
++}
++
++const TOKEN_KEY = "token";
++
++export const getToken = () => localStorage.getItem(TOKEN_KEY);
++export const setToken = (t: string | null) =>
++  t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY);
++
++export async function api<T>(
++  path: string,
++  options: { method?: string; body?: unknown } = {},
++): Promise<T> {
++  const headers: Record<string, string> = {};
++  const token = getToken();
++  if (token) headers["Authorization"] = `Bearer ${token}`;
++  if (options.body !== undefined) headers["Content-Type"] = "application/json";
++  const res = await fetch(`/api${path}`, {
++    method: options.method ?? "GET",
++    headers,
++    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
++  });
++  if (res.status === 204) return undefined as T;
++  let data: any = null;
++  try {
++    data = await res.json();
++  } catch {
++    data = null;
++  }
++  if (!res.ok) {
++    let retryAfter: number | null = null;
++    const header = Number(res.headers.get("Retry-After"));
++    if (Number.isFinite(header) && header > 0) retryAfter = header;
++    else if (typeof data?.retry_after === "number") retryAfter = data.retry_after;
++    const retryAt =
++      typeof data?.retry_at === "string"
++        ? data.retry_at
++        : retryAfter !== null
++          ? new Date(Date.now() + retryAfter * 1000).toISOString()
++          : null;
++    throw new ApiError(
++      res.status,
++      data?.error ?? "error",
++      data?.message ?? `Request failed (${res.status})`,
++      retryAfter,
++      retryAt,
++    );
++  }
++  return data as T;
++}
++
++export type Me = {
++  id: number;
++  username: string;
++  last_login_at: string | null;
++  is_admin: boolean;
++};
++export type Attempt = { at: string; success: boolean };
++export type Lock = { username: string; locked_until: string };
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..696e0d2 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,5 @@
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+ createRoot(document.getElementById("root")!).render(<App />);
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..9b8d21b
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,15 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "noEmit": true,
++    "skipLibCheck": true,
++    "isolatedModules": true,
++    "types": ["vite/client"]
++  },
++  "include": ["src"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --color-ink: #26382e;
+  --color-muted: #788079;
+  --color-paper: #fbfcfa;
+  --color-line: #e9ece6;
+  --color-leaf: #397b56;
+  --color-mint: #edf4e9;
+}
+
+@layer base {
+  body {
+    @apply m-0 bg-paper font-sans text-ink antialiased;
+  }
+  button, input, select, textarea {
+    @apply font-[inherit];
+  }
+  button {
+    @apply cursor-pointer disabled:cursor-not-allowed;
+  }
+  button, a, input, select, textarea {
+    @apply outline-none focus-visible:ring-2 focus-visible:ring-leaf/50 focus-visible:ring-offset-2;
+  }
+  ::selection {
+    @apply bg-leaf/20;
+  }
+}

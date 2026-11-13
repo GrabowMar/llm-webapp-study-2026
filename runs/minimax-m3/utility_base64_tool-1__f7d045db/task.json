@@ -1,0 +1,604 @@
+{
+  "category": "utility",
+  "features": [
+    "auth",
+    "ownership",
+    "pagination"
+  ],
+  "pinned_ref": "utility_base64_tool@1#3d37361dfc09",
+  "prose": "Build a base64 converter with a JSON API under `/api` and a web frontend. Anyone can encode UTF-8 text to base64 and decode it back; signed-in users can also save conversions to a private history.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `POST /api/base64/encode` encodes `text` as UTF-8 to standard base64 with padding and returns `encoded`; nothing is stored.\n- `POST /api/base64/decode` decodes `encoded` and returns the UTF-8 `text`; nothing is stored.\n- `POST /api/conversions` converts like the endpoints above (`direction` `encode` or `decode`, `input`), saves the conversion to the user's history and returns the full `output`.\n- `GET /api/conversions` lists the user's saved conversions, newest first, as a paged list (query parameters: `page`, `page_size`).\n- `DELETE /api/conversions/{id}` deletes one of the user's saved conversions.\n\nData:\n\n- A conversion is returned as an object with `id`, `direction`, `input_preview`, `output_preview`, `created_at`.\n- `POST /api/conversions` returns the conversion with `output` as well.\n- `GET /api/conversions` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n}`; each item in `items` is a conversion.\n\nRules:\n\n- Each user sees and deletes only their own history.\n- Encoding takes the text as UTF-8; empty text is allowed.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- Two text areas with 'Encode' and 'Decode' buttons, a copy button and the API's error message for invalid input.\n- For signed-in users: a 'Save to history' switch and the history list with delete buttons and paging.",
+  "ref": "utility_base64_tool@1",
+  "slug": "utility_base64_tool",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "base64.encode",
+        "expect": {
+          "header_contains": null,
+          "json_contains": {
+            "encoded": "emHFvMOzxYLEhw=="
+          },
+          "json_schema": null,
+          "max_ms": null,
+          "status": 200
+        },
+        "id": "base64.roundtrip.unicode",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": {
+            "text": "za\u017c\u00f3\u0142\u0107"
+          },
+          "method": "POST",
+          "path": "/api/base64/encode",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      },
+      {
+        "actor": "user_a",
+        "category": "validation",
+        "depends_on": [],
+        "endpoint": "base64.decode",
+        "expect": {
+          "header_contains": null,
+          "json_contains": {
+            "text": "hi"
+          },
+          "json_schema": null,
+          "max_ms": null,
+          "status": 200
+        },
+        "id": "base64.decode.no_padding",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": {
+            "encoded": "aGk"
+          },
+          "method": "POST",
+          "path": "/api/base64/decode",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [],
+        "stated_in": [
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "utility",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "base64.encode",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/base64/encode",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "text": {
+              "maxLength": 100000,
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "encoded": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "encoded"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "base64.decode",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/base64/decode",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "encoded": {
+              "maxLength": 140000,
+              "type": "string"
+            }
+          },
+          "required": [
+            "encoded"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "conversions.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/conversions",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "direction": {
+              "enum": [
+                "encode",
+                "decode"
+              ],
+              "type": "string"
+            },
+            "input": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "direction",
+            "input"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "direction": {
+              "enum": [
+                "encode",
+                "decode"
+              ],
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "input_preview": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "output": {
+              "type": "string"
+            },
+            "output_preview": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "direction",
+            "output"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "conversions.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/conversions",
+        "query": [
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "created_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "direction": {
+                    "enum": [
+                      "encode",
+                      "decode"
+                    ],
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "input_preview": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "output_preview": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "direction"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "conversions.delete",
+        "method": "DELETE",
+        "owner_entity": "Conversion",
+        "path": "/api/conversions/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": [
+              "encode",
+              "decode"
+            ],
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "direction",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "enum",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "input",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "text",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "input_preview",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "output_preview",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "created_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Conversion",
+        "owned_by_user": true,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "ownership",
+      "pagination"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-639",
+        "endpoint": "conversions.delete",
+        "id": "probe.conversions.idor",
+        "kind": "idor_enumeration",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Encode text to base64 and decode it back, with a personal history for signed-in users.",
+    "surfaces": [
+      "cwe-20",
+      "cwe-400",
+      "cwe-639",
+      "cwe-79",
+      "cwe-116"
+    ],
+    "title": "Base64 converter",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "base64.encode",
+          "base64.decode"
+        ],
+        "id": "ui.convert",
+        "text": "Two text areas with 'Encode' and 'Decode' buttons, a copy button and the API's error message for invalid input."
+      },
+      {
+        "endpoints": [
+          "conversions.create",
+          "conversions.list",
+          "conversions.delete"
+        ],
+        "id": "ui.history",
+        "text": "For signed-in users: a 'Save to history' switch and the history list with delete buttons and paging."
+      }
+    ]
+  },
+  "structured_hash": "f80c45aa23c1ed7665efbf60573b2dbb3bc5c6919659c6e25eb63f1eda543af3",
+  "summary": "Encode text to base64 and decode it back, with a personal history for signed-in users.",
+  "surfaces": [
+    "cwe-20",
+    "cwe-400",
+    "cwe-639",
+    "cwe-79",
+    "cwe-116"
+  ],
+  "task_hash": "c1dd2e4ea66e87d41d177e69af2255e12adacb3467ead95b92989b321498de4c",
+  "title": "Base64 converter",
+  "variant": "standard",
+  "version": 1
+}

@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "DM Sans Variable", "Segoe UI", Arial, sans-serif;
+  --font-serif: "Instrument Serif", Georgia, serif;
+  --color-paper: #faf9f6;
+  --color-ink: #292c27;
+  --color-muted: #797c72;
+  --color-line: #e5e5dc;
+  --color-accent: #c85432;
+  --color-accent-dark: #ad4327;
+}
+
+@layer base {
+  body { @apply m-0 bg-paper font-sans text-ink antialiased; }
+  button, a, input, select { @apply outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-4; }
+  button { @apply cursor-pointer disabled:cursor-not-allowed; }
+  ::selection { @apply bg-accent/20; }
+  dialog::backdrop { @apply bg-ink/60 backdrop-blur-sm; }
+}
+
+@layer components {
+  .button-primary { @apply inline-flex items-center justify-center gap-2 rounded-lg bg-accent px-5 py-3 text-sm font-semibold text-white transition hover:bg-accent-dark disabled:opacity-50; }
+  .button-secondary { @apply inline-flex items-center justify-center gap-2 rounded-lg border border-line bg-white px-4 py-2.5 text-sm font-medium transition hover:border-ink/30 hover:bg-paper disabled:opacity-40; }
+  .form-input { @apply w-full rounded-lg border border-line bg-white px-3.5 py-3 text-sm placeholder:text-muted/65 focus:border-accent focus:ring-2 focus:ring-accent/15 focus:ring-offset-0; }
+}

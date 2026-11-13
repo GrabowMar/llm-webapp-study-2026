@@ -1,0 +1,495 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 528,
+  "completed_at": "2026-11-09T20:24:11.734987+00:00",
+  "condition_id": 80,
+  "condition_label": "local-anthropic/claude-opus-5-5",
+  "config_fingerprint": "0befd3a46a14eb6487413e9a1348e999fa621059862af5cf42ff9f2b10fb3b47",
+  "cost_usd": 0.0,
+  "duration": 713.071862,
+  "fingerprints": {
+    "config_fingerprint": "0befd3a46a14eb6487413e9a1348e999fa621059862af5cf42ff9f2b10fb3b47",
+    "prompt_hash": "0335d9400bd6beadc918668db0b78f1523fcc6fdea0014659e5180f5ad2ea67d",
+    "run_fingerprint": "57830accd2f20fe787514130084976ca526df07a47ab4fc39669217f849cc474",
+    "task_hash": "39ba8ec2c17c4cb0bcb192d1be1eeefd6a186b534e832d2727dafb0d897fd945",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "0bf457b5-616c-4557-a2bd-516ec2d835da",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-anthropic/claude-opus-5-5",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-09T20:23:51.938856+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 638,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 11,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 102,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 103,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "recipes.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "recipes.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "recipes.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "recipes.create.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "recipes.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "recipes.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "recipes.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "recipes.create.invalid.too_long",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "recipes.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "recipes.create.invalid.enum",
+          "ms": 3,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"id\":6,\"title\":\"llmlab title\",\"ingredients\":[\"llmlab ingredients\"],\"instructions\":\"llmlab instructions\",\"category\":\"llmlab-not-an-option\",\"prep_minutes\":1,\"servings\":1,\"created_at\":\"2026-11-09T20:24:07.768Z\",\"author\":\"userab21b246c\"}\n",
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "recipes.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "recipes.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "recipes.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "recipes.get.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "recipes.replace",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "recipes.replace.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "recipes.replace",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "recipes.replace.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "recipes.replace",
+          "expected": {
+            "status": [
+              403,
+              404
+            ]
+          },
+          "id": "recipes.replace.other_user",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "recipes.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "recipes.replace.invalid.missing",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "recipes.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "recipes.replace.invalid.too_long",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "recipes.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "recipes.replace.invalid.enum",
+          "ms": 3,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"id\":13,\"title\":\"llmlab title\",\"ingredients\":[\"llmlab ingredients\"],\"instructions\":\"llmlab instructions\",\"category\":\"llmlab-not-an-option\",\"prep_minutes\":1,\"servings\":1,\"created_at\":\"2026-11-09T20:24:08.016Z\",\"author\":\"userab21b246c\"}\n",
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "recipes.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "recipes.delete.ok",
+          "ms": 5,
+          "note": null,
+          "observed": {
+            "status": 204
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "recipes.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "recipes.delete.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "recipes.delete",
+          "expected": {
+            "status": [
+              403,
+              404
+            ]
+          },
+          "id": "recipes.delete.other_user",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 18,
+        "agent_pass_rate": 0.8888888888888888,
+        "agent_passed": 16,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 3,
+            "passed": 3
+          },
+          "functional": {
+            "n": 7,
+            "passed": 7
+          },
+          "ownership": {
+            "n": 2,
+            "passed": 2
+          },
+          "validation": {
+            "n": 6,
+            "passed": 4
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.8888888888888888,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 2,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.8888888888888888
+      },
+      "not_measured_reason": null,
+      "probes": [
+        {
+          "cwe": "cwe-79",
+          "endpoint": "recipes.create",
+          "evidence": "payload not served unescaped as HTML",
+          "id": "probe.recipes.xss",
+          "kind": "xss_stored",
+          "skip_reason": null,
+          "status": "not_exploited"
+        },
+        {
+          "cwe": "cwe-89",
+          "endpoint": "recipes.list",
+          "evidence": "tautology payloads returned no extra rows",
+          "id": "probe.recipes.sqli",
+          "kind": "sqli_boolean",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1526,
+  "loc_model": 1526,
+  "model": "claude-opus-5-5",
+  "model_id": "local-anthropic/claude-opus-5-5",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "57830accd2f20fe787514130084976ca526df07a47ab4fc39669217f849cc474",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-09T20:12:18.663125+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "afed1882-2d75-41ad-982c-1d1ddfd043ff",
+  "task": "content_recipe_list@1",
+  "tokens_used": 1149320,
+  "tree_hash": "7f79d3df027d6360bf9c994cf3d591ccfd32fc355b72e2a4f3b2394b44b2c9e2",
+  "truncated": false,
+  "unit": "task:content_recipe_list@1",
+  "usable": true
+}

@@ -1,0 +1,653 @@
+{
+  "category": "content",
+  "features": [
+    "auth",
+    "ownership",
+    "render-markdown",
+    "render-html"
+  ],
+  "pinned_ref": "notes_markdown_render@1#4a498827496d",
+  "prose": "Build a Markdown notes app with a JSON API under `/api` and a web frontend. Users write private notes in Markdown and read them rendered as HTML; a note can be published, which makes its rendered page readable by anyone.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/notes` lists the user's notes, most recently updated first, without their bodies.\n- `POST /api/notes` adds a note.\n- `GET /api/notes/{id}` returns one note with its Markdown body.\n- `PATCH /api/notes/{id}` changes `title`, `body` or `published`.\n- `DELETE /api/notes/{id}` deletes a note.\n- `GET /api/notes/{id}/html` returns the note's body rendered from Markdown as an HTML fragment (`text/html`).\n- `GET /api/public/notes/{id}/html` returns the rendered HTML of a published note to anyone.\n\nData:\n\n- A note is returned as an object with `id`, `title`, `body`, `published`, `updated_at`, `author`.\n- `GET /api/notes` returns `{\"items\": [...]}`; each item in `items` is an object with `id`, `title`, `published` and `updated_at`.\n\nRules:\n\n- Each user sees and changes only their own notes; another user's note behaves as if it did not exist.\n- An unpublished note is never visible to anyone but its author.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- The user's notes with a published badge.\n- A Markdown editor with a live rendered preview (the preview uses the API's rendering) and a 'Published' switch with a copyable public link.\n- A public page that shows a published note's rendered HTML under its title and author.",
+  "ref": "notes_markdown_render@1",
+  "slug": "notes_markdown_render",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "notes.render",
+        "expect": {
+          "header_contains": {
+            "Content-Type": "text/html"
+          },
+          "json_contains": null,
+          "json_schema": null,
+          "max_ms": null,
+          "status": 200
+        },
+        "id": "notes.render.heading",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": null,
+          "method": "GET",
+          "path": "/api/notes/{nid}/html",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [
+          {
+            "actor": null,
+            "capture": {
+              "nid": "$.id"
+            },
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "body": "# Hello\n\n*world*",
+                "title": "t"
+              },
+              "method": "POST",
+              "path": "/api/notes",
+              "query": {}
+            }
+          }
+        ],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "content",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "notes.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/notes",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "id": [
+                    "integer",
+                    "string"
+                  ],
+                  "published": {
+                    "type": "boolean"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "updated_at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "title",
+                  "published"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "notes.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/notes",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "body": {
+              "maxLength": 50000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "published": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "body"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "author": {
+              "type": "string"
+            },
+            "body": {
+              "maxLength": 50000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "published": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "body",
+            "author"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "notes.get",
+        "method": "GET",
+        "owner_entity": "Note",
+        "path": "/api/notes/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "author": {
+              "type": "string"
+            },
+            "body": {
+              "maxLength": 50000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "published": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "body",
+            "author"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          400,
+          404
+        ],
+        "id": "notes.update",
+        "method": "PATCH",
+        "owner_entity": "Note",
+        "path": "/api/notes/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "body": {
+              "maxLength": 50000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "published": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "author": {
+              "type": "string"
+            },
+            "body": {
+              "maxLength": 50000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "published": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "body",
+            "author"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "notes.delete",
+        "method": "DELETE",
+        "owner_entity": "Note",
+        "path": "/api/notes/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "none",
+        "errors": [
+          404
+        ],
+        "id": "notes.render",
+        "method": "GET",
+        "owner_entity": "Note",
+        "path": "/api/notes/{id}/html",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 200,
+        "tags": [
+          "render"
+        ]
+      },
+      {
+        "auth": "public",
+        "content_type": "none",
+        "errors": [
+          404
+        ],
+        "id": "public.render",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/public/notes/{id}/html",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 200,
+        "tags": [
+          "render"
+        ]
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 120,
+            "min": null,
+            "name": "title",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50000,
+            "min": null,
+            "name": "body",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "text",
+            "unique": false
+          },
+          {
+            "default": false,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "published",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "bool",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "updated_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Note",
+        "owned_by_user": true,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "ownership",
+      "render-markdown",
+      "render-html"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-79",
+        "endpoint": "notes.create",
+        "id": "probe.notes.xss",
+        "kind": "xss_stored",
+        "params": {
+          "field": "body",
+          "view_endpoint": "public.render"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-639",
+        "endpoint": "notes.get",
+        "id": "probe.notes.idor",
+        "kind": "idor_enumeration",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Users write notes in Markdown, read them rendered as HTML and publish some for everyone.",
+    "surfaces": [
+      "cwe-79",
+      "cwe-80",
+      "cwe-116",
+      "cwe-639",
+      "cwe-862",
+      "cwe-601",
+      "cwe-1021"
+    ],
+    "title": "Markdown notes",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "notes.list"
+        ],
+        "id": "ui.list",
+        "text": "The user's notes with a published badge."
+      },
+      {
+        "endpoints": [
+          "notes.create",
+          "notes.update",
+          "notes.render"
+        ],
+        "id": "ui.editor",
+        "text": "A Markdown editor with a live rendered preview (the preview uses the API's rendering) and a 'Published' switch with a copyable public link."
+      },
+      {
+        "endpoints": [
+          "public.render"
+        ],
+        "id": "ui.public",
+        "text": "A public page that shows a published note's rendered HTML under its title and author."
+      }
+    ]
+  },
+  "structured_hash": "bc623530be286fda56504d6774c35220b0e1bc038484ef1c023d409d2095e8da",
+  "summary": "Users write notes in Markdown, read them rendered as HTML and publish some for everyone.",
+  "surfaces": [
+    "cwe-79",
+    "cwe-80",
+    "cwe-116",
+    "cwe-639",
+    "cwe-862",
+    "cwe-601",
+    "cwe-1021"
+  ],
+  "task_hash": "86cc52015d557a11ab714ace17350d8736f3dc1a4224d444750bf3669158aa1b",
+  "title": "Markdown notes",
+  "variant": "standard",
+  "version": 1
+}

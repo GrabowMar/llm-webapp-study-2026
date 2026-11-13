@@ -1,0 +1,552 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 767,
+  "completed_at": "2026-11-11T08:27:27.769262+00:00",
+  "condition_id": 93,
+  "condition_label": "local-opencode-go/hy4",
+  "config_fingerprint": "698897c49445cc5ad86a1eaa7c5766f35984015e366d81bbca03c275d689d6ed",
+  "cost_usd": 0.0,
+  "duration": 665.659221,
+  "fingerprints": {
+    "config_fingerprint": "698897c49445cc5ad86a1eaa7c5766f35984015e366d81bbca03c275d689d6ed",
+    "prompt_hash": "3d575d787852cdda058fb3046a01445750227e8f44ee3189f4d39cdfb391f7c3",
+    "run_fingerprint": "6b7ac09bbcd5c74caee54104bcfeae80ee470ad15f15da5ea83e7f0b8612a677",
+    "task_hash": "7c86412b996aa7ec63257b2240eb986ec2bc0af232341ba5809fd5625fae305b",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "6461612e-0299-4c27-9ae1-9d70b2a07fe5",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/hy4",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-11T08:27:10.613310+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 883,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 10,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 115,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 114,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "stores.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "stores.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "stores.get",
+          "expected": null,
+          "id": "stores.get.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/admin/stores answered 403, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "admin.stores.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "admin.stores.create.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.stores.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "admin.stores.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.stores.create",
+          "expected": {
+            "status": [
+              403
+            ]
+          },
+          "id": "admin.stores.create.non_admin_403",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "admin.stores.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "admin.stores.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "admin.stores.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "admin.stores.create.invalid.too_long",
+          "ms": 2,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"address\":\"llmlab address\",\"distance_km\":null,\"id\":10,\"latitude\":1.0,\"longitude\":1.0,\"name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"phone\":\"llmlab phone\"}\n",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "admin.stores.replace",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "admin.stores.replace.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.stores.replace",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "admin.stores.replace.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.stores.replace",
+          "expected": {
+            "status": [
+              403
+            ]
+          },
+          "id": "admin.stores.replace.non_admin_403",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "admin.stores.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "admin.stores.replace.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "admin.stores.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "admin.stores.replace.invalid.too_long",
+          "ms": 2,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"address\":\"llmlab address\",\"distance_km\":null,\"id\":15,\"latitude\":1.0,\"longitude\":1.0,\"name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"phone\":\"llmlab phone\"}\n",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "admin.stores.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "admin.stores.delete.ok",
+          "ms": 2,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"deleted\":16}\n",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.stores.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "admin.stores.delete.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.stores.delete",
+          "expected": {
+            "status": [
+              403
+            ]
+          },
+          "id": "admin.stores.delete.non_admin_403",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "filter",
+          "endpoint": "stores.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "stores.near.sorted",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 18,
+        "agent_pass_rate": 0.7777777777777778,
+        "agent_passed": 14,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 6,
+            "passed": 6
+          },
+          "filter": {
+            "n": 1,
+            "passed": 1
+          },
+          "functional": {
+            "n": 7,
+            "passed": 5
+          },
+          "validation": {
+            "n": 4,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.7777777777777778,
+        "probes_exploited": 0,
+        "probes_skipped": 1,
+        "probes_tested": 1,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.7777777777777778
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-89",
+          "endpoint": "stores.list",
+          "evidence": "setup 0: POST /api/admin/stores answered 403, expected 201",
+          "id": "probe.stores.sqli",
+          "kind": "sqli_boolean",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        },
+        {
+          "cwe": "cwe-798",
+          "endpoint": null,
+          "evidence": "no default password accepted",
+          "id": "probe.stores.default_admin",
+          "kind": "default_credential",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 826,
+  "loc_model": 826,
+  "model": "hy4",
+  "model_id": "local-opencode-go/hy4",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "6b7ac09bbcd5c74caee54104bcfeae80ee470ad15f15da5ea83e7f0b8612a677",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-11T08:16:22.110041+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "geolocation_store_list@1",
+  "tokens_used": 1492371,
+  "tree_hash": "5b972a0ab16991cf40df9f4d428a36390682e98350bff6d93dc4e61b86de1b50",
+  "truncated": true,
+  "unit": "task:geolocation_store_list@1",
+  "usable": true
+}

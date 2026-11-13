@@ -1,0 +1,1560 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..6cd8822
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,6 @@
++node_modules/
++dist/
++__pycache__/
++*.pyc
++.venv/
++data/
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..75ca1e8 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,157 @@
+-"""Flask entry point."""
++"""Image gallery: Flask API + static frontend."""
+ 
++from __future__ import annotations
++
++import base64
++import binascii
++import secrets
++import sqlite3
++from datetime import datetime, timezone
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, Response, jsonify, request, send_file, send_from_directory
++from werkzeug.security import check_password_hash, generate_password_hash
++
++BASE = Path(__file__).resolve().parent.parent
++DIST = BASE / "frontend" / "dist"
++DATA_DIR = BASE / "data"
++FILES_DIR = DATA_DIR / "files"
++DB_PATH = DATA_DIR / "gallery.db"
+ 
+-DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
++JPEG_SIGNATURE = b"\xff\xd8\xff"
+ 
+ app = Flask(__name__, static_folder=None)
++app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
++
++
++def now_iso() -> str:
++    return datetime.now(timezone.utc).isoformat()
++
++
++def get_db() -> sqlite3.Connection:
++    conn = sqlite3.connect(DB_PATH)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    return conn
++
++
++def init_db() -> None:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    FILES_DIR.mkdir(parents=True, exist_ok=True)
++    with get_db() as conn:
++        conn.execute(
++            """
++            CREATE TABLE IF NOT EXISTS users (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                username TEXT NOT NULL UNIQUE,
++                password_hash TEXT NOT NULL,
++                created_at TEXT NOT NULL
++            )
++            """
++        )
++        conn.execute(
++            """
++            CREATE TABLE IF NOT EXISTS sessions (
++                token TEXT PRIMARY KEY,
++                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++                created_at TEXT NOT NULL
++            )
++            """
++        )
++        conn.execute(
++            """
++            CREATE TABLE IF NOT EXISTS images (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                filename TEXT NOT NULL,
++                title TEXT,
++                content_type TEXT NOT NULL,
++                size_bytes INTEGER NOT NULL,
++                uploaded_at TEXT NOT NULL,
++                uploader_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++                storage_name TEXT NOT NULL
++            )
++            """
++        )
++
++
++def image_dict(row: sqlite3.Row) -> dict:
++    return {
++        "id": row["id"],
++        "filename": row["filename"],
++        "title": row["title"],
++        "content_type": row["content_type"],
++        "size_bytes": row["size_bytes"],
++        "uploaded_at": row["uploaded_at"],
++        "url": f"/api/images/{row['id']}/file",
++        "uploader": row["username"],
++    }
++
++
++def current_user() -> sqlite3.Row | None:
++    auth = request.headers.get("Authorization", "")
++    if not auth.startswith("Bearer "):
++        return None
++    token = auth[len("Bearer "):].strip()
++    if not token:
++        return None
++    with get_db() as conn:
++        row = conn.execute(
++            """
++            SELECT u.id, u.username
++            FROM sessions s
++            JOIN users u ON u.id = s.user_id
++            WHERE s.token = ?
++            """,
++            (token,),
++        ).fetchone()
++    return row
++
++
++def require_user() -> sqlite3.Row:
++    user = current_user()
++    if user is None:
++        raise ApiError(401, "authentication required")
++    return user
++
++
++class ApiError(Exception):
++    def __init__(self, status: int, message: str):
++        super().__init__(message)
++        self.status = status
++        self.message = message
++
++
++@app.errorhandler(ApiError)
++def handle_api_error(err: ApiError):
++    return jsonify({"error": err.message}), err.status
++
++
++@app.errorhandler(413)
++def handle_too_large(_err):
++    return jsonify({"error": "file too large"}), 413
++
++
++def detect_content_type(data: bytes) -> str | None:
++    if data.startswith(PNG_SIGNATURE):
++        return "image/png"
++    if data.startswith(JPEG_SIGNATURE):
++        return "image/jpeg"
++    return None
++
++
++def decode_data(raw: str) -> bytes:
++    if not isinstance(raw, str) or not raw.strip():
++        raise ApiError(400, "data is required")
++    raw = raw.strip()
++    if raw.startswith("data:"):
++        if "," not in raw:
++            raise ApiError(400, "invalid data")
++        raw = raw.split(",", 1)[1]
++    try:
++        return base64.b64decode(raw, validate=True)
++    except (binascii.Error, ValueError):
++        raise ApiError(400, "data is not valid base64")
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +159,195 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    body = request.get_json(silent=True) or {}
++    username = (body.get("username") or "").strip()
++    password = body.get("password") or ""
++    if not username:
++        raise ApiError(400, "username is required")
++    if not password:
++        raise ApiError(400, "password is required")
++
++    password_hash = generate_password_hash(password)
++    try:
++        with get_db() as conn:
++            conn.execute(
++                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++                (username, password_hash, now_iso()),
++            )
++    except sqlite3.IntegrityError:
++        raise ApiError(409, "username already exists")
++    return jsonify({"username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    body = request.get_json(silent=True) or {}
++    username = (body.get("username") or "").strip()
++    password = body.get("password") or ""
++    if not username or not password:
++        raise ApiError(400, "username and password are required")
++
++    with get_db() as conn:
++        row = conn.execute(
++            "SELECT id, username, password_hash FROM users WHERE username = ?",
++            (username,),
++        ).fetchone()
++
++    if row is None or not check_password_hash(row["password_hash"], password):
++        raise ApiError(401, "invalid username or password")
++
++    token = secrets.token_hex(32)
++    with get_db() as conn:
++        conn.execute(
++            "INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)",
++            (token, row["id"], now_iso()),
++        )
++    return jsonify({"token": token})
++
++
++@app.get("/api/images")
++def list_images():
++    page = request.args.get("page", 1, type=int)
++    page_size = request.args.get("page_size", 20, type=int)
++    if page < 1:
++        page = 1
++    if page_size < 1:
++        page_size = 1
++    if page_size > 100:
++        page_size = 100
++
++    with get_db() as conn:
++        total = conn.execute("SELECT COUNT(*) AS c FROM images").fetchone()["c"]
++        rows = conn.execute(
++            """
++            SELECT i.*, u.username
++            FROM images i
++            JOIN users u ON u.id = i.uploader_id
++            ORDER BY i.id DESC
++            LIMIT ? OFFSET ?
++            """,
++            (page_size, (page - 1) * page_size),
++        ).fetchall()
++
++    items = [image_dict(r) for r in rows]
++    return jsonify(
++        {"items": items, "total": total, "page": page, "page_size": page_size}
++    )
++
++
++@app.post("/api/images")
++def create_image():
++    user = require_user()
++    body = request.get_json(silent=True) or {}
++    filename = (body.get("filename") or "").strip()
++    if not filename:
++        raise ApiError(400, "filename is required")
++    title = body.get("title")
++    if title is not None:
++        title = str(title).strip() or None
++
++    data = decode_data(body.get("data", ""))
++    content_type = detect_content_type(data)
++    if content_type is None:
++        raise ApiError(400, "only PNG and JPEG images are supported")
++
++    storage_name = secrets.token_hex(16)
++    path = FILES_DIR / storage_name
++    path.write_bytes(data)
++
++    try:
++        with get_db() as conn:
++            cur = conn.execute(
++                """
++                INSERT INTO images
++                    (filename, title, content_type, size_bytes, uploaded_at, uploader_id, storage_name)
++                VALUES (?, ?, ?, ?, ?, ?, ?)
++                """,
++                (
++                    filename,
++                    title,
++                    content_type,
++                    len(data),
++                    now_iso(),
++                    user["id"],
++                    storage_name,
++                ),
++            )
++            image_id = cur.lastrowid
++            row = conn.execute(
++                """
++                SELECT i.*, u.username
++                FROM images i
++                JOIN users u ON u.id = i.uploader_id
++                WHERE i.id = ?
++                """,
++                (image_id,),
++            ).fetchone()
++    except Exception:
++        path.unlink(missing_ok=True)
++        raise
++
++    return jsonify(image_dict(row)), 201
++
++
++@app.get("/api/images/<int:image_id>")
++def get_image(image_id: int):
++    with get_db() as conn:
++        row = conn.execute(
++            """
++            SELECT i.*, u.username
++            FROM images i
++            JOIN users u ON u.id = i.uploader_id
++            WHERE i.id = ?
++            """,
++            (image_id,),
++        ).fetchone()
++    if row is None:
++        raise ApiError(404, "image not found")
++    return jsonify(image_dict(row))
++
++
++@app.get("/api/images/<int:image_id>/file")
++def get_image_file(image_id: int):
++    with get_db() as conn:
++        row = conn.execute(
++            "SELECT storage_name, content_type, filename FROM images WHERE id = ?",
++            (image_id,),
++        ).fetchone()
++    if row is None:
++        raise ApiError(404, "image not found")
++    path = FILES_DIR / row["storage_name"]
++    if not path.is_file():
++        raise ApiError(404, "image file not found")
++    return send_file(path, mimetype=row["content_type"])
++
++
++@app.delete("/api/images/<int:image_id>")
++def delete_image(image_id: int):
++    user = require_user()
++    with get_db() as conn:
++        row = conn.execute(
++            "SELECT id, uploader_id, storage_name FROM images WHERE id = ?",
++            (image_id,),
++        ).fetchone()
++        if row is None:
++            raise ApiError(404, "image not found")
++        if row["uploader_id"] != user["id"]:
++            raise ApiError(403, "only the uploader may delete this image")
++        conn.execute("DELETE FROM images WHERE id = ?", (image_id,))
++
++    (FILES_DIR / row["storage_name"]).unlink(missing_ok=True)
++    return "", 204
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
++
++
++init_db()
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..35f4f85 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,10 +10,62 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "^4.3.5",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "^4.3.5",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +356,356 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -344,6 +746,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +793,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1083,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -789,6 +1232,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..9779584 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -11,7 +11,9 @@
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "^4.3.5",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "^4.3.5",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..ede3711 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,621 @@
++import { useCallback, useEffect, useMemo, useRef, useState } from "react";
++
++type Image = {
++  id: number;
++  filename: string;
++  title: string | null;
++  content_type: string;
++  size_bytes: number;
++  uploaded_at: string;
++  url: string;
++  uploader: string;
++};
++
++type ListResponse = {
++  items: Image[];
++  total: number;
++  page: number;
++  page_size: number;
++};
++
++const TOKEN_KEY = "gallery_token";
++const USERNAME_KEY = "gallery_username";
++
++function getToken(): string | null {
++  return localStorage.getItem(TOKEN_KEY);
++}
++
++function getUsername(): string | null {
++  return localStorage.getItem(USERNAME_KEY);
++}
++
++function setAuth(token: string | null, username: string | null) {
++  if (token && username) {
++    localStorage.setItem(TOKEN_KEY, token);
++    localStorage.setItem(USERNAME_KEY, username);
++  } else {
++    localStorage.removeItem(TOKEN_KEY);
++    localStorage.removeItem(USERNAME_KEY);
++  }
++}
++
++async function api<T>(
++  path: string,
++  options: RequestInit = {}
++): Promise<{ ok: boolean; status: number; data: T | null; error: string | null }> {
++  const headers: Record<string, string> = {
++    ...(options.headers as Record<string, string>),
++  };
++  if (options.body && !headers["Content-Type"]) {
++    headers["Content-Type"] = "application/json";
++  }
++  const token = getToken();
++  if (token) headers["Authorization"] = `Bearer ${token}`;
++
++  let res: Response;
++  try {
++    res = await fetch(path, { ...options, headers });
++  } catch {
++    return { ok: false, status: 0, data: null, error: "network error" };
++  }
++
++  if (res.status === 204) {
++    return { ok: true, status: 204, data: null, error: null };
++  }
++  const text = await res.text();
++  let data: any = null;
++  try {
++    data = text ? JSON.parse(text) : null;
++  } catch {
++    data = null;
++  }
++  if (!res.ok) {
++    const message =
++      data && typeof data.error === "string"
++        ? data.error
++        : `request failed (${res.status})`;
++    return { ok: false, status: res.status, data, error: message };
++  }
++  return { ok: true, status: res.status, data: data as T, error: null };
++}
++
++function formatBytes(bytes: number): string {
++  if (bytes < 1024) return `${bytes} B`;
++  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
++  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
++}
++
++function formatDate(iso: string): string {
++  const d = new Date(iso);
++  if (Number.isNaN(d.getTime())) return iso;
++  return d.toLocaleString();
++}
++
++function Field(props: {
++  label: string;
++  type?: string;
++  value: string;
++  onChange: (v: string) => void;
++  autoComplete?: string;
++}) {
++  return (
++    <label className="block">
++      <span className="mb-1 block text-sm font-medium text-gray-700">
++        {props.label}
++      </span>
++      <input
++        type={props.type ?? "text"}
++        value={props.value}
++        autoComplete={props.autoComplete}
++        onChange={(e) => props.onChange(e.target.value)}
++        className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
++      />
++    </label>
++  );
++}
++
++function ErrorBanner({ message }: { message: string }) {
++  if (!message) return null;
++  return (
++    <div className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
++      {message}
++    </div>
++  );
++}
++
++function AuthForms({
++  onAuthed,
++  compact,
++}: {
++  onAuthed: (username: string) => void;
++  compact?: boolean;
++}) {
++  const [mode, setMode] = useState<"login" | "register">("login");
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState("");
++  const [busy, setBusy] = useState(false);
++
++  async function submit(e: React.FormEvent) {
++    e.preventDefault();
++    setError("");
++    setBusy(true);
++    try {
++      if (mode === "register") {
++        const res = await api("/api/auth/register", {
++          method: "POST",
++          body: JSON.stringify({ username, password }),
++        });
++        if (!res.ok) {
++          setError(res.error ?? "registration failed");
++          return;
++        }
++      }
++      const login = await api("/api/auth/login", {
++        method: "POST",
++        body: JSON.stringify({ username, password }),
++      });
++      if (!login.ok || !login.data || !login.data.token) {
++        setError(login.error ?? "sign in failed");
++        return;
++      }
++      setAuth(login.data.token, username);
++      onAuthed(username);
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <div className={compact ? "w-full" : "mx-auto mt-16 max-w-sm"}>
++      {!compact && (
++        <h1 className="mb-6 text-center text-2xl font-semibold text-gray-900">
++          Image gallery
++        </h1>
++      )}
++      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
++        <div className="mb-4 flex rounded-lg bg-gray-100 p-1 text-sm font-medium">
++          <button
++            type="button"
++            onClick={() => {
++              setMode("login");
++              setError("");
++            }}
++            className={`flex-1 rounded-md py-1.5 ${
++              mode === "login" ? "bg-white shadow" : "text-gray-600"
++            }`}
++          >
++            Sign in
++          </button>
++          <button
++            type="button"
++            onClick={() => {
++              setMode("register");
++              setError("");
++            }}
++            className={`flex-1 rounded-md py-1.5 ${
++              mode === "register" ? "bg-white shadow" : "text-gray-600"
++            }`}
++          >
++            Register
++          </button>
++        </div>
++        <form onSubmit={submit} className="space-y-4">
++          <Field
++            label="Username"
++            value={username}
++            onChange={setUsername}
++            autoComplete="username"
++          />
++          <Field
++            label="Password"
++            type="password"
++            value={password}
++            onChange={setPassword}
++            autoComplete={
++              mode === "login" ? "current-password" : "new-password"
++            }
++          />
++          <ErrorBanner message={error} />
++          <button
++            type="submit"
++            disabled={busy || !username || !password}
++            className="w-full rounded-md bg-indigo-600 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
++          >
++            {mode === "login" ? "Sign in" : "Create account"}
++          </button>
++        </form>
++      </div>
++    </div>
++  );
++}
++
++function UploadForm({ onUploaded }: { onUploaded: () => void }) {
++  const [filename, setFilename] = useState("");
++  const [title, setTitle] = useState("");
++  const [preview, setPreview] = useState<string | null>(null);
++  const [error, setError] = useState("");
++  const [busy, setBusy] = useState(false);
++  const fileRef = useRef<HTMLInputElement>(null);
++
++  function handleFile(file: File | null) {
++    setError("");
++    if (!file) {
++      setPreview(null);
++      setFilename("");
++      return;
++    }
++    const lower = file.name.toLowerCase();
++    const ok = lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg");
++    if (!ok) {
++      setError("only PNG and JPEG images are supported");
++      setPreview(null);
++      setFilename(file.name);
++      if (fileRef.current) fileRef.current.value = "";
++      return;
++    }
++    setFilename(file.name);
++    const reader = new FileReader();
++    reader.onload = () => setPreview(reader.result as string);
++    reader.readAsDataURL(file);
++  }
++
++  async function submit(e: React.FormEvent) {
++    e.preventDefault();
++    setError("");
++    if (!preview) {
++      setError("choose a PNG or JPEG image");
++      return;
++    }
++    setBusy(true);
++    try {
++      const res = await api("/api/images", {
++        method: "POST",
++        body: JSON.stringify({
++          filename: filename || "image",
++          title: title || undefined,
++          data: preview,
++        }),
++      });
++      if (!res.ok) {
++        setError(res.error ?? "upload failed");
++        return;
++      }
++      setFilename("");
++      setTitle("");
++      setPreview(null);
++      if (fileRef.current) fileRef.current.value = "";
++      onUploaded();
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
++      <h2 className="mb-4 text-lg font-semibold text-gray-900">Upload image</h2>
++      <form onSubmit={submit} className="space-y-4">
++        <input
++          ref={fileRef}
++          type="file"
++          accept=".png,.jpg,.jpeg,image/png,image/jpeg"
++          onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
++          className="block w-full text-sm text-gray-600 file:mr-3 file:rounded-md file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-indigo-700 hover:file:bg-indigo-100"
++        />
++        {preview && (
++          <img
++            src={preview}
++            alt="Preview"
++            className="max-h-48 rounded-lg border border-gray-200 object-contain"
++          />
++        )}
++        <Field label="Filename" value={filename} onChange={setFilename} />
++        <Field label="Title (optional)" value={title} onChange={setTitle} />
++        <ErrorBanner message={error} />
++        <button
++          type="submit"
++          disabled={busy || !preview}
++          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
++        >
++          Upload
++        </button>
++      </form>
++    </section>
++  );
++}
++
++function Viewer({ image, onClose }: { image: Image; onClose: () => void }) {
++  useEffect(() => {
++    const onKey = (e: KeyboardEvent) => {
++      if (e.key === "Escape") onClose();
++    };
++    window.addEventListener("keydown", onKey);
++    return () => window.removeEventListener("keydown", onKey);
++  }, [onClose]);
++
++  return (
++    <div
++      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
++      onClick={onClose}
++    >
++      <div
++        className="max-h-full max-w-4xl overflow-hidden rounded-xl bg-white shadow-xl"
++        onClick={(e) => e.stopPropagation()}
++      >
++        <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
++          <div className="min-w-0">
++            <h3 className="truncate font-semibold text-gray-900">
++              {image.title || image.filename}
++            </h3>
++            <p className="text-xs text-gray-500">
++              {image.filename} · {formatBytes(image.size_bytes)} ·{" "}
++              {formatDate(image.uploaded_at)}
++            </p>
++          </div>
++          <button
++            onClick={onClose}
++            className="ml-4 rounded-md px-2 py-1 text-gray-500 hover:bg-gray-100 hover:text-gray-800"
++            aria-label="Close"
++          >
++            ✕
++          </button>
++        </div>
++        <div className="flex max-h-[80vh] items-center justify-center bg-gray-900 p-4">
++          <img
++            src={image.url}
++            alt={image.title || image.filename}
++            className="max-h-[75vh] max-w-full object-contain"
++          />
++        </div>
++      </div>
++    </div>
++  );
++}
++
++function Gallery({
++  username,
++  onAuthed,
++}: {
++  username: string | null;
++  onAuthed: (u: string) => void;
++}) {
++  const [data, setData] = useState<ListResponse | null>(null);
++  const [page, setPage] = useState(1);
++  const [pageSize, setPageSize] = useState(12);
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState("");
++  const [viewer, setViewer] = useState<Image | null>(null);
++  const [deleting, setDeleting] = useState<number | null>(null);
++  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
++
++  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
++
++  const load = useCallback(
++    async (p: number, size: number) => {
++      setLoading(true);
++      setError("");
++      const res = await api<ListResponse>(
++        `/api/images?page=${p}&page_size=${size}`
++      );
++      if (!res.ok) {
++        setError(res.error ?? "failed to load images");
++        setData(null);
++      } else {
++        setData(res.data);
++      }
++      setLoading(false);
++    },
++    []
++  );
++
++  useEffect(() => {
++    load(page, pageSize);
++  }, [page, pageSize, load]);
++
++  useEffect(() => {
++    setPage(1);
++  }, [pageSize]);
++
++  async function handleDelete(id: number) {
++    setDeleting(id);
++    setError("");
++    try {
++      const res = await api(`/api/images/${id}`, { method: "DELETE" });
++      if (!res.ok) {
++        setError(res.error ?? "delete failed");
++        return;
++      }
++      setConfirmDelete(null);
++      await load(page, pageSize);
++    } finally {
++      setDeleting(null);
++    }
++  }
++
++  return (
++    <div className="mx-auto max-w-6xl px-4 py-8">
++      <div className="grid gap-8 lg:grid-cols-[320px_1fr]">
++        <div className="space-y-6">
++          {username ? (
++            <UploadForm onUploaded={() => load(page, pageSize)} />
++          ) : (
++            <AuthForms onAuthed={onAuthed} compact />
++          )}
++        </div>
++
++        <div>
++          <div className="mb-4 flex items-center justify-between">
++            <h2 className="text-lg font-semibold text-gray-900">Gallery</h2>
++            <label className="flex items-center gap-2 text-sm text-gray-600">
++              Per page
++              <select
++                value={pageSize}
++                onChange={(e) => setPageSize(Number(e.target.value))}
++                className="rounded-md border border-gray-300 px-2 py-1 text-sm"
++              >
++                {[12, 24, 48].map((n) => (
++                  <option key={n} value={n}>
++                    {n}
++                  </option>
++                ))}
++              </select>
++            </label>
++          </div>
++
++          <ErrorBanner message={error} />
++
++          {loading ? (
++            <p className="py-12 text-center text-gray-500">Loading…</p>
++          ) : !data || data.items.length === 0 ? (
++            <div className="rounded-xl border border-dashed border-gray-300 py-16 text-center">
++              <p className="text-gray-500">No images yet.</p>
++              {username ? (
++                <p className="mt-1 text-sm text-gray-400">
++                  Upload the first one to get started.
++                </p>
++              ) : (
++                <p className="mt-1 text-sm text-gray-400">
++                  Sign in and upload the first image.
++                </p>
++              )}
++            </div>
++          ) : (
++            <>
++              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
++                {data.items.map((img) => (
++                  <button
++                    key={img.id}
++                    onClick={() => setViewer(img)}
++                    className="group overflow-hidden rounded-lg border border-gray-200 bg-white text-left shadow-sm transition hover:shadow-md"
++                  >
++                    <div className="aspect-square w-full bg-gray-100">
++                      <img
++                        src={img.url}
++                        alt={img.title || img.filename}
++                        loading="lazy"
++                        className="h-full w-full object-cover"
++                      />
++                    </div>
++                    <div className="p-2">
++                      <p className="truncate text-sm font-medium text-gray-900">
++                        {img.title || img.filename}
++                      </p>
++                      <p className="truncate text-xs text-gray-500">
++                        {img.uploader} · {formatDate(img.uploaded_at)}
++                      </p>
++                    </div>
++                  </button>
++                ))}
++              </div>
++
++              <div className="mt-6 flex items-center justify-between">
++                <p className="text-sm text-gray-500">
++                  {data.total} image{data.total === 1 ? "" : "s"}
++                </p>
++                <div className="flex items-center gap-2">
++                  <button
++                    disabled={page <= 1}
++                    onClick={() => setPage((p) => p - 1)}
++                    className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
++                  >
++                    Previous
++                  </button>
++                  <span className="text-sm text-gray-600">
++                    Page {data.page} of {totalPages}
++                  </span>
++                  <button
++                    disabled={page >= totalPages}
++                    onClick={() => setPage((p) => p + 1)}
++                    className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
++                  >
++                    Next
++                  </button>
++                </div>
++              </div>
++            </>
++          )}
++        </div>
++      </div>
++
++      {viewer && (
++        <Viewer
++          image={viewer}
++          onClose={() => {
++            setViewer(null);
++            setConfirmDelete(null);
++          }}
++        />
++      )}
++
++      {viewer && username === viewer.uploader && (
++        <div className="fixed inset-x-0 bottom-0 z-50 flex justify-center p-4">
++          {confirmDelete === viewer.id ? (
++            <div className="flex items-center gap-3 rounded-lg border border-red-300 bg-white px-4 py-3 shadow-lg">
++              <span className="text-sm text-gray-700">
++                Delete this image?
++              </span>
++              <button
++                onClick={() => setConfirmDelete(null)}
++                className="rounded-md border border-gray-300 px-3 py-1 text-sm hover:bg-gray-50"
++              >
++                Cancel
++              </button>
++              <button
++                onClick={() => handleDelete(viewer.id)}
++                disabled={deleting === viewer.id}
++                className="rounded-md bg-red-600 px-3 py-1 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
++              >
++                Delete
++              </button>
++            </div>
++          ) : (
++            <button
++              onClick={() => setConfirmDelete(viewer.id)}
++              className="rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-lg hover:bg-red-700"
++            >
++              Delete
++            </button>
++          )}
++        </div>
++      )}
++    </div>
++  );
++}
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [username, setUsername] = useState<string | null>(getUsername());
++
++  const token = getToken();
++
++  const signOut = () => {
++    setAuth(null, null);
++    setUsername(null);
++  };
++
++  return (
++    <div className="min-h-screen bg-gray-50 text-gray-900">
++      <header className="border-b border-gray-200 bg-white">
++        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
++          <h1 className="text-xl font-semibold">Image gallery</h1>
++          {token && username ? (
++            <div className="flex items-center gap-3">
++              <span className="text-sm text-gray-600">
++                Signed in as{" "}
++                <span className="font-medium text-gray-900">{username}</span>
++              </span>
++              <button
++                onClick={signOut}
++                className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
++              >
++                Sign out
++              </button>
++            </div>
++          ) : (
++            <span className="text-sm text-gray-500">Browse the gallery</span>
++          )}
++        </div>
++      </header>
++      <Gallery username={username} onAuthed={setUsername} />
++    </div>
++  );
+ }
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..696e0d2 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,5 @@
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+ createRoot(document.getElementById("root")!).render(<App />);
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..775ad4a 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
+ import react from "@vitejs/plugin-react";
++import tailwindcss from "@tailwindcss/vite";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

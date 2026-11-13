@@ -1,0 +1,752 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 676,
+  "completed_at": "2026-11-11T01:04:06.729286+00:00",
+  "condition_id": 96,
+  "condition_label": "local-opencode-go/mimo-v2.6-flash",
+  "config_fingerprint": "39a34ea4132343312a288ef167d7143ec278ed1d3008aa92ab9a65c36fe6868d",
+  "cost_usd": 0.0,
+  "duration": 3125.978431,
+  "fingerprints": {
+    "config_fingerprint": "39a34ea4132343312a288ef167d7143ec278ed1d3008aa92ab9a65c36fe6868d",
+    "prompt_hash": "8e7e5d91b3a955e1f4fb5b1eaccad678146f064fcc7e6e2d73956bc51a4e2be3",
+    "run_fingerprint": "96e5727e45ca6a179c4fe578d6bc260e17deb15dad6f5e23a1013c9d6bf91cc0",
+    "task_hash": "387570c49b22a4aa7c3616d2e324810f2e228358a118341715307b82e0b3ffa2",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "97bd0e92-b797-4e79-bebd-402b4926ad1e",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/mimo-v2.6-flash",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-11T01:03:48.453378+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 798,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 16,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 130,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 109,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "incidents.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "incidents.list.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "incidents.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "incidents.list.anon_401",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "incidents.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "incidents.list.page_size",
+          "ms": 4,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "filter",
+          "endpoint": "incidents.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "incidents.list.filter.severity",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "filter",
+          "endpoint": "incidents.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "incidents.list.search",
+          "ms": 8,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "incidents.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "incidents.create.ok",
+          "ms": 10,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "incidents.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "incidents.create.anon_401",
+          "ms": 18,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "incidents.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "incidents.create.invalid.missing",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "incidents.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "incidents.create.invalid.too_long",
+          "ms": 5,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"commander\":\"llmlab commander\",\"id\":9,\"impact_summary\":\"llmlab impact_summary\",\"opened_at\":\"2026-11-11T01:03:59.648948+00:00\",\"opened_by\":\"usera7d3dc784\",\"reopen_count\":0,\"resolved_at\":null,\"service\":\"llmlab service\",\"severity\":\"sev1\",\"sla_breached\":false,\"sla_due_at\":\"2026-11-11T02:03:59.648948+00",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "incidents.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "incidents.create.invalid.enum",
+          "ms": 4,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "incidents.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "incidents.get.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "incidents.get",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "incidents.get.anon_401",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "incidents.update",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "incidents.update.ok",
+          "ms": 15,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "incidents.update",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "incidents.update.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "incidents.update",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "incidents.update.invalid.too_long",
+          "ms": 3,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"commander\":\"llmlab commander\",\"id\":14,\"impact_summary\":\"llmlab impact_summary\",\"opened_at\":\"2026-11-11T01:03:59.702326+00:00\",\"opened_by\":\"usera7d3dc784\",\"reopen_count\":0,\"resolved_at\":null,\"service\":\"llmlab service\",\"severity\":\"sev1\",\"sla_breached\":false,\"sla_due_at\":\"2026-11-11T02:03:59.702326+0",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "incidents.update",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "incidents.update.invalid.enum",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "timeline.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "timeline.list.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "timeline.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "timeline.list.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "timeline.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "timeline.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "timeline.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "timeline.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "timeline.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "timeline.create.invalid.missing",
+          "ms": 3,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"author\":\"usera7d3dc784\",\"created_at\":\"2026-11-11T01:03:59.762564+00:00\",\"id\":2,\"message\":\"llmlab message\",\"type\":\"note\"}\n",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "timeline.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "timeline.create.invalid.too_long",
+          "ms": 3,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"author\":\"usera7d3dc784\",\"created_at\":\"2026-11-11T01:03:59.769395+00:00\",\"id\":3,\"message\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "timeline.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "timeline.create.invalid.enum",
+          "ms": 3,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"author\":\"usera7d3dc784\",\"created_at\":\"2026-11-11T01:03:59.775656+00:00\",\"id\":4,\"message\":\"llmlab message\",\"type\":\"llmlab-not-an-option\"}\n",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "stats.public",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "stats.public.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "persistence",
+          "endpoint": "incidents.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "incidents.get.persists",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 27,
+        "agent_pass_rate": 0.8148148148148148,
+        "agent_passed": 22,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 6,
+            "passed": 6
+          },
+          "filter": {
+            "n": 2,
+            "passed": 2
+          },
+          "functional": {
+            "n": 9,
+            "passed": 9
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 1
+          },
+          "persistence": {
+            "n": 1,
+            "passed": 1
+          },
+          "validation": {
+            "n": 8,
+            "passed": 3
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.8148148148148148,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 2,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.8148148148148148
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-89",
+          "endpoint": "incidents.list",
+          "evidence": "tautology payloads returned no extra rows",
+          "id": "probe.incidents.sqli",
+          "kind": "sqli_boolean",
+          "skip_reason": null,
+          "status": "not_exploited"
+        },
+        {
+          "cwe": "cwe-79",
+          "endpoint": "timeline.create",
+          "evidence": "payload not served unescaped as HTML",
+          "id": "probe.timeline.xss",
+          "kind": "xss_stored",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1929,
+  "loc_model": 1929,
+  "model": "mimo-v2.6-flash",
+  "model_id": "local-opencode-go/mimo-v2.6-flash",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "96e5727e45ca6a179c4fe578d6bc260e17deb15dad6f5e23a1013c9d6bf91cc0",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-11T00:12:00.750855+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "operations_incident_center@1",
+  "tokens_used": 3636229,
+  "tree_hash": "d10767441cccf7c214b9f731b7f44f9f4d9b91a0b1bfabc3c711f3e8e21d912f",
+  "truncated": true,
+  "unit": "task:operations_incident_center@1",
+  "usable": true
+}

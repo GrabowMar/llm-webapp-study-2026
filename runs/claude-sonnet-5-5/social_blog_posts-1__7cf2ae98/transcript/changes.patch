@@ -1,0 +1,2096 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..0885d73
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,4 @@
++node_modules
++frontend/dist
++data/
++__pycache__/
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..f63cc01 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,241 @@
+-"""Flask entry point."""
++"""Multi-author blog: Flask JSON API under /api plus the built frontend."""
+ 
++import hashlib
++import hmac
++import os
++import re
++import secrets
++import sqlite3
++from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.exceptions import HTTPException
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path("data")
++DB_PATH = DATA_DIR / "blog.db"
++
++ADMIN_USERNAME = "admin"
++ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD") or ""
++
++SESSION_TTL = timedelta(days=7)
++USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
++PASSWORD_MIN, PASSWORD_MAX = 8, 128
++TITLE_MAX = 200
++CONTENT_MAX = 100_000
++TAG_MAX_LEN = 30
++TAG_MAX_COUNT = 10
++DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE = 10, 100
++EXCERPT_LEN = 200
+ 
+ app = Flask(__name__, static_folder=None)
++app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
++    password_hash TEXT,
++    is_admin INTEGER NOT NULL DEFAULT 0
++);
++CREATE TABLE IF NOT EXISTS sessions (
++    token_hash TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    expires_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS posts (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    title TEXT NOT NULL,
++    content TEXT NOT NULL,
++    created_at TEXT NOT NULL,
++    updated_at TEXT NOT NULL,
++    taken_down INTEGER NOT NULL DEFAULT 0
++);
++CREATE INDEX IF NOT EXISTS posts_created ON posts(created_at DESC, id DESC);
++CREATE INDEX IF NOT EXISTS posts_user ON posts(user_id);
++CREATE TABLE IF NOT EXISTS post_tags (
++    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
++    position INTEGER NOT NULL,
++    tag TEXT NOT NULL COLLATE NOCASE,
++    PRIMARY KEY (post_id, position)
++);
++CREATE INDEX IF NOT EXISTS post_tags_tag ON post_tags(tag);
++"""
++
++
++def _casefold(value):
++    return value.casefold() if isinstance(value, str) else value
++
++
++def connect():
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH, timeout=15)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    conn.create_function("casefold", 1, _casefold, deterministic=True)
++    return conn
++
++
++def init_db():
++    conn = connect()
++    try:
++        conn.execute("PRAGMA journal_mode = WAL")
++        conn.executescript(SCHEMA)
++        conn.commit()
++    finally:
++        conn.close()
++
++
++init_db()
++
++
++def db():
++    if "db" not in g:
++        g.db = connect()
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc):
++    conn = g.pop("db", None)
++    if conn is not None:
++        conn.close()
++
++
++def now_iso():
++    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
++
++
++def bump_iso(previous):
++    prev = datetime.fromisoformat(previous.replace("Z", "+00:00"))
++    return (prev + timedelta(milliseconds=1)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
++
++
++class ApiError(Exception):
++    def __init__(self, status, message, errors=None):
++        self.status = status
++        self.message = message
++        self.errors = errors
++
++
++@app.errorhandler(ApiError)
++def handle_api_error(err):
++    body = {"error": err.message}
++    if err.errors:
++        body["errors"] = err.errors
++    return jsonify(body), err.status
++
++
++@app.errorhandler(HTTPException)
++def handle_http_error(err):
++    if request.path.startswith("/api"):
++        return jsonify({"error": err.description or err.name}), err.code
++    return err
++
++
++@app.errorhandler(Exception)
++def handle_unexpected(err):
++    app.logger.exception("unhandled error")
++    return jsonify({"error": "Internal server error"}), 500
++
++
++@app.after_request
++def add_headers(resp):
++    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
++    resp.headers.setdefault("Referrer-Policy", "same-origin")
++    if request.path.startswith("/api"):
++        resp.headers["Cache-Control"] = "no-store"
++    return resp
++
++
++def json_body():
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        raise ApiError(400, "Request body must be a JSON object")
++    return data
++
++
++def hash_password(password, salt=None):
++    salt = salt or secrets.token_bytes(16)
++    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
++    return f"scrypt${salt.hex()}${digest.hex()}"
++
++
++def verify_password(password, stored):
++    try:
++        _, salt_hex, digest_hex = stored.split("$")
++        expected = bytes.fromhex(digest_hex)
++        actual = hashlib.scrypt(
++            password.encode(), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1, dklen=32
++        )
++    except (ValueError, AttributeError):
++        return False
++    return hmac.compare_digest(actual, expected)
++
++
++DUMMY_HASH = hash_password(secrets.token_hex(8))
++
++
++def token_digest(token):
++    return hashlib.sha256(token.encode()).hexdigest()
++
++
++def current_user():
++    if hasattr(g, "_user"):
++        return g._user
++    user = None
++    header = request.headers.get("Authorization", "")
++    parts = header.split(None, 1)
++    if len(parts) == 2 and parts[0].lower() == "bearer":
++        token = parts[1].strip()
++        row = db().execute(
++            "SELECT u.id, u.username, u.is_admin, s.expires_at FROM sessions s "
++            "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
++            (token_digest(token),),
++        ).fetchone()
++        if row and row["expires_at"] > now_iso():
++            is_admin = bool(row["is_admin"]) and bool(ADMIN_PASSWORD)
++            if not row["is_admin"] or is_admin:
++                user = {"id": row["id"], "username": row["username"], "is_admin": is_admin}
++    g._user = user
++    return user
++
++
++def require_user():
++    user = current_user()
++    if user is None:
++        raise ApiError(401, "Authentication required")
++    return user
++
++
++def issue_token(user_id):
++    token = secrets.token_urlsafe(32)
++    conn = db()
++    conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now_iso(),))
++    expires = (datetime.now(timezone.utc) + SESSION_TTL).isoformat(timespec="milliseconds")
++    conn.execute(
++        "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
++        (token_digest(token), user_id, expires.replace("+00:00", "Z")),
++    )
++    conn.commit()
++    return token
++
++
++def credentials():
++    data = json_body()
++    username, password = data.get("username"), data.get("password")
++    if not isinstance(username, str) or not isinstance(password, str):
++        raise ApiError(
++            400,
++            "Validation failed",
++            {
++                **({} if isinstance(username, str) else {"username": "Username is required"}),
++                **({} if isinstance(password, str) else {"password": "Password is required"}),
++            },
++        )
++    return username, password
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +243,296 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    username, password = credentials()
++    errors = {}
++    if not USERNAME_RE.match(username):
++        errors["username"] = (
++            "Username must be 3-32 characters: letters, digits, underscore, dot or hyphen"
++        )
++    if not PASSWORD_MIN <= len(password) <= PASSWORD_MAX:
++        errors["password"] = f"Password must be {PASSWORD_MIN}-{PASSWORD_MAX} characters"
++    if errors:
++        raise ApiError(400, "Validation failed", errors)
++    if username.lower() == ADMIN_USERNAME:
++        raise ApiError(409, "Username is already taken", {"username": "Username is already taken"})
++    conn = db()
++    try:
++        conn.execute(
++            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
++            (username, hash_password(password)),
++        )
++        conn.commit()
++    except sqlite3.IntegrityError:
++        raise ApiError(409, "Username is already taken", {"username": "Username is already taken"})
++    return jsonify({"username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    username, password = credentials()
++    conn = db()
++    invalid = ApiError(401, "Invalid username or password")
++    if username.lower() == ADMIN_USERNAME:
++        if not ADMIN_PASSWORD or not hmac.compare_digest(
++            hashlib.sha256(password.encode()).digest(),
++            hashlib.sha256(ADMIN_PASSWORD.encode()).digest(),
++        ):
++            raise invalid
++        conn.execute(
++            "INSERT OR IGNORE INTO users (username, password_hash, is_admin) VALUES (?, NULL, 1)",
++            (ADMIN_USERNAME,),
++        )
++        conn.commit()
++        row = conn.execute(
++            "SELECT id FROM users WHERE username = ? AND is_admin = 1", (ADMIN_USERNAME,)
++        ).fetchone()
++        if row is None:
++            raise invalid
++        return {"token": issue_token(row["id"])}
++    row = conn.execute(
++        "SELECT id, password_hash FROM users WHERE username = ? AND is_admin = 0", (username,)
++    ).fetchone()
++    ok = verify_password(password, row["password_hash"] if row else DUMMY_HASH)
++    if not row or not ok:
++        raise invalid
++    return {"token": issue_token(row["id"])}
++
++
++@app.get("/api/auth/me")
++def me():
++    user = require_user()
++    return {"username": user["username"], "is_admin": user["is_admin"]}
++
++
++def excerpt_of(content):
++    return re.sub(r"[\r\n]+", " ", content[:EXCERPT_LEN])
++
++
++def tags_for(post_ids):
++    result = {pid: [] for pid in post_ids}
++    if post_ids:
++        marks = ",".join("?" * len(post_ids))
++        rows = db().execute(
++            f"SELECT post_id, tag FROM post_tags WHERE post_id IN ({marks}) "
++            "ORDER BY post_id, position",
++            list(post_ids),
++        )
++        for r in rows:
++            result[r["post_id"]].append(r["tag"])
++    return result
++
++
++def serialize(rows):
++    tag_map = tags_for([r["id"] for r in rows])
++    user = current_user()
++    is_admin = bool(user and user["is_admin"])
++    items = [
++        {
++            "id": r["id"],
++            "title": r["title"],
++            "content": r["content"],
++            "tags": tag_map[r["id"]],
++            "created_at": r["created_at"],
++            "updated_at": r["updated_at"],
++            "author": r["author"],
++            "excerpt": excerpt_of(r["content"]),
++        }
++        for r in rows
++    ]
++    if is_admin:
++        for item, r in zip(items, rows):
++            item["taken_down"] = bool(r["taken_down"])
++    return items
++
++
++POST_SELECT = (
++    "SELECT p.id, p.user_id, p.title, p.content, p.created_at, p.updated_at, p.taken_down, "
++    "u.username AS author FROM posts p JOIN users u ON u.id = p.user_id"
++)
++
++
++def fetch_post(post_id):
++    return db().execute(POST_SELECT + " WHERE p.id = ?", (post_id,)).fetchone()
++
++
++def visible_post(post_id):
++    row = fetch_post(post_id)
++    user = current_user()
++    if row is None or (row["taken_down"] and not (user and user["is_admin"])):
++        raise ApiError(404, "Post not found")
++    return row
++
++
++def validate_post(data):
++    errors = {}
++    title, content, tags = data.get("title"), data.get("content"), data.get("tags")
++    if not isinstance(title, str) or not title.strip():
++        errors["title"] = "Title is required"
++    elif len(title.strip()) > TITLE_MAX:
++        errors["title"] = f"Title must be at most {TITLE_MAX} characters"
++    if not isinstance(content, str) or not content.strip():
++        errors["content"] = "Content is required"
++    elif len(content) > CONTENT_MAX:
++        errors["content"] = f"Content must be at most {CONTENT_MAX} characters"
++    clean_tags = []
++    if tags is None:
++        pass
++    elif not isinstance(tags, list):
++        errors["tags"] = "Tags must be a list of strings"
++    else:
++        seen = set()
++        for tag in tags:
++            if not isinstance(tag, str):
++                errors["tags"] = "Tags must be a list of strings"
++                break
++            tag = tag.strip()
++            if not tag:
++                errors["tags"] = "Tags must not be empty"
++                break
++            if len(tag) > TAG_MAX_LEN:
++                errors["tags"] = f"Each tag must be at most {TAG_MAX_LEN} characters"
++                break
++            if "," in tag or any(ord(c) < 32 for c in tag):
++                errors["tags"] = "Tags must not contain commas or control characters"
++                break
++            if tag.casefold() not in seen:
++                seen.add(tag.casefold())
++                clean_tags.append(tag)
++        if "tags" not in errors and len(clean_tags) > TAG_MAX_COUNT:
++            errors["tags"] = f"At most {TAG_MAX_COUNT} tags are allowed"
++    if errors:
++        raise ApiError(400, "Validation failed", errors)
++    return title.strip(), content, clean_tags
++
++
++def write_tags(conn, post_id, tags):
++    conn.execute("DELETE FROM post_tags WHERE post_id = ?", (post_id,))
++    conn.executemany(
++        "INSERT INTO post_tags (post_id, position, tag) VALUES (?, ?, ?)",
++        [(post_id, i, t) for i, t in enumerate(tags)],
++    )
++
++
++def int_param(name, default):
++    raw = request.args.get(name)
++    if raw is None or raw == "":
++        return default
++    try:
++        value = int(raw)
++    except ValueError:
++        raise ApiError(400, f"{name} must be a positive integer")
++    if value < 1:
++        raise ApiError(400, f"{name} must be a positive integer")
++    return value
++
++
++@app.get("/api/posts")
++def list_posts():
++    page = int_param("page", 1)
++    page_size = min(int_param("page_size", DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
++    user = current_user()
++    only_down = bool(user and user["is_admin"] and request.args.get("taken_down") in ("1", "true"))
++    where, params = ["p.taken_down = ?"], [1 if only_down else 0]
++    q = (request.args.get("q") or "").strip()
++    if q:
++        needle = q.casefold()
++        where.append("(instr(casefold(p.title), ?) > 0 OR instr(casefold(p.content), ?) > 0)")
++        params += [needle, needle]
++    tag = (request.args.get("tag") or "").strip()
++    if tag:
++        where.append("EXISTS (SELECT 1 FROM post_tags t WHERE t.post_id = p.id AND t.tag = ?)")
++        params.append(tag)
++    author = (request.args.get("author") or "").strip()
++    if author:
++        where.append("u.username = ?")
++        params.append(author)
++    clause = " WHERE " + " AND ".join(where)
++    conn = db()
++    total = conn.execute(
++        "SELECT COUNT(*) FROM posts p JOIN users u ON u.id = p.user_id" + clause, params
++    ).fetchone()[0]
++    rows = conn.execute(
++        POST_SELECT + clause + " ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?",
++        params + [page_size, (page - 1) * page_size],
++    ).fetchall()
++    return {"items": serialize(rows), "total": total, "page": page, "page_size": page_size}
++
++
++@app.post("/api/posts")
++def create_post():
++    user = require_user()
++    title, content, tags = validate_post(json_body())
++    conn = db()
++    now = now_iso()
++    cur = conn.execute(
++        "INSERT INTO posts (user_id, title, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
++        (user["id"], title, content, now, now),
++    )
++    write_tags(conn, cur.lastrowid, tags)
++    conn.commit()
++    return jsonify(serialize([fetch_post(cur.lastrowid)])[0]), 201
++
++
++@app.get("/api/posts/<int:post_id>")
++def get_post(post_id):
++    return serialize([visible_post(post_id)])[0]
++
++
++def own_post(post_id):
++    user = require_user()
++    row = visible_post(post_id)
++    if row["user_id"] != user["id"]:
++        raise ApiError(403, "You can only change your own posts")
++    return row
++
++
++@app.put("/api/posts/<int:post_id>")
++def update_post(post_id):
++    user = require_user()
++    row = own_post(post_id)
++    title, content, tags = validate_post(json_body())
++    now = now_iso()
++    if now <= row["updated_at"]:
++        now = bump_iso(row["updated_at"])
++    conn = db()
++    conn.execute(
++        "UPDATE posts SET title = ?, content = ?, updated_at = ? WHERE id = ? AND user_id = ?",
++        (title, content, now, post_id, user["id"]),
++    )
++    write_tags(conn, post_id, tags)
++    conn.commit()
++    return serialize([fetch_post(post_id)])[0]
++
++
++@app.delete("/api/posts/<int:post_id>")
++def delete_post(post_id):
++    own_post(post_id)
++    conn = db()
++    conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
++    conn.commit()
++    return "", 204
++
++
++@app.post("/api/admin/posts/<int:post_id>/toggle")
++def toggle_post(post_id):
++    user = require_user()
++    if not user["is_admin"]:
++        raise ApiError(403, "Admin only")
++    conn = db()
++    cur = conn.execute("UPDATE posts SET taken_down = 1 - taken_down WHERE id = ?", (post_id,))
++    conn.commit()
++    if cur.rowcount == 0:
++        raise ApiError(404, "Post not found")
++    return serialize([fetch_post(post_id)])[0]
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
++    if path == "api" or path.startswith("api/"):
++        raise ApiError(404, "Not found")
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..7a822cd 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Blog</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..17366a7 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -7,13 +7,69 @@
+       "name": "app-frontend",
+       "dependencies": {
+         "react": "19.3.1",
+-        "react-dom": "19.3.1"
++        "react-dom": "19.3.1",
++        "react-router-dom": "7.18.5"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "4.3.5",
++        "@types/react": "19.3.0",
++        "@types/react-dom": "19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "4.3.5",
++        "typescript": "5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +360,376 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,6 +760,26 @@
+         }
+       }
+     },
++    "node_modules/cookie": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/cookie/-/cookie-1.1.1.tgz",
++      "integrity": "sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/express"
++      }
++    },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +790,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +837,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1127,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -739,6 +1226,44 @@
+         "react": "^19.3.1"
+       }
+     },
++    "node_modules/react-router": {
++      "version": "7.18.5",
++      "resolved": "https://registry.npmjs.org/react-router/-/react-router-7.18.5.tgz",
++      "integrity": "sha512-dTgvcXDOrLPrlLHrcZAqWveiK1hMSqN+rGAJzegP8HtmNkfRxOoshGWBNX3ZJ0cZjOHkRdlUJtaIhZMLLyGyPw==",
++      "license": "MIT",
++      "dependencies": {
++        "cookie": "^1.0.1",
++        "set-cookie-parser": "^2.6.0"
++      },
++      "engines": {
++        "node": ">=20.0.0"
++      },
++      "peerDependencies": {
++        "react": ">=18",
++        "react-dom": ">=18"
++      },
++      "peerDependenciesMeta": {
++        "react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/react-router-dom": {
++      "version": "7.18.5",
++      "resolved": "https://registry.npmjs.org/react-router-dom/-/react-router-dom-7.18.5.tgz",
++      "integrity": "sha512-9HcfDMU6JJ/fp6gJZYGwNE6RknVGS4kBjH1HkNw959mCJi70TVwdipQWv2FEol9uGpi+SZTFtVpJPtEQfayeOw==",
++      "license": "MIT",
++      "dependencies": {
++        "react-router": "7.18.5"
++      },
++      "engines": {
++        "node": ">=20.0.0"
++      },
++      "peerDependencies": {
++        "react": ">=18",
++        "react-dom": ">=18"
++      }
++    },
+     "node_modules/rolldown": {
+       "version": "1.2.16",
+       "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz",
+@@ -779,6 +1304,12 @@
+       "integrity": "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==",
+       "license": "MIT"
+     },
++    "node_modules/set-cookie-parser": {
++      "version": "2.7.3",
++      "resolved": "https://registry.npmjs.org/set-cookie-parser/-/set-cookie-parser-2.7.3.tgz",
++      "integrity": "sha512-irZHtTqurLna57KQG/s+fzOwv/J6XSH4cs8M/vsrY3uCaQ3S6+QJguAH0WdN47SXlk82voMZ4naWMQf8fdEoIg==",
++      "license": "MIT"
++    },
+     "node_modules/source-map-js": {
+       "version": "1.2.2",
+       "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz",
+@@ -789,6 +1320,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1358,20 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..df6b6cb 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,20 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "tsc && vite build"
+   },
+   "dependencies": {
+     "react": "19.3.1",
+-    "react-dom": "19.3.1"
++    "react-dom": "19.3.1",
++    "react-router-dom": "7.18.5"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "4.3.5",
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "4.3.5",
++    "typescript": "5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..49b80b2 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,68 @@
++import { Link, Route, Routes, useNavigate } from "react-router-dom";
++import { useAuth } from "./auth";
++import { Button } from "./ui";
++import AuthPage from "./pages/AuthPage";
++import Editor from "./pages/Editor";
++import PostPage from "./pages/PostPage";
++import PostsPage from "./pages/PostsPage";
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const { user, ready, signOut } = useAuth();
++  const navigate = useNavigate();
++  return (
++    <div className="min-h-screen bg-slate-50 text-slate-900">
++      <header className="border-b border-slate-200 bg-white">
++        <nav className="mx-auto flex max-w-3xl items-center justify-between gap-4 px-4 py-3">
++          <Link to="/" className="text-lg font-bold text-indigo-700">
++            Blog
++          </Link>
++          <div className="flex items-center gap-3 text-sm">
++            {user ? (
++              <>
++                <Link to="/posts/new" className="text-indigo-700 hover:underline">
++                  New post
++                </Link>
++                <span data-testid="current-user" className="font-medium">
++                  {user.username}
++                </span>
++                <Button
++                  variant="secondary"
++                  onClick={() => {
++                    signOut();
++                    navigate("/");
++                  }}
++                >
++                  Sign out
++                </Button>
++              </>
++            ) : (
++              <>
++                <Link to="/login" className="text-indigo-700 hover:underline">
++                  Sign in
++                </Link>
++                <Link to="/register" className="text-indigo-700 hover:underline">
++                  Register
++                </Link>
++              </>
++            )}
++          </div>
++        </nav>
++      </header>
++      <main className="mx-auto max-w-3xl px-4 py-6">
++        {!ready ? (
++          <p className="text-slate-500">Loading…</p>
++        ) : (
++          <Routes>
++            <Route path="/" element={<PostsPage />} />
++            <Route path="/login" element={<AuthPage mode="login" />} />
++            <Route path="/register" element={<AuthPage mode="register" />} />
++            <Route path="/posts/new" element={<Editor />} />
++            <Route path="/posts/:id" element={<PostPage />} />
++            <Route path="/posts/:id/edit" element={<Editor />} />
++            <Route path="*" element={<p>Page not found.</p>} />
++          </Routes>
++        )}
++      </main>
++    </div>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..955a239
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,86 @@
++export type Post = {
++  id: number;
++  title: string;
++  content: string;
++  tags: string[];
++  created_at: string;
++  updated_at: string;
++  author: string;
++  excerpt: string;
++  taken_down?: boolean;
++};
++
++export type PostList = {
++  items: Post[];
++  total: number;
++  page: number;
++  page_size: number;
++};
++
++export type PostInput = { title: string; content: string; tags: string[] };
++
++export class ApiError extends Error {
++  status: number;
++  fields: Record<string, string>;
++  constructor(status: number, message: string, fields: Record<string, string> = {}) {
++    super(message);
++    this.status = status;
++    this.fields = fields;
++  }
++}
++
++const TOKEN_KEY = "blog_token";
++
++export const getToken = () => localStorage.getItem(TOKEN_KEY);
++export const setToken = (t: string | null) => {
++  if (t) localStorage.setItem(TOKEN_KEY, t);
++  else localStorage.removeItem(TOKEN_KEY);
++};
++
++export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
++  const headers: Record<string, string> = {};
++  const token = getToken();
++  if (token) headers["Authorization"] = `Bearer ${token}`;
++  if (body !== undefined) headers["Content-Type"] = "application/json";
++  let res: Response;
++  try {
++    res = await fetch(`/api${path}`, {
++      method,
++      headers,
++      body: body === undefined ? undefined : JSON.stringify(body),
++    });
++  } catch {
++    throw new ApiError(0, "Network error");
++  }
++  if (res.status === 204) return undefined as T;
++  let data: any = null;
++  try {
++    data = await res.json();
++  } catch {
++    data = null;
++  }
++  if (!res.ok) {
++    throw new ApiError(res.status, data?.error || `Request failed (${res.status})`, data?.errors || {});
++  }
++  return data as T;
++}
++
++export const api = {
++  register: (username: string, password: string) =>
++    request<{ username: string }>("POST", "/auth/register", { username, password }),
++  login: (username: string, password: string) =>
++    request<{ token: string }>("POST", "/auth/login", { username, password }),
++  me: () => request<{ username: string; is_admin: boolean }>("GET", "/auth/me"),
++  listPosts: (params: Record<string, string | number | undefined>) => {
++    const qs = new URLSearchParams();
++    for (const [k, v] of Object.entries(params)) {
++      if (v !== undefined && v !== "") qs.set(k, String(v));
++    }
++    return request<PostList>("GET", `/posts?${qs}`);
++  },
++  getPost: (id: string | number) => request<Post>("GET", `/posts/${id}`),
++  createPost: (p: PostInput) => request<Post>("POST", "/posts", p),
++  updatePost: (id: number, p: PostInput) => request<Post>("PUT", `/posts/${id}`, p),
++  deletePost: (id: number) => request<void>("DELETE", `/posts/${id}`),
++  toggle: (id: number) => request<Post>("POST", `/admin/posts/${id}/toggle`),
++};
+diff --git a/frontend/src/auth.tsx b/frontend/src/auth.tsx
+new file mode 100644
+index 0000000..11d2a22
+--- /dev/null
++++ b/frontend/src/auth.tsx
+@@ -0,0 +1,40 @@
++import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
++import { api, getToken, setToken } from "./api";
++
++type User = { username: string; is_admin: boolean };
++type AuthState = {
++  user: User | null;
++  ready: boolean;
++  signIn: (username: string, password: string) => Promise<void>;
++  signOut: () => void;
++};
++
++const Ctx = createContext<AuthState>(null as unknown as AuthState);
++export const useAuth = () => useContext(Ctx);
++
++export function AuthProvider({ children }: { children: ReactNode }) {
++  const [user, setUser] = useState<User | null>(null);
++  const [ready, setReady] = useState(!getToken());
++
++  useEffect(() => {
++    if (!getToken()) return;
++    api
++      .me()
++      .then(setUser)
++      .catch(() => setToken(null))
++      .finally(() => setReady(true));
++  }, []);
++
++  const signIn = useCallback(async (username: string, password: string) => {
++    const { token } = await api.login(username, password);
++    setToken(token);
++    setUser(await api.me());
++  }, []);
++
++  const signOut = useCallback(() => {
++    setToken(null);
++    setUser(null);
++  }, []);
++
++  return <Ctx.Provider value={{ user, ready, signIn, signOut }}>{children}</Ctx.Provider>;
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..4e13cfc 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,13 @@
+ import { createRoot } from "react-dom/client";
++import { BrowserRouter } from "react-router-dom";
+ import App from "./App";
++import { AuthProvider } from "./auth";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <BrowserRouter>
++    <AuthProvider>
++      <App />
++    </AuthProvider>
++  </BrowserRouter>,
++);
+diff --git a/frontend/src/pages/AuthPage.tsx b/frontend/src/pages/AuthPage.tsx
+new file mode 100644
+index 0000000..29b536e
+--- /dev/null
++++ b/frontend/src/pages/AuthPage.tsx
+@@ -0,0 +1,81 @@
++import { useState, type FormEvent } from "react";
++import { Link, useNavigate } from "react-router-dom";
++import { ApiError, api } from "../api";
++import { useAuth } from "../auth";
++import { Button, ErrorBox, Field } from "../ui";
++
++export default function AuthPage({ mode }: { mode: "login" | "register" }) {
++  const { signIn } = useAuth();
++  const navigate = useNavigate();
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState("");
++  const [fields, setFields] = useState<Record<string, string>>({});
++  const [busy, setBusy] = useState(false);
++  const isLogin = mode === "login";
++
++  async function submit(e: FormEvent) {
++    e.preventDefault();
++    setBusy(true);
++    setError("");
++    setFields({});
++    try {
++      if (!isLogin) await api.register(username, password);
++      await signIn(username, password);
++      navigate("/");
++    } catch (err) {
++      if (err instanceof ApiError) {
++        setFields(err.fields);
++        setError(Object.keys(err.fields).length ? "" : err.message);
++      } else setError("Something went wrong");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <form onSubmit={submit} className="mx-auto max-w-sm space-y-4 rounded bg-white p-6 shadow-sm">
++      <h1 className="text-xl font-bold">{isLogin ? "Sign in" : "Create account"}</h1>
++      {error && <ErrorBox>{error}</ErrorBox>}
++      <Field
++        label="Username"
++        name="username"
++        autoComplete="username"
++        value={username}
++        onChange={(e) => setUsername(e.target.value)}
++        error={fields.username}
++        required
++      />
++      <Field
++        label="Password"
++        name="password"
++        type="password"
++        autoComplete={isLogin ? "current-password" : "new-password"}
++        value={password}
++        onChange={(e) => setPassword(e.target.value)}
++        error={fields.password}
++        required
++      />
++      <Button type="submit" disabled={busy} className="w-full">
++        {isLogin ? "Sign in" : "Register"}
++      </Button>
++      <p className="text-sm text-slate-600">
++        {isLogin ? (
++          <>
++            No account?{" "}
++            <Link to="/register" className="text-indigo-700 hover:underline">
++              Register
++            </Link>
++          </>
++        ) : (
++          <>
++            Already registered?{" "}
++            <Link to="/login" className="text-indigo-700 hover:underline">
++              Sign in
++            </Link>
++          </>
++        )}
++      </p>
++    </form>
++  );
++}
+diff --git a/frontend/src/pages/Editor.tsx b/frontend/src/pages/Editor.tsx
+new file mode 100644
+index 0000000..526e47b
+--- /dev/null
++++ b/frontend/src/pages/Editor.tsx
+@@ -0,0 +1,146 @@
++import { useEffect, useState, type FormEvent, type KeyboardEvent } from "react";
++import { Link, useNavigate, useParams } from "react-router-dom";
++import { ApiError, api } from "../api";
++import { useAuth } from "../auth";
++import { Button, ErrorBox, inputCls } from "../ui";
++
++export default function Editor() {
++  const { id } = useParams();
++  const { user } = useAuth();
++  const navigate = useNavigate();
++  const [title, setTitle] = useState("");
++  const [content, setContent] = useState("");
++  const [tags, setTags] = useState<string[]>([]);
++  const [tagInput, setTagInput] = useState("");
++  const [error, setError] = useState("");
++  const [fields, setFields] = useState<Record<string, string>>({});
++  const [loading, setLoading] = useState(!!id);
++  const [busy, setBusy] = useState(false);
++
++  useEffect(() => {
++    if (!id || !user) return;
++    api
++      .getPost(id)
++      .then((p) => {
++        if (p.author !== user.username) setError("You can only edit your own posts");
++        else {
++          setTitle(p.title);
++          setContent(p.content);
++          setTags(p.tags);
++        }
++      })
++      .catch((e) => setError(e instanceof ApiError ? e.message : "Failed to load post"))
++      .finally(() => setLoading(false));
++  }, [id, user]);
++
++  if (!user)
++    return (
++      <p>
++        Please <Link to="/login" className="text-indigo-700 hover:underline">sign in</Link> to write posts.
++      </p>
++    );
++
++  function addTags(raw: string) {
++    const parts = raw.split(",").map((t) => t.trim()).filter(Boolean);
++    if (!parts.length) return;
++    const next = [...tags];
++    for (const t of parts) if (!next.some((x) => x.toLowerCase() === t.toLowerCase())) next.push(t);
++    setTags(next);
++    setTagInput("");
++  }
++
++  function onTagKey(e: KeyboardEvent<HTMLInputElement>) {
++    if (e.key === "Enter" || e.key === ",") {
++      e.preventDefault();
++      addTags(tagInput);
++    } else if (e.key === "Backspace" && !tagInput && tags.length) {
++      setTags(tags.slice(0, -1));
++    }
++  }
++
++  async function submit(e: FormEvent) {
++    e.preventDefault();
++    setBusy(true);
++    setError("");
++    setFields({});
++    const finalTags = [...tags];
++    for (const t of tagInput.split(",").map((s) => s.trim()).filter(Boolean))
++      if (!finalTags.some((x) => x.toLowerCase() === t.toLowerCase())) finalTags.push(t);
++    try {
++      const body = { title, content, tags: finalTags };
++      const post = id ? await api.updatePost(Number(id), body) : await api.createPost(body);
++      navigate(`/posts/${post.id}`);
++    } catch (err) {
++      if (err instanceof ApiError) {
++        setFields(err.fields);
++        setError(Object.keys(err.fields).length ? "" : err.message);
++      } else setError("Something went wrong");
++      setBusy(false);
++    }
++  }
++
++  if (loading) return <p className="text-slate-500">Loading…</p>;
++
++  const fieldErr = (k: string) =>
++    fields[k] ? <span className="mt-1 block text-sm text-red-600">{fields[k]}</span> : null;
++
++  return (
++    <form onSubmit={submit} className="space-y-4 rounded bg-white p-6 shadow-sm">
++      <h1 className="text-xl font-bold">{id ? "Edit post" : "New post"}</h1>
++      {error && <ErrorBox>{error}</ErrorBox>}
++      <label className="block">
++        <span className="mb-1 block text-sm font-medium text-slate-700">Title</span>
++        <input className={inputCls} name="title" value={title} onChange={(e) => setTitle(e.target.value)} />
++        {fieldErr("title")}
++      </label>
++      <label className="block">
++        <span className="mb-1 block text-sm font-medium text-slate-700">Content</span>
++        <textarea
++          className={inputCls}
++          name="content"
++          rows={12}
++          value={content}
++          onChange={(e) => setContent(e.target.value)}
++        />
++        {fieldErr("content")}
++      </label>
++      <div>
++        <label htmlFor="tag-input" className="mb-1 block text-sm font-medium text-slate-700">
++          Tags
++        </label>
++        <div className="flex flex-wrap gap-1 rounded border border-slate-300 p-2">
++          {tags.map((t) => (
++            <span key={t} className="flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700">
++              {t}
++              <button
++                type="button"
++                aria-label={`Remove tag ${t}`}
++                onClick={() => setTags(tags.filter((x) => x !== t))}
++              >
++                ×
++              </button>
++            </span>
++          ))}
++          <input
++            id="tag-input"
++            className="min-w-32 flex-1 text-sm outline-none"
++            placeholder="Add a tag, press Enter"
++            value={tagInput}
++            onChange={(e) => setTagInput(e.target.value)}
++            onKeyDown={onTagKey}
++            onBlur={() => addTags(tagInput)}
++          />
++        </div>
++        {fieldErr("tags")}
++      </div>
++      <div className="flex gap-2">
++        <Button type="submit" disabled={busy}>
++          {id ? "Save changes" : "Publish"}
++        </Button>
++        <Button type="button" variant="secondary" onClick={() => navigate(-1)}>
++          Cancel
++        </Button>
++      </div>
++    </form>
++  );
++}
+diff --git a/frontend/src/pages/PostPage.tsx b/frontend/src/pages/PostPage.tsx
+new file mode 100644
+index 0000000..dee4b3a
+--- /dev/null
++++ b/frontend/src/pages/PostPage.tsx
+@@ -0,0 +1,108 @@
++import { useEffect, useState } from "react";
++import { Link, useNavigate, useParams } from "react-router-dom";
++import { ApiError, api, type Post } from "../api";
++import { useAuth } from "../auth";
++import { Button, ErrorBox, TagList, fmtDate } from "../ui";
++
++export default function PostPage() {
++  const { id } = useParams();
++  const { user } = useAuth();
++  const navigate = useNavigate();
++  const [post, setPost] = useState<Post | null>(null);
++  const [error, setError] = useState("");
++  const [confirming, setConfirming] = useState(false);
++
++  useEffect(() => {
++    let live = true;
++    setPost(null);
++    setError("");
++    api
++      .getPost(id!)
++      .then((p) => live && setPost(p))
++      .catch((e) => live && setError(e instanceof ApiError ? e.message : "Failed to load post"));
++    return () => {
++      live = false;
++    };
++  }, [id, user?.username]);
++
++  async function remove() {
++    try {
++      await api.deletePost(post!.id);
++      navigate("/");
++    } catch (e) {
++      setConfirming(false);
++      setError(e instanceof ApiError ? e.message : "Delete failed");
++    }
++  }
++
++  async function toggle() {
++    try {
++      setPost(await api.toggle(post!.id));
++    } catch (e) {
++      setError(e instanceof ApiError ? e.message : "Action failed");
++    }
++  }
++
++  if (error && !post) return <ErrorBox>{error}</ErrorBox>;
++  if (!post) return <p className="text-slate-500">Loading…</p>;
++
++  const paragraphs = post.content.split(/\n\s*\n/).filter((p) => p.trim());
++  const own = user?.username === post.author;
++
++  return (
++    <article className="space-y-4 rounded bg-white p-6 shadow-sm">
++      {error && <ErrorBox>{error}</ErrorBox>}
++      {post.taken_down && <ErrorBox>This post is taken down and hidden from everyone else.</ErrorBox>}
++      <header className="space-y-1">
++        <h1 className="break-words text-2xl font-bold">{post.title}</h1>
++        <p className="text-sm text-slate-500">
++          <Link to={`/?author=${encodeURIComponent(post.author)}`} className="font-medium hover:underline">
++            {post.author}
++          </Link>{" "}
++          · <time dateTime={post.created_at}>{fmtDate(post.created_at)}</time>
++          {post.updated_at !== post.created_at && <> · updated {fmtDate(post.updated_at)}</>}
++        </p>
++        <TagList tags={post.tags} />
++      </header>
++      <div className="space-y-3">
++        {paragraphs.map((p, i) => (
++          <p key={i} className="whitespace-pre-line break-words">
++            {p}
++          </p>
++        ))}
++      </div>
++      <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
++        {own && (
++          <>
++            <Link
++              to={`/posts/${post.id}/edit`}
++              className="rounded border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-50"
++            >
++              Edit
++            </Link>
++            {confirming ? (
++              <>
++                <span className="text-sm">Delete this post?</span>
++                <Button variant="danger" onClick={remove}>
++                  Confirm delete
++                </Button>
++                <Button variant="secondary" onClick={() => setConfirming(false)}>
++                  Cancel
++                </Button>
++              </>
++            ) : (
++              <Button variant="danger" onClick={() => setConfirming(true)}>
++                Delete
++              </Button>
++            )}
++          </>
++        )}
++        {user?.is_admin && (
++          <Button variant="danger" onClick={toggle}>
++            {post.taken_down ? "Restore" : "Take down"}
++          </Button>
++        )}
++      </div>
++    </article>
++  );
++}
+diff --git a/frontend/src/pages/PostsPage.tsx b/frontend/src/pages/PostsPage.tsx
+new file mode 100644
+index 0000000..ec9a3de
+--- /dev/null
++++ b/frontend/src/pages/PostsPage.tsx
+@@ -0,0 +1,149 @@
++import { useEffect, useState, type FormEvent } from "react";
++import { Link, useSearchParams } from "react-router-dom";
++import { ApiError, api, type PostList } from "../api";
++import { useAuth } from "../auth";
++import { Button, ErrorBox, TagList, fmtDate, inputCls } from "../ui";
++
++export default function PostsPage() {
++  const { user } = useAuth();
++  const [params, setParams] = useSearchParams();
++  const q = params.get("q") || "";
++  const tag = params.get("tag") || "";
++  const author = params.get("author") || "";
++  const down = params.get("taken_down") === "1" && !!user?.is_admin;
++  const page = Math.max(1, parseInt(params.get("page") || "1", 10) || 1);
++
++  const [data, setData] = useState<PostList | null>(null);
++  const [error, setError] = useState("");
++  const [form, setForm] = useState({ q, tag, author });
++  const [reload, setReload] = useState(0);
++
++  useEffect(() => setForm({ q, tag, author }), [q, tag, author]);
++
++  useEffect(() => {
++    let live = true;
++    setError("");
++    api
++      .listPosts({ q, tag, author, page, taken_down: down ? 1 : undefined })
++      .then((d) => live && setData(d))
++      .catch((e) => live && setError(e instanceof ApiError ? e.message : "Failed to load posts"));
++    return () => {
++      live = false;
++    };
++  }, [q, tag, author, page, down, reload, user?.username]);
++
++  function update(next: Record<string, string>) {
++    const p = new URLSearchParams(params);
++    for (const [k, v] of Object.entries(next)) {
++      if (v) p.set(k, v);
++      else p.delete(k);
++    }
++    setParams(p);
++  }
++
++  function search(e: FormEvent) {
++    e.preventDefault();
++    update({ q: form.q.trim(), tag: form.tag.trim(), author: form.author.trim(), page: "" });
++  }
++
++  async function toggle(id: number) {
++    try {
++      await api.toggle(id);
++      setReload((n) => n + 1);
++    } catch (e) {
++      setError(e instanceof ApiError ? e.message : "Action failed");
++    }
++  }
++
++  const pages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
++
++  return (
++    <div className="space-y-4">
++      <form onSubmit={search} className="grid gap-2 sm:grid-cols-[2fr_1fr_1fr_auto]">
++        <input
++          className={inputCls}
++          type="search"
++          placeholder="Search posts"
++          aria-label="Search"
++          value={form.q}
++          onChange={(e) => setForm({ ...form, q: e.target.value })}
++        />
++        <input
++          className={inputCls}
++          placeholder="Tag"
++          aria-label="Tag filter"
++          value={form.tag}
++          onChange={(e) => setForm({ ...form, tag: e.target.value })}
++        />
++        <input
++          className={inputCls}
++          placeholder="Author"
++          aria-label="Author filter"
++          value={form.author}
++          onChange={(e) => setForm({ ...form, author: e.target.value })}
++        />
++        <Button type="submit">Search</Button>
++      </form>
++
++      {user?.is_admin && (
++        <label className="flex items-center gap-2 text-sm text-slate-600">
++          <input
++            type="checkbox"
++            checked={down}
++            onChange={(e) => update({ taken_down: e.target.checked ? "1" : "", page: "" })}
++          />
++          Show taken-down posts
++        </label>
++      )}
++
++      {error && <ErrorBox>{error}</ErrorBox>}
++      {!data && !error && <p className="text-slate-500">Loading…</p>}
++      {data && data.items.length === 0 && <p className="text-slate-500">No posts found.</p>}
++
++      <ul className="space-y-3">
++        {data?.items.map((p) => (
++          <li key={p.id} className="rounded bg-white p-4 shadow-sm">
++            <h2 className="text-lg font-semibold">
++              <Link to={`/posts/${p.id}`} className="hover:text-indigo-700">
++                {p.title}
++              </Link>
++            </h2>
++            <p className="mb-2 text-xs text-slate-500">
++              <button
++                type="button"
++                className="font-medium hover:underline"
++                onClick={() => update({ author: p.author, page: "" })}
++              >
++                {p.author}
++              </button>{" "}
++              · <time dateTime={p.created_at}>{fmtDate(p.created_at)}</time>
++            </p>
++            <p className="mb-2 break-words text-sm text-slate-700">{p.excerpt}</p>
++            <div className="flex items-center justify-between gap-2">
++              <TagList tags={p.tags} />
++              {user?.is_admin && (
++                <Button variant="danger" className="ml-auto" onClick={() => toggle(p.id)}>
++                  {p.taken_down ? "Restore" : "Take down"}
++                </Button>
++              )}
++            </div>
++          </li>
++        ))}
++      </ul>
++
++      {data && pages > 1 && (
++        <div className="flex items-center justify-between">
++          <Button variant="secondary" disabled={page <= 1} onClick={() => update({ page: String(page - 1) })}>
++            Previous
++          </Button>
++          <span className="text-sm text-slate-600">
++            Page {data.page} of {pages}
++          </span>
++          <Button variant="secondary" disabled={page >= pages} onClick={() => update({ page: String(page + 1) })}>
++            Next
++          </Button>
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/src/ui.tsx b/frontend/src/ui.tsx
+new file mode 100644
+index 0000000..e547996
+--- /dev/null
++++ b/frontend/src/ui.tsx
+@@ -0,0 +1,65 @@
++import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
++import { Link } from "react-router-dom";
++
++export const inputCls =
++  "w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500";
++
++export function Button({
++  variant = "primary",
++  className = "",
++  ...rest
++}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "danger" }) {
++  const styles = {
++    primary: "bg-indigo-600 text-white hover:bg-indigo-700",
++    secondary: "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50",
++    danger: "bg-red-600 text-white hover:bg-red-700",
++  }[variant];
++  return (
++    <button
++      {...rest}
++      className={`rounded px-3 py-2 text-sm font-medium disabled:opacity-50 ${styles} ${className}`}
++    />
++  );
++}
++
++export function Field({
++  label,
++  error,
++  ...rest
++}: InputHTMLAttributes<HTMLInputElement> & { label: string; error?: string }) {
++  return (
++    <label className="block">
++      <span className="mb-1 block text-sm font-medium text-slate-700">{label}</span>
++      <input {...rest} className={inputCls} />
++      {error && <span className="mt-1 block text-sm text-red-600">{error}</span>}
++    </label>
++  );
++}
++
++export function ErrorBox({ children }: { children: ReactNode }) {
++  return (
++    <div role="alert" className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
++      {children}
++    </div>
++  );
++}
++
++export function TagList({ tags }: { tags: string[] }) {
++  if (!tags.length) return null;
++  return (
++    <ul className="flex flex-wrap gap-1">
++      {tags.map((t) => (
++        <li key={t}>
++          <Link
++            to={`/?tag=${encodeURIComponent(t)}`}
++            className="rounded-full bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700 hover:bg-indigo-100"
++          >
++            #{t}
++          </Link>
++        </li>
++      ))}
++    </ul>
++  );
++}
++
++export const fmtDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" });
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..9b8d21b
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,15 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "noEmit": true,
++    "skipLibCheck": true,
++    "isolatedModules": true,
++    "types": ["vite/client"]
++  },
++  "include": ["src"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

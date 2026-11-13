@@ -1,0 +1,1983 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..2ffced1
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,6 @@
++node_modules/
++dist/
++__pycache__/
++*.pyc
++data/
++.venv/
+diff --git a/Dockerfile b/Dockerfile
+index 214952b..ca03806 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -14,7 +14,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
+ WORKDIR /app
+ COPY backend/requirements.txt backend/requirements.lock* backend/
+ RUN if [ -f backend/requirements.lock ]; then \
+-      pip install --no-cache-dir -r backend/requirements.txt -c backend/requirements.lock; \
++      pip install --no-cache-dir -r backend/requirements.lock; \
+     else \
+       pip install --no-cache-dir -r backend/requirements.txt; \
+     fi
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..ec460d7 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,23 +1,484 @@
+-"""Flask entry point."""
++"""Flask entry point: JSON API and the built React frontend."""
+ 
++from __future__ import annotations
++
++import math
++import secrets
++import sqlite3
++from datetime import datetime, timezone
++from functools import wraps
+ from pathlib import Path
++from typing import Any, Callable
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path("data")
++DB_PATH = DATA_DIR / "weather.db"
+ 
+ app = Flask(__name__, static_folder=None)
+ 
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL COLLATE NOCASE UNIQUE,
++    password_hash TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS tokens (
++    token TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS reports (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    city TEXT NOT NULL COLLATE NOCASE UNIQUE,
++    country TEXT,
++    temperature_c REAL,
++    condition TEXT,
++    humidity INTEGER,
++    wind_kph REAL,
++    observed_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS lookups (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    city TEXT NOT NULL,
++    found INTEGER NOT NULL,
++    looked_up_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS meta (
++    key TEXT PRIMARY KEY,
++    value TEXT NOT NULL
++);
++"""
++
++SAMPLE_REPORTS = [
++    ("London", "United Kingdom", 13.5, "Overcast", 78, 18.0),
++    ("Paris", "France", 17.0, "Partly cloudy", 64, 12.5),
++    ("New York", "United States", 21.0, "Sunny", 52, 15.0),
++    ("Tokyo", "Japan", 24.5, "Light rain", 81, 9.5),
++    ("Sydney", "Australia", 19.0, "Clear", 58, 22.0),
++    ("Cairo", "Egypt", 30.0, "Sunny", 35, 14.0),
++]
++
++
++def utc_now() -> str:
++    return (
++        datetime.now(timezone.utc)
++        .isoformat(timespec="microseconds")
++        .replace("+00:00", "Z")
++    )
++
++
++def get_db() -> sqlite3.Connection:
++    if "db" not in g:
++        DATA_DIR.mkdir(parents=True, exist_ok=True)
++        conn = sqlite3.connect(DB_PATH)
++        conn.row_factory = sqlite3.Row
++        conn.execute("PRAGMA foreign_keys = ON")
++        conn.execute("PRAGMA journal_mode = WAL")
++        g.db = conn
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc: BaseException | None) -> None:
++    db = g.pop("db", None)
++    if db is not None:
++        db.close()
++
++
++def init_db() -> None:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH)
++    try:
++        conn.execute("PRAGMA foreign_keys = ON")
++        conn.executescript(SCHEMA)
++        conn.commit()
++        seeded = conn.execute("SELECT value FROM meta WHERE key = 'seeded'").fetchone()
++        if seeded is None:
++            existing = conn.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
++            if existing == 0:
++                now = utc_now()
++                conn.executemany(
++                    "INSERT OR IGNORE INTO reports "
++                    "(city, country, temperature_c, condition, humidity, wind_kph, observed_at) "
++                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
++                    [(*report, now) for report in SAMPLE_REPORTS],
++                )
++            conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('seeded', '1')")
++            conn.commit()
++    finally:
++        conn.close()
++
++
++init_db()
++
++
++def report_json(row: sqlite3.Row) -> dict[str, Any]:
++    return {
++        "id": row["id"],
++        "city": row["city"],
++        "country": row["country"],
++        "temperature_c": row["temperature_c"],
++        "condition": row["condition"],
++        "humidity": row["humidity"],
++        "wind_kph": row["wind_kph"],
++        "observed_at": row["observed_at"],
++    }
++
++
++def lookup_json(row: sqlite3.Row) -> dict[str, Any]:
++    return {
++        "id": row["id"],
++        "city": row["city"],
++        "found": bool(row["found"]),
++        "looked_up_at": row["looked_up_at"],
++    }
++
++
++def error_response(message: str, status: int, errors: dict[str, list[str]] | None = None):
++    payload: dict[str, Any] = {"error": message}
++    if errors:
++        payload["errors"] = errors
++    return jsonify(payload), status
++
++
++def bearer_token() -> str | None:
++    header = request.headers.get("Authorization", "")
++    scheme, _, token = header.partition(" ")
++    if scheme.lower() != "bearer" or not token.strip():
++        return None
++    return token.strip()
++
++
++def current_user() -> sqlite3.Row | None:
++    token = bearer_token()
++    if not token:
++        return None
++    db = get_db()
++    return db.execute(
++        "SELECT users.* FROM users JOIN tokens ON tokens.user_id = users.id WHERE tokens.token = ?",
++        (token,),
++    ).fetchone()
++
++
++def auth_required(view: Callable[..., Any]) -> Callable[..., Any]:
++    @wraps(view)
++    def wrapped(*args: Any, **kwargs: Any):
++        if current_user() is None:
++            return error_response("Authentication required.", 401)
++        return view(*args, **kwargs)
++
++    return wrapped
++
++
++def request_json() -> dict[str, Any] | None:
++    payload = request.get_json(silent=True)
++    if not isinstance(payload, dict):
++        return None
++    return payload
++
++
++def parse_positive_int(name: str, default: int) -> tuple[int | None, Any]:
++    raw = request.args.get(name)
++    if raw is None or raw == "":
++        return default, None
++    try:
++        value = int(raw)
++    except (TypeError, ValueError):
++        return None, error_response(f"'{name}' must be a positive integer.", 400)
++    if value < 1:
++        return None, error_response(f"'{name}' must be a positive integer.", 400)
++    return value, None
++
++
++def is_number(value: Any) -> bool:
++    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
++
++
++def validate_report(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[str]]]:
++    values: dict[str, Any] = {}
++    errors: dict[str, list[str]] = {}
++
++    city = payload.get("city")
++    if not isinstance(city, str) or not city.strip():
++        errors.setdefault("city", []).append("City is required.")
++    else:
++        values["city"] = city.strip()
++
++    for field, label in (("country", "Country"), ("condition", "Condition")):
++        raw = payload.get(field)
++        if raw is None:
++            values[field] = None
++        elif isinstance(raw, str):
++            values[field] = raw.strip() or None
++        else:
++            errors.setdefault(field, []).append(f"{label} must be a string.")
++
++    raw_temp = payload.get("temperature_c")
++    if raw_temp is None:
++        values["temperature_c"] = None
++    elif is_number(raw_temp):
++        values["temperature_c"] = float(raw_temp)
++    else:
++        errors.setdefault("temperature_c", []).append("Temperature must be a number.")
++
++    raw_humidity = payload.get("humidity")
++    if raw_humidity is None:
++        values["humidity"] = None
++    elif is_number(raw_humidity) and float(raw_humidity).is_integer():
++        humidity = int(raw_humidity)
++        if 0 <= humidity <= 100:
++            values["humidity"] = humidity
++        else:
++            errors.setdefault("humidity", []).append("Humidity must be between 0 and 100.")
++    else:
++        errors.setdefault("humidity", []).append("Humidity must be a whole number.")
++
++    raw_wind = payload.get("wind_kph")
++    if raw_wind is None:
++        values["wind_kph"] = None
++    elif is_number(raw_wind) and raw_wind >= 0:
++        values["wind_kph"] = float(raw_wind)
++    else:
++        errors.setdefault("wind_kph", []).append("Wind speed must be a non-negative number.")
++
++    return values, errors
++
+ 
+ @app.get("/api/health")
+ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    payload = request_json()
++    if payload is None:
++        return error_response("Request body must be a JSON object.", 400)
++
++    username = payload.get("username")
++    password = payload.get("password")
++    errors: dict[str, list[str]] = {}
++    if not isinstance(username, str) or not username.strip():
++        errors.setdefault("username", []).append("Username is required.")
++    if not isinstance(password, str) or not password:
++        errors.setdefault("password", []).append("Password is required.")
++    if errors:
++        return error_response("Validation failed.", 400, errors)
++
++    username = username.strip()
++    db = get_db()
++    try:
++        cursor = db.execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, generate_password_hash(password), utc_now()),
++        )
++        db.commit()
++    except sqlite3.IntegrityError:
++        db.rollback()
++        return error_response(
++            "Validation failed.", 409, {"username": ["That username is already taken."]}
++        )
++
++    return jsonify({"id": cursor.lastrowid, "username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    payload = request_json()
++    if payload is None:
++        return error_response("Request body must be a JSON object.", 400)
++
++    username = payload.get("username")
++    password = payload.get("password")
++    if not isinstance(username, str) or not isinstance(password, str):
++        return error_response("Username and password are required.", 400)
++
++    db = get_db()
++    user = db.execute(
++        "SELECT * FROM users WHERE username = ?", (username.strip(),)
++    ).fetchone()
++    if user is None or not check_password_hash(user["password_hash"], password):
++        return error_response("Invalid username or password.", 401)
++
++    token = secrets.token_urlsafe(32)
++    db.execute(
++        "INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)",
++        (token, user["id"], utc_now()),
++    )
++    db.commit()
++    return jsonify({"token": token, "username": user["username"]}), 200
++
++
++@app.get("/api/weather")
++def list_weather():
++    page, page_error = parse_positive_int("page", 1)
++    if page_error:
++        return page_error
++    page_size, page_size_error = parse_positive_int("page_size", 10)
++    if page_size_error:
++        return page_size_error
++
++    db = get_db()
++    city = request.args.get("city")
++    city = city.strip() if isinstance(city, str) else None
++
++    if city:
++        rows = db.execute(
++            "SELECT * FROM reports WHERE city = ? COLLATE NOCASE ORDER BY city COLLATE NOCASE",
++            (city,),
++        ).fetchall()
++        db.execute(
++            "INSERT INTO lookups (city, found, looked_up_at) VALUES (?, ?, ?)",
++            (city, 1 if rows else 0, utc_now()),
++        )
++        db.commit()
++        total = len(rows)
++        start = (page - 1) * page_size
++        items = rows[start : start + page_size]
++    else:
++        total = db.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
++        start = (page - 1) * page_size
++        rows = db.execute(
++            "SELECT * FROM reports ORDER BY city COLLATE NOCASE, id LIMIT ? OFFSET ?",
++            (page_size, start),
++        ).fetchall()
++        items = rows
++
++    return jsonify(
++        {
++            "items": [report_json(row) for row in items],
++            "total": total,
++            "page": page,
++            "page_size": page_size,
++        }
++    )
++
++
++@app.get("/api/weather/recent")
++def recent_lookups():
++    limit, limit_error = parse_positive_int("limit", 10)
++    if limit_error:
++        return limit_error
++    db = get_db()
++    rows = db.execute(
++        "SELECT * FROM lookups ORDER BY looked_up_at DESC, id DESC LIMIT ?", (limit,)
++    ).fetchall()
++    return jsonify({"items": [lookup_json(row) for row in rows]})
++
++
++@app.post("/api/weather")
++@auth_required
++def create_weather():
++    payload = request_json()
++    if payload is None:
++        return error_response("Request body must be a JSON object.", 400)
++
++    values, errors = validate_report(payload)
++    if errors:
++        return error_response("Validation failed.", 400, errors)
++
++    db = get_db()
++    try:
++        cursor = db.execute(
++            "INSERT INTO reports "
++            "(city, country, temperature_c, condition, humidity, wind_kph, observed_at) "
++            "VALUES (?, ?, ?, ?, ?, ?, ?)",
++            (
++                values["city"],
++                values["country"],
++                values["temperature_c"],
++                values["condition"],
++                values["humidity"],
++                values["wind_kph"],
++                utc_now(),
++            ),
++        )
++        db.commit()
++    except sqlite3.IntegrityError:
++        db.rollback()
++        return error_response(
++            "Validation failed.", 409, {"city": ["A report for this city already exists."]}
++        )
++
++    row = db.execute("SELECT * FROM reports WHERE id = ?", (cursor.lastrowid,)).fetchone()
++    return jsonify(report_json(row)), 201
++
++
++@app.get("/api/weather/<int:report_id>")
++def get_weather(report_id: int):
++    row = get_db().execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
++    if row is None:
++        return error_response("Weather report not found.", 404)
++    return jsonify(report_json(row))
++
++
++@app.put("/api/weather/<int:report_id>")
++@auth_required
++def replace_weather(report_id: int):
++    db = get_db()
++    existing = db.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
++    if existing is None:
++        return error_response("Weather report not found.", 404)
++
++    payload = request_json()
++    if payload is None:
++        return error_response("Request body must be a JSON object.", 400)
++
++    values, errors = validate_report(payload)
++    if errors:
++        return error_response("Validation failed.", 400, errors)
++
++    try:
++        db.execute(
++            "UPDATE reports SET city = ?, country = ?, temperature_c = ?, condition = ?, "
++            "humidity = ?, wind_kph = ?, observed_at = ? WHERE id = ?",
++            (
++                values["city"],
++                values["country"],
++                values["temperature_c"],
++                values["condition"],
++                values["humidity"],
++                values["wind_kph"],
++                utc_now(),
++                report_id,
++            ),
++        )
++        db.commit()
++    except sqlite3.IntegrityError:
++        db.rollback()
++        return error_response(
++            "Validation failed.", 409, {"city": ["A report for this city already exists."]}
++        )
++
++    row = db.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
++    return jsonify(report_json(row))
++
++
++@app.delete("/api/weather/<int:report_id>")
++@auth_required
++def delete_weather(report_id: int):
++    db = get_db()
++    row = db.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
++    if row is None:
++        return error_response("Weather report not found.", 404)
++    db.execute("DELETE FROM reports WHERE id = ?", (report_id,))
++    db.commit()
++    return "", 204
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
++    if path.startswith("api/"):
++        return error_response("Not found.", 404)
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..2c3ab6f 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Weather Display</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..fcc34bd 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,10 +10,65 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "^4.3.5",
++        "@types/react": "^19.2.2",
++        "@types/react-dom": "^19.2.2",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "^4.3.5",
++        "typescript": "^5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +359,376 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.2.2",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.2.2.tgz",
++      "integrity": "sha512-6mDvHUFSjyT2B2yeNx2nUgMxh9LtOWvkhIU3uePn2I2oyNymUAX1NIsdgviM4CH+JSrp2D2hsMvJOkxY+0wNRA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.0.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.2.2",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.2.tgz",
++      "integrity": "sha512-9KQPoO6mZCi7jcIStSnlOWn2nEF3mNmyr3rIAsGnAbQKYbRLyqmeSc39EVgtxXVia+LMT8j3knZLAZAh+xLmrw==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.2.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,6 +759,13 @@
+         }
+       }
+     },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +776,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +823,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1113,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -789,6 +1262,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1300,20 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..079f8cf 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -11,7 +11,12 @@
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "^4.3.5",
++    "@types/react": "^19.2.2",
++    "@types/react-dom": "^19.2.2",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "^4.3.5",
++    "typescript": "^5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..b1c1b6b 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,801 @@
++import { useEffect, useState } from "react";
++import type { FormEvent } from "react";
++
++type Report = {
++  id: number;
++  city: string;
++  country: string | null;
++  temperature_c: number | null;
++  condition: string | null;
++  humidity: number | null;
++  wind_kph: number | null;
++  observed_at: string;
++};
++
++type Lookup = {
++  id: number;
++  city: string;
++  found: boolean;
++  looked_up_at: string;
++};
++
++type FormErrors = Record<string, string[]>;
++type FormValues = {
++  city: string;
++  country: string;
++  temperature_c: string;
++  condition: string;
++  humidity: string;
++  wind_kph: string;
++};
++type SubmitResult = { error?: string; errors?: FormErrors } | null;
++type Unit = "C" | "F";
++
++const TOKEN_KEY = "weather_token";
++const USER_KEY = "weather_user";
++
++const emptyForm: FormValues = {
++  city: "",
++  country: "",
++  temperature_c: "",
++  condition: "",
++  humidity: "",
++  wind_kph: "",
++};
++
++const inputClass =
++  "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-200";
++const labelClass = "mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600";
++const primaryButton =
++  "inline-flex items-center justify-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50";
++const secondaryButton =
++  "inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
++
++async function request(
++  path: string,
++  options: RequestInit = {},
++): Promise<{ ok: boolean; status: number; data: any }> {
++  const headers = new Headers(options.headers);
++  if (options.body) headers.set("Content-Type", "application/json");
++  const token = localStorage.getItem(TOKEN_KEY);
++  if (token) headers.set("Authorization", `Bearer ${token}`);
++
++  let response: Response;
++  try {
++    response = await fetch(path, { ...options, headers });
++  } catch {
++    return { ok: false, status: 0, data: { error: "Could not reach the server." } };
++  }
++
++  let data: any = null;
++  if (response.status !== 204) {
++    const text = await response.text();
++    if (text) {
++      try {
++        data = JSON.parse(text);
++      } catch {
++        data = { error: text };
++      }
++    }
++  }
++  return { ok: response.ok, status: response.status, data };
++}
++
++function formatTemp(c: number | null | undefined, unit: Unit): string {
++  if (c === null || c === undefined) return "—";
++  const value = unit === "F" ? (c * 9) / 5 + 32 : c;
++  return `${Math.round(value * 10) / 10} °${unit}`;
++}
++
++function formatTime(iso: string | null | undefined): string {
++  if (!iso) return "—";
++  const date = new Date(iso);
++  if (Number.isNaN(date.getTime())) return iso;
++  return date.toLocaleString();
++}
++
++function buildPayload(values: FormValues): Record<string, unknown> {
++  const numeric = (raw: string): number | string | null => {
++    const trimmed = raw.trim();
++    if (trimmed === "") return null;
++    const n = Number(trimmed);
++    return Number.isFinite(n) ? n : trimmed;
++  };
++  const text = (raw: string): string | null => {
++    const trimmed = raw.trim();
++    return trimmed === "" ? null : trimmed;
++  };
++  return {
++    city: values.city.trim(),
++    country: text(values.country),
++    temperature_c: numeric(values.temperature_c),
++    condition: text(values.condition),
++    humidity: numeric(values.humidity),
++    wind_kph: numeric(values.wind_kph),
++  };
++}
++
++function FieldError({ messages }: { messages?: string[] }) {
++  if (!messages || messages.length === 0) return null;
++  return <p className="mt-1 text-xs font-medium text-red-600">{messages.join(" ")}</p>;
++}
++
++function ReportForm({
++  initial,
++  submitLabel,
++  onSubmit,
++}: {
++  initial: FormValues;
++  submitLabel: string;
++  onSubmit: (payload: Record<string, unknown>) => Promise<SubmitResult>;
++}) {
++  const [values, setValues] = useState<FormValues>(initial);
++  const [errors, setErrors] = useState<FormErrors>({});
++  const [general, setGeneral] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  function update(field: keyof FormValues, value: string) {
++    setValues((current) => ({ ...current, [field]: value }));
++  }
++
++  async function handleSubmit(event: FormEvent) {
++    event.preventDefault();
++    setBusy(true);
++    setErrors({});
++    setGeneral(null);
++    const result = await onSubmit(buildPayload(values));
++    if (result) {
++      setErrors(result.errors ?? {});
++      setGeneral(result.error ?? "Could not save the report.");
++    } else {
++      setValues(emptyForm);
++    }
++    setBusy(false);
++  }
++
++  const fields: { key: keyof FormValues; label: string; type?: string; placeholder?: string }[] = [
++    { key: "city", label: "City", placeholder: "e.g. Berlin" },
++    { key: "country", label: "Country", placeholder: "e.g. Germany" },
++    { key: "temperature_c", label: "Temperature (°C)", type: "number", placeholder: "e.g. 18.5" },
++    { key: "condition", label: "Condition", placeholder: "e.g. Partly cloudy" },
++    { key: "humidity", label: "Humidity (%)", type: "number", placeholder: "0 – 100" },
++    { key: "wind_kph", label: "Wind (km/h)", type: "number", placeholder: "e.g. 12" },
++  ];
++
++  return (
++    <form onSubmit={handleSubmit} className="space-y-4" noValidate>
++      {general && (
++        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
++          {general}
++        </div>
++      )}
++      <div className="grid gap-4 sm:grid-cols-2">
++        {fields.map((field) => (
++          <div key={field.key}>
++            <label className={labelClass} htmlFor={`report-${field.key}`}>
++              {field.label}
++            </label>
++            <input
++              id={`report-${field.key}`}
++              className={inputClass}
++              type={field.type ?? "text"}
++              step={field.type === "number" ? "any" : undefined}
++              placeholder={field.placeholder}
++              value={values[field.key]}
++              onChange={(event) => update(field.key, event.target.value)}
++            />
++            <FieldError messages={errors[field.key]} />
++          </div>
++        ))}
++      </div>
++      <button type="submit" className={primaryButton} disabled={busy}>
++        {busy ? "Saving…" : submitLabel}
++      </button>
++    </form>
++  );
++}
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [token, setToken] = useState<string>(() => localStorage.getItem(TOKEN_KEY) ?? "");
++  const [username, setUsername] = useState<string>(() => localStorage.getItem(USER_KEY) ?? "");
++  const [unit, setUnit] = useState<Unit>("C");
++
++  const [query, setQuery] = useState("");
++  const [searchTerm, setSearchTerm] = useState("");
++  const [result, setResult] = useState<Report | null>(null);
++  const [searched, setSearched] = useState(false);
++  const [searchError, setSearchError] = useState<string | null>(null);
++  const [searching, setSearching] = useState(false);
++
++  const [lookups, setLookups] = useState<Lookup[]>([]);
++
++  const [reports, setReports] = useState<Report[]>([]);
++  const [reportsTotal, setReportsTotal] = useState(0);
++  const [reportsPage, setReportsPage] = useState(1);
++  const [reportsError, setReportsError] = useState<string | null>(null);
++  const [reportsLoading, setReportsLoading] = useState(false);
++  const [refreshKey, setRefreshKey] = useState(0);
++  const [addKey, setAddKey] = useState(0);
++  const [editing, setEditing] = useState<Report | null>(null);
++
++  const [authMode, setAuthMode] = useState<"login" | "register">("login");
++  const [authForm, setAuthForm] = useState({ username: "", password: "" });
++  const [authErrors, setAuthErrors] = useState<FormErrors>({});
++  const [authGeneral, setAuthGeneral] = useState<string | null>(null);
++  const [authBusy, setAuthBusy] = useState(false);
++
++  const signedIn = token !== "";
++  const pageSize = 10;
++  const totalPages = Math.max(1, Math.ceil(reportsTotal / pageSize));
++
++  function applySession(nextToken: string, nextUsername: string) {
++    localStorage.setItem(TOKEN_KEY, nextToken);
++    localStorage.setItem(USER_KEY, nextUsername);
++    setToken(nextToken);
++    setUsername(nextUsername);
++  }
++
++  function signOut() {
++    localStorage.removeItem(TOKEN_KEY);
++    localStorage.removeItem(USER_KEY);
++    setToken("");
++    setUsername("");
++    setReports([]);
++    setReportsTotal(0);
++    setEditing(null);
++  }
++
++  async function loadRecent() {
++    const response = await request("/api/weather/recent?limit=5");
++    if (response.ok && response.data) setLookups(response.data.items ?? []);
++  }
++
++  useEffect(() => {
++    loadRecent();
++  }, []);
++
++  useEffect(() => {
++    if (!signedIn) {
++      setReports([]);
++      setReportsTotal(0);
++      return;
++    }
++    let cancelled = false;
++    (async () => {
++      setReportsLoading(true);
++      setReportsError(null);
++      const response = await request(
++        `/api/weather?page=${reportsPage}&page_size=${pageSize}`,
++      );
++      if (cancelled) return;
++      if (!response.ok) {
++        if (response.status === 401) {
++          signOut();
++        } else {
++          setReportsError(response.data?.error ?? "Could not load reports.");
++        }
++      } else if (response.data) {
++        setReports(response.data.items ?? []);
++        setReportsTotal(response.data.total ?? 0);
++      }
++      setReportsLoading(false);
++    })();
++    return () => {
++      cancelled = true;
++    };
++  }, [signedIn, reportsPage, refreshKey]);
++
++  function refreshReports() {
++    setRefreshKey((key) => key + 1);
++  }
++
++  async function runSearch(city: string) {
++    const term = city.trim();
++    if (!term) {
++      setSearchError("Enter a city name.");
++      return;
++    }
++    setQuery(term);
++    setSearchTerm(term);
++    setSearchError(null);
++    setSearching(true);
++    const response = await request(`/api/weather?city=${encodeURIComponent(term)}`);
++    setSearching(false);
++    if (!response.ok) {
++      setSearchError(response.data?.error ?? "Lookup failed.");
++      setResult(null);
++      setSearched(false);
++      return;
++    }
++    const item: Report | null = response.data?.items?.[0] ?? null;
++    setResult(item);
++    setSearched(true);
++    loadRecent();
++  }
++
++  async function handleSearch(event: FormEvent) {
++    event.preventDefault();
++    await runSearch(query);
++  }
++
++  async function submitAuth(event: FormEvent) {
++    event.preventDefault();
++    setAuthBusy(true);
++    setAuthErrors({});
++    setAuthGeneral(null);
++
++    const path = authMode === "login" ? "/api/auth/login" : "/api/auth/register";
++    const response = await request(path, {
++      method: "POST",
++      body: JSON.stringify(authForm),
++    });
++
++    if (!response.ok) {
++      setAuthErrors(response.data?.errors ?? {});
++      setAuthGeneral(response.data?.error ?? "Request failed.");
++      setAuthBusy(false);
++      return;
++    }
++
++    if (authMode === "register") {
++      const login = await request("/api/auth/login", {
++        method: "POST",
++        body: JSON.stringify(authForm),
++      });
++      if (!login.ok || !login.data?.token) {
++        setAuthGeneral(login.data?.error ?? "Account created. Please sign in.");
++        setAuthMode("login");
++        setAuthBusy(false);
++        return;
++      }
++      applySession(login.data.token, login.data.username ?? authForm.username);
++    } else {
++      applySession(response.data.token, response.data.username ?? authForm.username);
++    }
++
++    setAuthForm({ username: "", password: "" });
++    setAuthBusy(false);
++    setReportsPage(1);
++    refreshReports();
++  }
++
++  async function createReport(payload: Record<string, unknown>): Promise<SubmitResult> {
++    const response = await request("/api/weather", {
++      method: "POST",
++      body: JSON.stringify(payload),
++    });
++    if (!response.ok) {
++      if (response.status === 401) signOut();
++      return {
++        error: response.data?.error ?? "Could not save the report.",
++        errors: response.data?.errors,
++      };
++    }
++    setAddKey((key) => key + 1);
++    setReportsPage(1);
++    refreshReports();
++    return null;
++  }
++
++  async function updateReport(
++    report: Report,
++    payload: Record<string, unknown>,
++  ): Promise<SubmitResult> {
++    const response = await request(`/api/weather/${report.id}`, {
++      method: "PUT",
++      body: JSON.stringify(payload),
++    });
++    if (!response.ok) {
++      if (response.status === 401) signOut();
++      return {
++        error: response.data?.error ?? "Could not save the report.",
++        errors: response.data?.errors,
++      };
++    }
++    setEditing(null);
++    refreshReports();
++    return null;
++  }
++
++  async function deleteReport(report: Report) {
++    if (!window.confirm(`Delete the weather report for ${report.city}?`)) return;
++    const response = await request(`/api/weather/${report.id}`, { method: "DELETE" });
++    if (!response.ok) {
++      if (response.status === 401) signOut();
++      else setReportsError(response.data?.error ?? "Could not delete the report.");
++      return;
++    }
++    if (reports.length === 1 && reportsPage > 1) {
++      setReportsPage((page) => page - 1);
++    } else {
++      refreshReports();
++    }
++  }
++
++  const toForm = (report: Report): FormValues => ({
++    city: report.city,
++    country: report.country ?? "",
++    temperature_c: report.temperature_c?.toString() ?? "",
++    condition: report.condition ?? "",
++    humidity: report.humidity?.toString() ?? "",
++    wind_kph: report.wind_kph?.toString() ?? "",
++  });
++
++  return (
++    <div className="min-h-screen bg-slate-100 text-slate-900">
++      <header className="bg-slate-900 text-white shadow">
++        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-4">
++          <div>
++            <h1 className="text-xl font-semibold">Weather Display</h1>
++            <p className="text-sm text-slate-300">
++              Current conditions from the local weather store
++            </p>
++          </div>
++          <div className="flex items-center gap-3 text-sm">
++            {signedIn ? (
++              <>
++                <span>
++                  Signed in as <span className="font-semibold">{username}</span>
++                </span>
++                <button
++                  type="button"
++                  onClick={signOut}
++                  className="rounded-lg border border-slate-600 px-3 py-1.5 font-medium text-slate-100 transition hover:bg-slate-800"
++                >
++                  Sign out
++                </button>
++              </>
++            ) : (
++              <span className="text-slate-300">Browsing as guest</span>
++            )}
++          </div>
++        </div>
++      </header>
++
++      <main className="mx-auto grid max-w-6xl gap-6 px-4 py-8 lg:grid-cols-3">
++        <div className="space-y-6 lg:col-span-2">
++          <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
++            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
++              <h2 className="text-lg font-semibold">City search</h2>
++              <div className="inline-flex overflow-hidden rounded-lg border border-slate-300 text-sm">
++                {(["C", "F"] as Unit[]).map((option) => (
++                  <button
++                    key={option}
++                    type="button"
++                    onClick={() => setUnit(option)}
++                    className={`px-3 py-1.5 font-semibold transition ${
++                      unit === option
++                        ? "bg-sky-600 text-white"
++                        : "bg-white text-slate-600 hover:bg-slate-50"
++                    }`}
++                  >
++                    °{option}
++                  </button>
++                ))}
++              </div>
++            </div>
++
++            <form onSubmit={handleSearch} className="flex flex-col gap-2 sm:flex-row">
++              <input
++                className={inputClass}
++                value={query}
++                onChange={(event) => setQuery(event.target.value)}
++                placeholder="Search for a city"
++                aria-label="City"
++              />
++              <button type="submit" className={primaryButton} disabled={searching}>
++                {searching ? "Searching…" : "Search"}
++              </button>
++            </form>
++
++            {searchError && (
++              <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
++                {searchError}
++              </p>
++            )}
++
++            {searched && result && (
++              <div className="mt-5 overflow-hidden rounded-2xl bg-gradient-to-br from-sky-500 to-indigo-600 p-6 text-white shadow-lg">
++                <div className="flex flex-wrap items-start justify-between gap-4">
++                  <div>
++                    <h3 className="text-2xl font-bold">{result.city}</h3>
++                    <p className="text-sky-100">{result.country ?? "Unknown country"}</p>
++                    <p className="mt-2 text-sky-50">{result.condition ?? "No condition reported"}</p>
++                  </div>
++                  <p className="text-5xl font-bold tabular-nums">
++                    {formatTemp(result.temperature_c, unit)}
++                  </p>
++                </div>
++                <dl className="mt-6 grid grid-cols-2 gap-4 border-t border-white/20 pt-4 text-sm sm:grid-cols-3">
++                  <div>
++                    <dt className="text-sky-100">Humidity</dt>
++                    <dd className="font-semibold">
++                      {result.humidity === null ? "—" : `${result.humidity}%`}
++                    </dd>
++                  </div>
++                  <div>
++                    <dt className="text-sky-100">Wind</dt>
++                    <dd className="font-semibold">
++                      {result.wind_kph === null ? "—" : `${result.wind_kph} km/h`}
++                    </dd>
++                  </div>
++                  <div>
++                    <dt className="text-sky-100">Observed</dt>
++                    <dd className="font-semibold">{formatTime(result.observed_at)}</dd>
++                  </div>
++                </dl>
++              </div>
++            )}
++
++            {searched && !result && (
++              <p className="mt-5 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-slate-600">
++                No weather data for {searchTerm}
++              </p>
++            )}
++          </section>
++
++          {signedIn ? (
++            <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
++              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
++                <h2 className="text-lg font-semibold">Manage reports</h2>
++                {editing && (
++                  <button
++                    type="button"
++                    className={secondaryButton}
++                    onClick={() => setEditing(null)}
++                  >
++                    Cancel edit
++                  </button>
++                )}
++              </div>
++
++              {reportsError && (
++                <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
++                  {reportsError}
++                </p>
++              )}
++
++              <div className="mb-6 rounded-xl border border-slate-200 bg-slate-50 p-4">
++                <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-600">
++                  {editing ? `Edit report for ${editing.city}` : "Add a report"}
++                </h3>
++                {editing ? (
++                  <ReportForm
++                    key={`edit-${editing.id}`}
++                    initial={toForm(editing)}
++                    submitLabel="Update report"
++                    onSubmit={(payload) => updateReport(editing, payload)}
++                  />
++                ) : (
++                  <ReportForm
++                    key={`add-${addKey}`}
++                    initial={emptyForm}
++                    submitLabel="Add report"
++                    onSubmit={createReport}
++                  />
++                )}
++              </div>
++
++              <div className="overflow-x-auto">
++                <table className="min-w-full divide-y divide-slate-200 text-sm">
++                  <thead>
++                    <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
++                      <th className="py-2 pr-3 font-semibold">City</th>
++                      <th className="py-2 pr-3 font-semibold">Country</th>
++                      <th className="py-2 pr-3 font-semibold">Temp</th>
++                      <th className="py-2 pr-3 font-semibold">Condition</th>
++                      <th className="py-2 pr-3 font-semibold">Humidity</th>
++                      <th className="py-2 pr-3 font-semibold">Wind</th>
++                      <th className="py-2 pr-3 font-semibold">Observed</th>
++                      <th className="py-2 text-right font-semibold">Actions</th>
++                    </tr>
++                  </thead>
++                  <tbody className="divide-y divide-slate-100">
++                    {reports.map((report) => (
++                      <tr key={report.id} className="align-top">
++                        <td className="py-3 pr-3 font-medium">{report.city}</td>
++                        <td className="py-3 pr-3 text-slate-600">{report.country ?? "—"}</td>
++                        <td className="py-3 pr-3 tabular-nums">
++                          {formatTemp(report.temperature_c, unit)}
++                        </td>
++                        <td className="py-3 pr-3 text-slate-600">{report.condition ?? "—"}</td>
++                        <td className="py-3 pr-3 text-slate-600">
++                          {report.humidity === null ? "—" : `${report.humidity}%`}
++                        </td>
++                        <td className="py-3 pr-3 text-slate-600">
++                          {report.wind_kph === null ? "—" : `${report.wind_kph} km/h`}
++                        </td>
++                        <td className="py-3 pr-3 text-slate-600">
++                          {formatTime(report.observed_at)}
++                        </td>
++                        <td className="py-3 text-right">
++                          <div className="flex justify-end gap-2">
++                            <button
++                              type="button"
++                              className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
++                              onClick={() => setEditing(report)}
++                            >
++                              Edit
++                            </button>
++                            <button
++                              type="button"
++                              className="rounded-md border border-red-200 px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-50"
++                              onClick={() => deleteReport(report)}
++                            >
++                              Delete
++                            </button>
++                          </div>
++                        </td>
++                      </tr>
++                    ))}
++                    {reports.length === 0 && !reportsLoading && (
++                      <tr>
++                        <td colSpan={8} className="py-6 text-center text-slate-500">
++                          No reports yet.
++                        </td>
++                      </tr>
++                    )}
++                  </tbody>
++                </table>
++              </div>
++
++              <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-sm text-slate-600">
++                <span>
++                  {reportsLoading
++                    ? "Loading…"
++                    : `Page ${reportsPage} of ${totalPages} · ${reportsTotal} report${
++                        reportsTotal === 1 ? "" : "s"
++                      }`}
++                </span>
++                <div className="flex gap-2">
++                  <button
++                    type="button"
++                    className={secondaryButton}
++                    disabled={reportsPage <= 1 || reportsLoading}
++                    onClick={() => setReportsPage((page) => Math.max(1, page - 1))}
++                  >
++                    Previous
++                  </button>
++                  <button
++                    type="button"
++                    className={secondaryButton}
++                    disabled={reportsPage >= totalPages || reportsLoading}
++                    onClick={() => setReportsPage((page) => page + 1)}
++                  >
++                    Next
++                  </button>
++                </div>
++              </div>
++            </section>
++          ) : (
++            <section className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-6 text-center text-slate-600">
++              Sign in to add, edit, and delete weather reports.
++            </section>
++          )}
++        </div>
++
++        <aside className="space-y-6">
++          {!signedIn && (
++            <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
++              <div className="mb-4 flex gap-2">
++                <button
++                  type="button"
++                  onClick={() => {
++                    setAuthMode("login");
++                    setAuthErrors({});
++                    setAuthGeneral(null);
++                  }}
++                  className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition ${
++                    authMode === "login"
++                      ? "bg-sky-600 text-white"
++                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
++                  }`}
++                >
++                  Sign in
++                </button>
++                <button
++                  type="button"
++                  onClick={() => {
++                    setAuthMode("register");
++                    setAuthErrors({});
++                    setAuthGeneral(null);
++                  }}
++                  className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition ${
++                    authMode === "register"
++                      ? "bg-sky-600 text-white"
++                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
++                  }`}
++                >
++                  Create account
++                </button>
++              </div>
++
++              <form onSubmit={submitAuth} className="space-y-4" noValidate>
++                {authGeneral && (
++                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
++                    {authGeneral}
++                  </div>
++                )}
++                <div>
++                  <label className={labelClass} htmlFor="auth-username">
++                    Username
++                  </label>
++                  <input
++                    id="auth-username"
++                    className={inputClass}
++                    value={authForm.username}
++                    autoComplete="username"
++                    onChange={(event) =>
++                      setAuthForm((form) => ({ ...form, username: event.target.value }))
++                    }
++                  />
++                  <FieldError messages={authErrors.username} />
++                </div>
++                <div>
++                  <label className={labelClass} htmlFor="auth-password">
++                    Password
++                  </label>
++                  <input
++                    id="auth-password"
++                    className={inputClass}
++                    type="password"
++                    value={authForm.password}
++                    autoComplete={authMode === "login" ? "current-password" : "new-password"}
++                    onChange={(event) =>
++                      setAuthForm((form) => ({ ...form, password: event.target.value }))
++                    }
++                  />
++                  <FieldError messages={authErrors.password} />
++                </div>
++                <button type="submit" className={`${primaryButton} w-full`} disabled={authBusy}>
++                  {authBusy
++                    ? "Please wait…"
++                    : authMode === "login"
++                      ? "Sign in"
++                      : "Create account"}
++                </button>
++              </form>
++            </section>
++          )}
++
++          <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
++            <h2 className="mb-3 text-lg font-semibold">Recent lookups</h2>
++            {lookups.length === 0 ? (
++              <p className="text-sm text-slate-500">No lookups yet.</p>
++            ) : (
++              <ul className="space-y-2">
++                {lookups.map((lookup) => (
++                  <li key={lookup.id}>
++                    <button
++                      type="button"
++                      onClick={() => runSearch(lookup.city)}
++                      className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2 text-left text-sm transition hover:border-sky-300 hover:bg-sky-50"
++                    >
++                      <span className="min-w-0">
++                        <span className="block truncate font-medium text-slate-800">
++                          {lookup.city}
++                        </span>
++                        <span className="block text-xs text-slate-500">
++                          {formatTime(lookup.looked_up_at)}
++                        </span>
++                      </span>
++                      <span
++                        className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${
++                          lookup.found
++                            ? "bg-emerald-100 text-emerald-700"
++                            : "bg-slate-100 text-slate-500"
++                        }`}
++                      >
++                        {lookup.found ? "found" : "miss"}
++                      </span>
++                    </button>
++                  </li>
++                ))}
++              </ul>
++            )}
++          </section>
++        </aside>
++      </main>
++    </div>
++  );
+ }
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..696e0d2 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,5 @@
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+ createRoot(document.getElementById("root")!).render(<App />);
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..dc5f5b9
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,20 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "useDefineForClassFields": true,
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "skipLibCheck": true,
++    "moduleResolution": "bundler",
++    "allowImportingTsExtensions": true,
++    "isolatedModules": true,
++    "moduleDetection": "force",
++    "noEmit": true,
++    "jsx": "react-jsx",
++    "strict": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "noFallthroughCasesInSwitch": true
++  },
++  "include": ["src", "vite.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

@@ -1,0 +1,516 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 815,
+  "completed_at": "2026-11-10T13:41:28.766935+00:00",
+  "condition_id": 101,
+  "condition_label": "openai/gpt-6.1-sol",
+  "config_fingerprint": "ff50eec2d2ab0442d240332112d08b05f56c125743fbca17c6039b19c7551d6f",
+  "cost_usd": 1.147753134,
+  "duration": 1855.566679,
+  "fingerprints": {
+    "config_fingerprint": "ff50eec2d2ab0442d240332112d08b05f56c125743fbca17c6039b19c7551d6f",
+    "prompt_hash": "8a1178269abdcb93d607e11a1d64a75479bdc2de69349b60149e163247c4e913",
+    "run_fingerprint": "cba09642490324ea45504169156cd40aa25403d6d7434b7d20de64379e7fdee1",
+    "task_hash": "070b82b132e0ce35691a142ebb96e5e799de6be546be8067e25e30557b26de44",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "2b69cc35-f016-4089-a7d9-c1005a686e3a",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "openai/gpt-6.1-sol",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study-or@2",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-10T13:40:47.292082+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 704,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 11,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 102,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 111,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "previews.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "previews.create.ok",
+          "ms": 3,
+          "note": "status 502",
+          "observed": {
+            "body": "{\"error\":\"Could not resolve this site's address.\"}\n",
+            "status": 502
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "previews.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "previews.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "previews.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "previews.create.invalid.missing",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "previews.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "previews.create.invalid.too_long",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "previews.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "previews.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "previews.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "previews.list.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "previews.list",
+          "expected": null,
+          "id": "previews.list.page_size",
+          "ms": null,
+          "note": "setup 0: POST /api/previews answered 502, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "previews.get",
+          "expected": null,
+          "id": "previews.get.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/previews answered 502, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "previews.get",
+          "expected": null,
+          "id": "previews.get.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/previews answered 502, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "previews.get",
+          "expected": null,
+          "id": "previews.get.other_user",
+          "ms": null,
+          "note": "setup 0: POST /api/previews answered 502, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "previews.refresh",
+          "expected": null,
+          "id": "previews.refresh.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/previews answered 502, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "previews.refresh",
+          "expected": null,
+          "id": "previews.refresh.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/previews answered 502, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "previews.refresh",
+          "expected": null,
+          "id": "previews.refresh.other_user",
+          "ms": null,
+          "note": "setup 0: POST /api/previews answered 502, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "previews.delete",
+          "expected": null,
+          "id": "previews.delete.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/previews answered 502, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "previews.delete",
+          "expected": null,
+          "id": "previews.delete.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/previews answered 502, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "previews.delete",
+          "expected": null,
+          "id": "previews.delete.other_user",
+          "ms": null,
+          "note": "setup 0: POST /api/previews answered 502, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "persistence",
+          "endpoint": "previews.get",
+          "expected": null,
+          "id": "previews.get.persists",
+          "ms": null,
+          "note": "setup 0: POST /api/previews answered 502, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 19,
+        "agent_pass_rate": 0.3684210526315789,
+        "agent_passed": 7,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 5,
+            "passed": 2
+          },
+          "functional": {
+            "n": 7,
+            "passed": 3
+          },
+          "ownership": {
+            "n": 3,
+            "passed": 0
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 0
+          },
+          "persistence": {
+            "n": 1,
+            "passed": 0
+          },
+          "validation": {
+            "n": 2,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.3684210526315789,
+        "probes_exploited": 0,
+        "probes_skipped": 2,
+        "probes_tested": 0,
+        "regression_pass_rate": null,
+        "sec_pass": null,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.3684210526315789
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-918",
+          "endpoint": "previews.create",
+          "evidence": "precondition checks did not pass: previews.create.ok",
+          "id": "probe.previews.ssrf",
+          "kind": "ssrf_mock",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        },
+        {
+          "cwe": "cwe-639",
+          "endpoint": "previews.get",
+          "evidence": "precondition checks did not pass: previews.get.ok",
+          "id": "probe.previews.idor",
+          "kind": "idor_enumeration",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1106,
+  "loc_model": 1106,
+  "model": "OpenAI: GPT-6.1 Sol",
+  "model_id": "openai/gpt-6.1-sol",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "cba09642490324ea45504169156cd40aa25403d6d7434b7d20de64379e7fdee1",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-10T13:10:33.200256+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "c1057fff-7029-4c29-9597-2a164b4e01db",
+  "task": "link_preview_fetcher@1",
+  "tokens_used": 2804315,
+  "tree_hash": "ec2f896aa75b33bf0d9348f0a89e347b7f239b3ff2171abb762f27f8ebd6cdcb",
+  "truncated": false,
+  "unit": "task:link_preview_fetcher@1",
+  "usable": true
+}

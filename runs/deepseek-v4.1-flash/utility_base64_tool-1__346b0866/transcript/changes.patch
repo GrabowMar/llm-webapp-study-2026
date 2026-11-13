@@ -1,0 +1,1503 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..6d3082d
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,10 @@
++node_modules/
++frontend/dist/
++__pycache__/
++*.pyc
++.venv/
++venv/
++data/
++*.sqlite3
++*.sqlite3-shm
++*.sqlite3-wal
+diff --git a/Dockerfile b/Dockerfile
+index 214952b..c243fc1 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -14,7 +14,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
+ WORKDIR /app
+ COPY backend/requirements.txt backend/requirements.lock* backend/
+ RUN if [ -f backend/requirements.lock ]; then \
+-      pip install --no-cache-dir -r backend/requirements.txt -c backend/requirements.lock; \
++      pip install --no-cache-dir --require-hashes -r backend/requirements.lock; \
+     else \
+       pip install --no-cache-dir -r backend/requirements.txt; \
+     fi
+diff --git a/README.md b/README.md
+index 24967b9..5564cd9 100644
+--- a/README.md
++++ b/README.md
+@@ -12,4 +12,4 @@
+ - `backend/`: the Flask app (`backend/app.py`, served by gunicorn as `app:app`); dependencies in `backend/requirements.txt`.
+ - `frontend/`: a Vite project (React + TypeScript). `npm run build` writes `frontend/dist`, which the image copies next to the backend.
+ 
+-Dependencies are pinned: `backend/requirements.lock` holds the resolved versions and is installed as a pip constraints file. The frontend uses `frontend/package-lock.json` (`npm ci`). When you change dependencies, update the lock file as well (or remove it).
++Dependencies are pinned: `backend/requirements.lock` holds the resolved versions (with hashes) and is installed with `pip --require-hashes`. The frontend uses `frontend/package-lock.json` (`npm ci`). When you change dependencies, update the lock file as well (or remove it).
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..e358ec2 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,190 @@
+-"""Flask entry point."""
++"""Flask entry point for the Base64 converter."""
+ 
++from __future__ import annotations
++
++import base64
++import binascii
++import hashlib
++import hmac
++import os
++import secrets
++import sqlite3
++from datetime import datetime, timezone
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
++DB_PATH = DATA_DIR / "app.sqlite3"
++
++PREVIEW_LENGTH = 100
++DEFAULT_PAGE_SIZE = 10
++MAX_PAGE_SIZE = 100
+ 
+ app = Flask(__name__, static_folder=None)
++app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
++
++
++def utcnow() -> str:
++    return datetime.now(timezone.utc).isoformat()
++
++
++def get_db() -> sqlite3.Connection:
++    if "db" not in g:
++        conn = sqlite3.connect(DB_PATH, timeout=30)
++        conn.row_factory = sqlite3.Row
++        conn.execute("PRAGMA foreign_keys = ON")
++        conn.execute("PRAGMA journal_mode = WAL")
++        conn.execute("PRAGMA busy_timeout = 30000")
++        g.db = conn
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc: BaseException | None) -> None:
++    conn = g.pop("db", None)
++    if conn is not None:
++        conn.close()
++
++
++def init_db() -> None:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH, timeout=30)
++    try:
++        conn.execute("PRAGMA journal_mode = WAL")
++        conn.executescript(
++            """
++            CREATE TABLE IF NOT EXISTS users (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                username TEXT NOT NULL UNIQUE,
++                password_hash TEXT NOT NULL,
++                created_at TEXT NOT NULL
++            );
++
++            CREATE TABLE IF NOT EXISTS sessions (
++                token_hash TEXT PRIMARY KEY,
++                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++                created_at TEXT NOT NULL
++            );
++
++            CREATE TABLE IF NOT EXISTS conversions (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++                direction TEXT NOT NULL,
++                input TEXT NOT NULL,
++                output TEXT NOT NULL,
++                created_at TEXT NOT NULL
++            );
++
++            CREATE INDEX IF NOT EXISTS idx_conversions_user
++                ON conversions (user_id, id DESC);
++            """
++        )
++        conn.commit()
++    finally:
++        conn.close()
++
++
++init_db()
++
++
++def error(message: str, status: int = 400):
++    return jsonify({"error": message}), status
++
++
++def hash_password(password: str) -> str:
++    salt = secrets.token_bytes(16)
++    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 240_000)
++    return f"pbkdf2_sha256$240000${salt.hex()}${digest.hex()}"
++
++
++def verify_password(password: str, stored: str) -> bool:
++    try:
++        algorithm, iterations, salt_hex, digest_hex = stored.split("$", 3)
++        if algorithm != "pbkdf2_sha256":
++            return False
++        digest = hashlib.pbkdf2_hmac(
++            "sha256",
++            password.encode("utf-8"),
++            bytes.fromhex(salt_hex),
++            int(iterations),
++        )
++        return hmac.compare_digest(digest.hex(), digest_hex)
++    except (ValueError, TypeError):
++        return False
++
++
++def token_digest(token: str) -> str:
++    return hashlib.sha256(token.encode("utf-8")).hexdigest()
++
++
++def current_user() -> sqlite3.Row | None:
++    header = request.headers.get("Authorization", "")
++    scheme, _, token = header.partition(" ")
++    if scheme.lower() != "bearer" or not token.strip():
++        return None
++    db = get_db()
++    return db.execute(
++        """
++        SELECT users.id, users.username
++        FROM sessions JOIN users ON users.id = sessions.user_id
++        WHERE sessions.token_hash = ?
++        """,
++        (token_digest(token.strip()),),
++    ).fetchone()
++
++
++def require_user() -> tuple[sqlite3.Row | None, tuple | None]:
++    user = current_user()
++    if user is None:
++        return None, error("Authentication required", 401)
++    return user, None
++
++
++def json_body() -> dict:
++    body = request.get_json(silent=True)
++    return body if isinstance(body, dict) else {}
++
++
++def preview(value: str) -> str:
++    if len(value) <= PREVIEW_LENGTH:
++        return value
++    return value[:PREVIEW_LENGTH] + "..."
++
++
++def encode_text(text: str) -> str:
++    return base64.b64encode(text.encode("utf-8")).decode("ascii")
++
++
++def decode_text(encoded: str) -> str:
++    compact = "".join(encoded.split())
++    try:
++        raw = base64.b64decode(compact, validate=True)
++    except (binascii.Error, ValueError) as exc:
++        raise ValueError("Invalid base64 input") from exc
++    try:
++        return raw.decode("utf-8")
++    except UnicodeDecodeError as exc:
++        raise ValueError("Decoded data is not valid UTF-8 text") from exc
++
++
++def convert(direction: object, value: object) -> str:
++    if direction not in ("encode", "decode"):
++        raise ValueError("direction must be 'encode' or 'decode'")
++    if not isinstance(value, str):
++        raise ValueError("input must be a string")
++    return encode_text(value) if direction == "encode" else decode_text(value)
++
++
++def conversion_dict(row: sqlite3.Row) -> dict:
++    return {
++        "id": row["id"],
++        "direction": row["direction"],
++        "input_preview": preview(row["input"]),
++        "output_preview": preview(row["output"]),
++        "created_at": row["created_at"],
++    }
+ 
+ 
+ @app.get("/api/health")
+@@ -15,6 +192,182 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    body = json_body()
++    username = body.get("username")
++    password = body.get("password")
++    if not isinstance(username, str) or not username.strip():
++        return error("Username is required")
++    if not isinstance(password, str) or not password:
++        return error("Password is required")
++    username = username.strip()
++    if len(username) > 150:
++        return error("Username is too long")
++    if len(password) > 1024:
++        return error("Password is too long")
++
++    db = get_db()
++    if db.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
++        return error("Username is already taken", 409)
++    try:
++        cursor = db.execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, hash_password(password), utcnow()),
++        )
++        db.commit()
++    except sqlite3.IntegrityError:
++        db.rollback()
++        return error("Username is already taken", 409)
++    return jsonify({"id": cursor.lastrowid, "username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    body = json_body()
++    username = body.get("username")
++    password = body.get("password")
++    if not isinstance(username, str) or not isinstance(password, str):
++        return error("Username and password are required")
++    db = get_db()
++    user = db.execute(
++        "SELECT id, username, password_hash FROM users WHERE username = ?",
++        (username.strip(),),
++    ).fetchone()
++    if user is None or not verify_password(password, user["password_hash"]):
++        return error("Invalid username or password", 401)
++    token = secrets.token_urlsafe(32)
++    db.execute(
++        "INSERT INTO sessions (token_hash, user_id, created_at) VALUES (?, ?, ?)",
++        (token_digest(token), user["id"], utcnow()),
++    )
++    db.commit()
++    return jsonify({"token": token, "username": user["username"]})
++
++
++@app.get("/api/auth/me")
++def me():
++    user, failure = require_user()
++    if failure:
++        return failure
++    return jsonify({"id": user["id"], "username": user["username"]})
++
++
++@app.post("/api/auth/logout")
++def logout():
++    header = request.headers.get("Authorization", "")
++    scheme, _, token = header.partition(" ")
++    if scheme.lower() == "bearer" and token.strip():
++        db = get_db()
++        db.execute("DELETE FROM sessions WHERE token_hash = ?", (token_digest(token.strip()),))
++        db.commit()
++    return jsonify({"ok": True})
++
++
++@app.post("/api/base64/encode")
++def base64_encode():
++    body = json_body()
++    text = body.get("text")
++    if not isinstance(text, str):
++        return error("text must be a string")
++    return jsonify({"encoded": encode_text(text)})
++
++
++@app.post("/api/base64/decode")
++def base64_decode():
++    body = json_body()
++    encoded = body.get("encoded")
++    if not isinstance(encoded, str):
++        return error("encoded must be a string")
++    try:
++        text = decode_text(encoded)
++    except ValueError as exc:
++        return error(str(exc))
++    return jsonify({"text": text})
++
++
++@app.post("/api/conversions")
++def create_conversion():
++    user, failure = require_user()
++    if failure:
++        return failure
++    body = json_body()
++    direction = body.get("direction")
++    value = body.get("input")
++    try:
++        output = convert(direction, value)
++    except ValueError as exc:
++        return error(str(exc))
++
++    db = get_db()
++    cursor = db.execute(
++        """
++        INSERT INTO conversions (user_id, direction, input, output, created_at)
++        VALUES (?, ?, ?, ?, ?)
++        """,
++        (user["id"], direction, value, output, utcnow()),
++    )
++    db.commit()
++    row = db.execute(
++        "SELECT * FROM conversions WHERE id = ?", (cursor.lastrowid,)
++    ).fetchone()
++    result = conversion_dict(row)
++    result["output"] = row["output"]
++    return jsonify(result)
++
++
++@app.get("/api/conversions")
++def list_conversions():
++    user, failure = require_user()
++    if failure:
++        return failure
++    try:
++        page = int(request.args.get("page", 1))
++        page_size = int(request.args.get("page_size", DEFAULT_PAGE_SIZE))
++    except (TypeError, ValueError):
++        return error("page and page_size must be integers")
++    page = max(1, page)
++    page_size = min(max(1, page_size), MAX_PAGE_SIZE)
++
++    db = get_db()
++    total = db.execute(
++        "SELECT COUNT(*) FROM conversions WHERE user_id = ?", (user["id"],)
++    ).fetchone()[0]
++    rows = db.execute(
++        """
++        SELECT * FROM conversions
++        WHERE user_id = ?
++        ORDER BY id DESC
++        LIMIT ? OFFSET ?
++        """,
++        (user["id"], page_size, (page - 1) * page_size),
++    ).fetchall()
++    return jsonify(
++        {
++            "items": [conversion_dict(row) for row in rows],
++            "total": total,
++            "page": page,
++            "page_size": page_size,
++        }
++    )
++
++
++@app.delete("/api/conversions/<int:conversion_id>")
++def delete_conversion(conversion_id: int):
++    user, failure = require_user()
++    if failure:
++        return failure
++    db = get_db()
++    cursor = db.execute(
++        "DELETE FROM conversions WHERE id = ? AND user_id = ?",
++        (conversion_id, user["id"]),
++    )
++    db.commit()
++    if cursor.rowcount == 0:
++        return error("Conversion not found", 404)
++    return jsonify({"ok": True})
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..103cde2 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Base64 Converter</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..35f4f85 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,10 +10,62 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "^4.3.5",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "^4.3.5",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +356,356 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -344,6 +746,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +793,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1083,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -789,6 +1232,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..9779584 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -11,7 +11,9 @@
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "^4.3.5",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "^4.3.5",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..d632019 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,505 @@
++import { useCallback, useEffect, useRef, useState } from "react";
++
++type Conversion = {
++  id: number;
++  direction: "encode" | "decode";
++  input_preview: string;
++  output_preview: string;
++  created_at: string;
++  output?: string;
++};
++
++type Page = {
++  items: Conversion[];
++  total: number;
++  page: number;
++  page_size: number;
++};
++
++const PAGE_SIZE = 10;
++const TOKEN_KEY = "b64_token";
++const USER_KEY = "b64_user";
++
++async function api<T>(path: string, options: RequestInit = {}, token?: string | null): Promise<T> {
++  const headers = new Headers(options.headers);
++  headers.set("Content-Type", "application/json");
++  if (token) headers.set("Authorization", `Bearer ${token}`);
++  const res = await fetch(path, { ...options, headers });
++  const text = await res.text();
++  let data: unknown = null;
++  if (text) {
++    try {
++      data = JSON.parse(text);
++    } catch {
++      data = null;
++    }
++  }
++  if (!res.ok) {
++    const message =
++      data && typeof data === "object" && "error" in data && typeof (data as { error: unknown }).error === "string"
++        ? (data as { error: string }).error
++        : `Request failed (${res.status})`;
++    throw new Error(message);
++  }
++  return data as T;
++}
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
++  const [username, setUsername] = useState<string | null>(() => localStorage.getItem(USER_KEY));
++
++  const [authMode, setAuthMode] = useState<"login" | "register">("login");
++  const [authUsername, setAuthUsername] = useState("");
++  const [authPassword, setAuthPassword] = useState("");
++  const [authError, setAuthError] = useState("");
++  const [authBusy, setAuthBusy] = useState(false);
++
++  const [input, setInput] = useState("");
++  const [output, setOutput] = useState("");
++  const [convertError, setConvertError] = useState("");
++  const [convertBusy, setConvertBusy] = useState(false);
++  const [copied, setCopied] = useState(false);
++
++  const [saveToHistory, setSaveToHistory] = useState(true);
++  const [historyPage, setHistoryPage] = useState(1);
++  const [history, setHistory] = useState<Page | null>(null);
++  const [historyError, setHistoryError] = useState("");
++  const [historyLoading, setHistoryLoading] = useState(false);
++
++  const outputRef = useRef<HTMLTextAreaElement>(null);
++
++  const signOut = useCallback(() => {
++    if (token) {
++      api("/api/auth/logout", { method: "POST" }, token).catch(() => undefined);
++    }
++    localStorage.removeItem(TOKEN_KEY);
++    localStorage.removeItem(USER_KEY);
++    setToken(null);
++    setUsername(null);
++    setHistory(null);
++    setHistoryError("");
++    setHistoryPage(1);
++  }, [token]);
++
++  useEffect(() => {
++    if (!token) return;
++    let cancelled = false;
++    api<{ username: string }>("/api/auth/me", {}, token)
++      .then((me) => {
++        if (cancelled) return;
++        setUsername(me.username);
++        localStorage.setItem(USER_KEY, me.username);
++      })
++      .catch(() => {
++        if (!cancelled) signOut();
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [token, signOut]);
++
++  const loadHistory = useCallback(
++    async (page: number) => {
++      if (!token) return;
++      setHistoryLoading(true);
++      setHistoryError("");
++      try {
++        const data = await api<Page>(
++          `/api/conversions?page=${page}&page_size=${PAGE_SIZE}`,
++          {},
++          token,
++        );
++        setHistory(data);
++        setHistoryPage(data.page);
++      } catch (err) {
++        setHistoryError(err instanceof Error ? err.message : "Failed to load history");
++      } finally {
++        setHistoryLoading(false);
++      }
++    },
++    [token],
++  );
++
++  useEffect(() => {
++    if (token) {
++      loadHistory(historyPage);
++    }
++  }, [token, historyPage, loadHistory]);
++
++  async function submitAuth(event: React.FormEvent) {
++    event.preventDefault();
++    setAuthError("");
++    setAuthBusy(true);
++    try {
++      const creds = { username: authUsername, password: authPassword };
++      if (authMode === "register") {
++        await api("/api/auth/register", { method: "POST", body: JSON.stringify(creds) });
++      }
++      const result = await api<{ token: string; username: string }>("/api/auth/login", {
++        method: "POST",
++        body: JSON.stringify(creds),
++      });
++      localStorage.setItem(TOKEN_KEY, result.token);
++      localStorage.setItem(USER_KEY, result.username);
++      setToken(result.token);
++      setUsername(result.username);
++      setAuthPassword("");
++      setHistoryPage(1);
++    } catch (err) {
++      setAuthError(err instanceof Error ? err.message : "Something went wrong");
++    } finally {
++      setAuthBusy(false);
++    }
++  }
++
++  async function run(direction: "encode" | "decode") {
++    setConvertError("");
++    setCopied(false);
++    setConvertBusy(true);
++    try {
++      let value: string;
++      if (token && saveToHistory) {
++        const created = await api<Conversion>(
++          "/api/conversions",
++          { method: "POST", body: JSON.stringify({ direction, input }) },
++          token,
++        );
++        value = created.output ?? "";
++        if (historyPage === 1) {
++          loadHistory(1);
++        } else {
++          setHistoryPage(1);
++        }
++      } else if (direction === "encode") {
++        const res = await api<{ encoded: string }>("/api/base64/encode", {
++          method: "POST",
++          body: JSON.stringify({ text: input }),
++        });
++        value = res.encoded;
++      } else {
++        const res = await api<{ text: string }>("/api/base64/decode", {
++          method: "POST",
++          body: JSON.stringify({ encoded: input }),
++        });
++        value = res.text;
++      }
++      setOutput(value);
++    } catch (err) {
++      setConvertError(err instanceof Error ? err.message : "Conversion failed");
++    } finally {
++      setConvertBusy(false);
++    }
++  }
++
++  async function copyOutput() {
++    if (!output) return;
++    try {
++      await navigator.clipboard.writeText(output);
++      setCopied(true);
++      window.setTimeout(() => setCopied(false), 1500);
++    } catch {
++      outputRef.current?.select();
++      setConvertError("Could not access the clipboard");
++    }
++  }
++
++  async function deleteConversion(id: number) {
++    if (!token) return;
++    try {
++      await api(`/api/conversions/${id}`, { method: "DELETE" }, token);
++      const remaining = (history?.items.length ?? 1) - 1;
++      if (remaining === 0 && historyPage > 1) {
++        setHistoryPage(historyPage - 1);
++      } else {
++        loadHistory(historyPage);
++      }
++    } catch (err) {
++      setHistoryError(err instanceof Error ? err.message : "Failed to delete conversion");
++    }
++  }
++
++  const totalPages = history ? Math.max(1, Math.ceil(history.total / history.page_size)) : 1;
++
++  return (
++    <div className="min-h-screen bg-slate-100 text-slate-900">
++      <header className="border-b border-slate-200 bg-white">
++        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-4 px-4 py-4">
++          <div>
++            <h1 className="text-xl font-semibold tracking-tight">Base64 Converter</h1>
++            <p className="text-sm text-slate-500">Encode UTF-8 text to base64 and back.</p>
++          </div>
++          {username ? (
++            <div className="flex items-center gap-3">
++              <span className="text-sm text-slate-600">
++                Signed in as <span className="font-medium text-slate-900">{username}</span>
++              </span>
++              <button
++                type="button"
++                onClick={signOut}
++                className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
++              >
++                Sign out
++              </button>
++            </div>
++          ) : (
++            <span className="text-sm text-slate-500">Convert without signing in</span>
++          )}
++        </div>
++      </header>
++
++      <main className="mx-auto grid max-w-5xl gap-6 px-4 py-6 lg:grid-cols-[1fr_20rem]">
++        <section className="space-y-6">
++          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
++            <div className="grid gap-4 md:grid-cols-2">
++              <div>
++                <label
++                  htmlFor="input"
++                  className="mb-1.5 block text-sm font-medium text-slate-700"
++                >
++                  Input <span className="font-normal text-slate-400">(text or base64)</span>
++                </label>
++                <textarea
++                  id="input"
++                  value={input}
++                  onChange={(e) => setInput(e.target.value)}
++                  rows={10}
++                  spellCheck={false}
++                  placeholder="Type UTF-8 text to encode, or paste base64 to decode..."
++                  className="w-full resize-y rounded-lg border border-slate-300 bg-slate-50 p-3 font-mono text-sm outline-none focus:border-indigo-500 focus:bg-white focus:ring-2 focus:ring-indigo-200"
++                />
++              </div>
++              <div>
++                <div className="mb-1.5 flex items-center justify-between">
++                  <label htmlFor="output" className="block text-sm font-medium text-slate-700">
++                    Output
++                  </label>
++                  <button
++                    type="button"
++                    onClick={copyOutput}
++                    disabled={!output}
++                    className="rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
++                  >
++                    {copied ? "Copied!" : "Copy"}
++                  </button>
++                </div>
++                <textarea
++                  id="output"
++                  ref={outputRef}
++                  value={output}
++                  readOnly
++                  rows={10}
++                  spellCheck={false}
++                  placeholder="Result appears here..."
++                  className="w-full resize-y rounded-lg border border-slate-300 bg-slate-50 p-3 font-mono text-sm outline-none"
++                />
++              </div>
++            </div>
++
++            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
++              <div className="flex gap-2">
++                <button
++                  type="button"
++                  onClick={() => run("encode")}
++                  disabled={convertBusy}
++                  className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
++                >
++                  Encode
++                </button>
++                <button
++                  type="button"
++                  onClick={() => run("decode")}
++                  disabled={convertBusy}
++                  className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-900 disabled:opacity-50"
++                >
++                  Decode
++                </button>
++              </div>
++              {token && (
++                <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700">
++                  <input
++                    type="checkbox"
++                    checked={saveToHistory}
++                    onChange={(e) => setSaveToHistory(e.target.checked)}
++                    className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
++                  />
++                  Save to history
++                </label>
++              )}
++            </div>
++
++            {convertError && (
++              <p role="alert" className="mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++                {convertError}
++              </p>
++            )}
++          </div>
++
++          {token && (
++            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
++              <div className="flex items-center justify-between">
++                <h2 className="text-base font-semibold">Your history</h2>
++                <span className="text-xs text-slate-500">
++                  {history ? `${history.total} saved` : ""}
++                </span>
++              </div>
++
++              {historyError && (
++                <p role="alert" className="mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++                  {historyError}
++                </p>
++              )}
++
++              {historyLoading && !history ? (
++                <p className="mt-4 text-sm text-slate-500">Loading...</p>
++              ) : history && history.items.length > 0 ? (
++                <ul className="mt-3 divide-y divide-slate-200">
++                  {history.items.map((item) => (
++                    <li key={item.id} className="flex items-start justify-between gap-4 py-3">
++                      <div className="min-w-0">
++                        <div className="flex flex-wrap items-center gap-2">
++                          <span
++                            className={`rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${
++                              item.direction === "encode"
++                                ? "bg-indigo-100 text-indigo-700"
++                                : "bg-emerald-100 text-emerald-700"
++                            }`}
++                          >
++                            {item.direction}
++                          </span>
++                          <span className="text-xs text-slate-400">
++                            {new Date(item.created_at).toLocaleString()}
++                          </span>
++                        </div>
++                        <p className="mt-1 truncate font-mono text-xs text-slate-600">
++                          {item.input_preview}
++                        </p>
++                        <p className="truncate font-mono text-xs text-slate-400">
++                          {item.output_preview}
++                        </p>
++                      </div>
++                      <button
++                        type="button"
++                        onClick={() => deleteConversion(item.id)}
++                        className="shrink-0 rounded-md border border-red-200 px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50"
++                      >
++                        Delete
++                      </button>
++                    </li>
++                  ))}
++                </ul>
++              ) : (
++                <p className="mt-4 text-sm text-slate-500">
++                  No conversions yet. Convert with the switch on to save one.
++                </p>
++              )}
++
++              <div className="mt-4 flex items-center justify-between border-t border-slate-200 pt-3">
++                <button
++                  type="button"
++                  onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}
++                  disabled={historyPage <= 1 || historyLoading}
++                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
++                >
++                  Previous
++                </button>
++                <span className="text-sm text-slate-600">
++                  Page {historyPage} of {totalPages}
++                </span>
++                <button
++                  type="button"
++                  onClick={() => setHistoryPage((p) => Math.min(totalPages, p + 1))}
++                  disabled={historyPage >= totalPages || historyLoading}
++                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
++                >
++                  Next
++                </button>
++              </div>
++            </div>
++          )}
++        </section>
++
++        {!token && (
++          <aside className="self-start rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
++            <div className="mb-4 grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1">
++              <button
++                type="button"
++                onClick={() => {
++                  setAuthMode("login");
++                  setAuthError("");
++                }}
++                className={`rounded-md px-3 py-1.5 text-sm font-medium ${
++                  authMode === "login" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"
++                }`}
++              >
++                Sign in
++              </button>
++              <button
++                type="button"
++                onClick={() => {
++                  setAuthMode("register");
++                  setAuthError("");
++                }}
++                className={`rounded-md px-3 py-1.5 text-sm font-medium ${
++                  authMode === "register" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"
++                }`}
++              >
++                Register
++              </button>
++            </div>
++
++            <form onSubmit={submitAuth} className="space-y-3">
++              <div>
++                <label htmlFor="username" className="mb-1 block text-sm font-medium text-slate-700">
++                  Username
++                </label>
++                <input
++                  id="username"
++                  value={authUsername}
++                  onChange={(e) => setAuthUsername(e.target.value)}
++                  autoComplete="username"
++                  required
++                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++                />
++              </div>
++              <div>
++                <label htmlFor="password" className="mb-1 block text-sm font-medium text-slate-700">
++                  Password
++                </label>
++                <input
++                  id="password"
++                  type="password"
++                  value={authPassword}
++                  onChange={(e) => setAuthPassword(e.target.value)}
++                  autoComplete={authMode === "login" ? "current-password" : "new-password"}
++                  required
++                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++                />
++              </div>
++              <button
++                type="submit"
++                disabled={authBusy}
++                className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
++              >
++                {authBusy
++                  ? "Please wait..."
++                  : authMode === "login"
++                    ? "Sign in"
++                    : "Create account"}
++              </button>
++            </form>
++
++            {authError && (
++              <p role="alert" className="mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++                {authError}
++              </p>
++            )}
++
++            <p className="mt-4 text-xs leading-relaxed text-slate-500">
++              Sign in to save conversions to a private history only you can see.
++            </p>
++          </aside>
++        )}
++      </main>
++    </div>
++  );
+ }
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..696e0d2 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,5 @@
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+ createRoot(document.getElementById("root")!).render(<App />);
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..775ad4a 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
+ import react from "@vitejs/plugin-react";
++import tailwindcss from "@tailwindcss/vite";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

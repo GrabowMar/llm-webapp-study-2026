@@ -1,0 +1,2895 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..4e51789
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,13 @@
++# Python
++__pycache__/
++*.pyc
++.venv/
++
++# Node
++node_modules/
++
++# Build output
++frontend/dist/
++
++# Data (SQLite lives here)
++data/
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..8ea31d3 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,620 @@
+-"""Flask entry point."""
++"""Subscription billing console: JSON API under /api and frontend server."""
+ 
++from __future__ import annotations
++
++import json
++import secrets
++import sqlite3
++from datetime import datetime, timedelta, timezone
++from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
++from functools import wraps
+ from pathlib import Path
++from typing import Any
++
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.security import check_password_hash, generate_password_hash
++
++BASE_DIR = Path(__file__).resolve().parent.parent
++DATA_DIR = BASE_DIR / "data"
++DB_PATH = DATA_DIR / "app.db"
++DIST_DIR = BASE_DIR / "frontend" / "dist"
++
++STATUSES = ("trial", "active", "past_due", "cancelled")
++STATUS_ALIASES = {"past-due": "past_due"}
++MRR_STATUSES = ("active", "past_due")
++SUBSCRIPTION_FIELDS = frozenset(
++    {
++        "customer_name",
++        "plan",
++        "monthly_amount",
++        "renewal_date",
++        "status",
++        "failed_payment_count",
++    }
++)
++REQUIRED_CREATE_FIELDS = ("customer_name", "plan", "monthly_amount")
++DEFAULT_PAGE_SIZE = 50
++ALLOWED_STATUSES = frozenset(STATUSES) | frozenset(STATUS_ALIASES)
++
++
++def canonical_status(value: str) -> str:
++    return STATUS_ALIASES.get(value, value)
++
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE,
++    password_hash TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS tokens (
++    token TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS subscriptions (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    customer_name TEXT NOT NULL,
++    plan TEXT NOT NULL,
++    monthly_amount REAL NOT NULL,
++    renewal_date TEXT NOT NULL,
++    status TEXT NOT NULL,
++    failed_payment_count INTEGER NOT NULL DEFAULT 0,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS invoices (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    subscription_id INTEGER NOT NULL
++        REFERENCES subscriptions(id) ON DELETE CASCADE,
++    amount_due REAL NOT NULL,
++    due_date TEXT NOT NULL,
++    status TEXT NOT NULL,
++    paid_at TEXT,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS collections (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    subscription_id INTEGER NOT NULL
++        REFERENCES subscriptions(id) ON DELETE CASCADE,
++    outcome TEXT NOT NULL,
++    invoices_affected INTEGER NOT NULL DEFAULT 0,
++    created_at TEXT NOT NULL
++);
++CREATE INDEX IF NOT EXISTS idx_subscriptions_recent
++    ON subscriptions(created_at DESC, id DESC);
++CREATE INDEX IF NOT EXISTS idx_invoices_subscription
++    ON invoices(subscription_id, created_at DESC, id DESC);
++"""
++
++
++class ValidationError(Exception):
++    """Raised for invalid request payloads."""
++
++
++# ---------------------------------------------------------------- database
++
++
++def connect_db() -> sqlite3.Connection:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH, timeout=30)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    return conn
++
++
++def init_db() -> None:
++    conn = connect_db()
++    try:
++        conn.executescript(SCHEMA)
++        conn.commit()
++    finally:
++        conn.close()
++
++
++def get_db() -> sqlite3.Connection:
++    if "db" not in g:
++        g.db = connect_db()
++    return g.db
++
++
++def close_db(exc: BaseException | None) -> None:
++    db = g.pop("db", None)
++    if db is not None:
++        if exc is not None:
++            try:
++                db.rollback()
++            except sqlite3.Error:
++                pass
++        db.close()
++
++
++# ---------------------------------------------------------------- helpers
++
++
++def utcnow() -> str:
++    return datetime.now(timezone.utc).isoformat(timespec="seconds")
++
++
++def money(value: Any) -> float:
++    """Round a stored amount to at most two decimals."""
++    try:
++        amount = Decimal(str(value))
++    except (InvalidOperation, ValueError):
++        return 0.0
++    if not amount.is_finite():
++        return 0.0
++    return float(amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
++
++
++def parse_money(value: Any, field: str) -> float:
++    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
++        raise ValidationError(f"{field} must be a number")
++    try:
++        amount = Decimal(str(value))
++    except (InvalidOperation, ValueError):
++        raise ValidationError(f"{field} must be a number") from None
++    if not amount.is_finite():
++        raise ValidationError(f"{field} must be a number")
++    return float(amount)
+ 
+-from flask import Flask
+-from flask import send_from_directory
+ 
+-DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++def json_body() -> dict[str, Any]:
++    data = request.get_json(silent=True)
++    if data is None:
++        raw = request.get_data(as_text=True).strip()
++        if raw:
++            try:
++                data = json.loads(raw)
++            except ValueError:
++                data = None
++    return data if isinstance(data, dict) else {}
++
++
++def subscription_dict(row: sqlite3.Row) -> dict[str, Any]:
++    return {
++        "id": row["id"],
++        "customer_name": row["customer_name"],
++        "plan": row["plan"],
++        "monthly_amount": money(row["monthly_amount"]),
++        "renewal_date": row["renewal_date"],
++        "status": row["status"],
++        "failed_payment_count": int(row["failed_payment_count"]),
++        "created_at": row["created_at"],
++    }
++
++
++def invoice_dict(row: sqlite3.Row) -> dict[str, Any]:
++    return {
++        "id": row["id"],
++        "subscription_id": row["subscription_id"],
++        "amount_due": money(row["amount_due"]),
++        "due_date": row["due_date"],
++        "status": row["status"],
++        "paid_at": row["paid_at"],
++    }
++
++
++def get_subscription_or_404(sub_id: int) -> sqlite3.Row:
++    row = get_db().execute(
++        "SELECT * FROM subscriptions WHERE id = ?", (sub_id,)
++    ).fetchone()
++    if row is None:
++        raise NotFound("subscription not found")
++    return row
++
++
++class NotFound(Exception):
++    pass
++
++
++# ---------------------------------------------------------------- auth
++
++
++def current_user() -> sqlite3.Row | None:
++    header = request.headers.get("Authorization", "")
++    if not header.startswith("Bearer "):
++        return None
++    token = header[len("Bearer ") :].strip()
++    if not token:
++        return None
++    return get_db().execute(
++        """
++        SELECT u.id, u.username
++        FROM tokens t
++        JOIN users u ON u.id = t.user_id
++        WHERE t.token = ?
++        """,
++        (token,),
++    ).fetchone()
++
++
++def require_auth(view):
++    @wraps(view)
++    def wrapped(*args: Any, **kwargs: Any):
++        user = current_user()
++        if user is None:
++            return jsonify({"error": "authentication required"}), 401
++        g.user = user
++        return view(*args, **kwargs)
++
++    return wrapped
++
++
++# ---------------------------------------------------------------- app
++
+ 
+ app = Flask(__name__, static_folder=None)
++app.teardown_appcontext(close_db)
++
++
++@app.errorhandler(ValidationError)
++def handle_validation_error(exc: ValidationError):
++    return jsonify({"error": str(exc)}), 400
++
++
++@app.errorhandler(NotFound)
++def handle_not_found(exc: NotFound):
++    return jsonify({"error": str(exc)}), 404
++
++
++# ---------------------------------------------------------------- auth routes
++
++
++@app.post("/api/auth/register")
++def register():
++    data = json_body()
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not username.strip():
++        raise ValidationError("username is required")
++    if not isinstance(password, str) or not password:
++        raise ValidationError("password is required")
++    username = username.strip()
++    if len(username) > 150:
++        raise ValidationError("username is too long")
++
++    db = get_db()
++    try:
++        cursor = db.execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, generate_password_hash(password), utcnow()),
++        )
++        db.commit()
++    except sqlite3.IntegrityError:
++        db.rollback()
++        return jsonify({"error": "username already taken"}), 409
++    return jsonify({"id": cursor.lastrowid, "username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    data = json_body()
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not isinstance(password, str):
++        return jsonify({"error": "invalid credentials"}), 401
++
++    db = get_db()
++    user = db.execute(
++        "SELECT * FROM users WHERE username = ?", (username.strip(),)
++    ).fetchone()
++    if user is None or not check_password_hash(user["password_hash"], password):
++        return jsonify({"error": "invalid credentials"}), 401
++
++    token = secrets.token_urlsafe(32)
++    db.execute(
++        "INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)",
++        (token, user["id"], utcnow()),
++    )
++    db.commit()
++    return jsonify({"token": token}), 200
++
++
++# ---------------------------------------------------------------- subscriptions
++
++
++def validate_subscription_fields(data: dict[str, Any]) -> dict[str, Any]:
++    updates: dict[str, Any] = {}
++    for key, value in data.items():
++        if key not in SUBSCRIPTION_FIELDS:
++            continue
++        if key in ("customer_name", "plan"):
++            if not isinstance(value, str) or not value.strip():
++                raise ValidationError(f"{key} must be a non-empty string")
++            updates[key] = value.strip()
++        elif key == "monthly_amount":
++            updates[key] = parse_money(value, key)
++        elif key == "renewal_date":
++            if not isinstance(value, str) or not value.strip():
++                raise ValidationError("renewal_date must be a string")
++            updates[key] = value.strip()
++        elif key == "status":
++            if not isinstance(value, str) or value.strip() not in ALLOWED_STATUSES:
++                raise ValidationError(
++                    "status must be one of: " + ", ".join(STATUSES)
++                )
++            updates[key] = value.strip()
++        elif key == "failed_payment_count":
++            if (
++                isinstance(value, bool)
++                or not isinstance(value, int)
++                or value < 0
++            ):
++                raise ValidationError(
++                    "failed_payment_count must be a non-negative integer"
++                )
++            updates[key] = value
++    return updates
++
++
++@app.post("/api/subscriptions")
++@require_auth
++def create_subscription():
++    data = json_body()
++    for field in REQUIRED_CREATE_FIELDS:
++        if field not in data:
++            raise ValidationError(f"{field} is required")
++    updates = validate_subscription_fields(data)
++    for field in REQUIRED_CREATE_FIELDS:
++        if field not in updates:
++            raise ValidationError(f"{field} is required")
++
++    if "renewal_date" not in updates:
++        default_due = (datetime.now(timezone.utc) + timedelta(days=30)).date()
++        updates["renewal_date"] = default_due.isoformat()
++    if "status" not in updates:
++        updates["status"] = "trial"
++    updates["failed_payment_count"] = updates.get("failed_payment_count", 0)
++    updates["created_at"] = utcnow()
++
++    columns = ", ".join(updates)
++    placeholders = ", ".join("?" for _ in updates)
++    db = get_db()
++    cursor = db.execute(
++        f"INSERT INTO subscriptions ({columns}) VALUES ({placeholders})",
++        tuple(updates.values()),
++    )
++    db.commit()
++    row = db.execute(
++        "SELECT * FROM subscriptions WHERE id = ?", (cursor.lastrowid,)
++    ).fetchone()
++    return jsonify(subscription_dict(row)), 201
++
++
++@app.get("/api/subscriptions")
++@require_auth
++def list_subscriptions():
++    args = request.args
++    clauses: list[str] = []
++    params: list[Any] = []
++
++    query = args.get("q", "").strip()
++    if query:
++        escaped = (
++            query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
++        )
++        clauses.append("customer_name LIKE ? ESCAPE '\\'")
++        params.append(f"%{escaped}%")
++
++    status = args.get("status", "").strip()
++    if status:
++        clauses.append("REPLACE(status, '-', '_') = ?")
++        params.append(canonical_status(status))
++
++    plan = args.get("plan", "").strip()
++    if plan:
++        clauses.append("plan = ?")
++        params.append(plan)
++
++    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
++
++    try:
++        page = int(args.get("page", 1))
++        page_size = int(args.get("page_size", DEFAULT_PAGE_SIZE))
++    except ValueError:
++        raise ValidationError("page and page_size must be integers") from None
++    if page < 1:
++        raise ValidationError("page must be at least 1")
++    if page_size < 1:
++        raise ValidationError("page_size must be at least 1")
++
++    db = get_db()
++    total = db.execute(
++        f"SELECT COUNT(*) AS n FROM subscriptions {where}", tuple(params)
++    ).fetchone()["n"]
++    rows = db.execute(
++        f"""
++        SELECT * FROM subscriptions
++        {where}
++        ORDER BY created_at DESC, id DESC
++        LIMIT ? OFFSET ?
++        """,
++        (*params, page_size, (page - 1) * page_size),
++    ).fetchall()
++
++    return jsonify(
++        {
++            "items": [subscription_dict(row) for row in rows],
++            "total": total,
++            "page": page,
++            "page_size": page_size,
++        }
++    )
++
++
++@app.get("/api/subscriptions/<int:sub_id>")
++@require_auth
++def get_subscription(sub_id: int):
++    return jsonify(subscription_dict(get_subscription_or_404(sub_id)))
++
++
++@app.patch("/api/subscriptions/<int:sub_id>")
++@require_auth
++def patch_subscription(sub_id: int):
++    updates = validate_subscription_fields(json_body())
++    if not updates:
++        raise ValidationError("no updatable fields given")
++    get_subscription_or_404(sub_id)
++
++    assignments = ", ".join(f"{field} = ?" for field in updates)
++    db = get_db()
++    db.execute(
++        f"UPDATE subscriptions SET {assignments} WHERE id = ?",
++        (*updates.values(), sub_id),
++    )
++    db.commit()
++    row = db.execute(
++        "SELECT * FROM subscriptions WHERE id = ?", (sub_id,)
++    ).fetchone()
++    return jsonify(subscription_dict(row))
++
++
++# ---------------------------------------------------------------- invoices
++
++
++@app.get("/api/subscriptions/<int:sub_id>/invoices")
++@require_auth
++def list_invoices(sub_id: int):
++    get_subscription_or_404(sub_id)
++    rows = get_db().execute(
++        """
++        SELECT * FROM invoices
++        WHERE subscription_id = ?
++        ORDER BY created_at DESC, id DESC
++        """,
++        (sub_id,),
++    ).fetchall()
++    return jsonify({"items": [invoice_dict(row) for row in rows]})
++
++
++@app.post("/api/subscriptions/<int:sub_id>/invoices")
++@require_auth
++def issue_invoice(sub_id: int):
++    sub = get_subscription_or_404(sub_id)
++    data = json_body()
++
++    if "amount_due" in data:
++        amount_due = parse_money(data["amount_due"], "amount_due")
++        if amount_due < 0:
++            raise ValidationError("amount_due must not be negative")
++    else:
++        amount_due = float(sub["monthly_amount"])
++
++    if "due_date" in data:
++        due_date = data["due_date"]
++        if not isinstance(due_date, str) or not due_date.strip():
++            raise ValidationError("due_date must be a string")
++        due_date = due_date.strip()
++    else:
++        due_date = sub["renewal_date"]
++
++    now = utcnow()
++    db = get_db()
++    cursor = db.execute(
++        """
++        INSERT INTO invoices
++            (subscription_id, amount_due, due_date, status, paid_at, created_at)
++        VALUES (?, ?, ?, 'open', NULL, ?)
++        """,
++        (sub_id, amount_due, due_date, now),
++    )
++    db.commit()
++    row = db.execute(
++        "SELECT * FROM invoices WHERE id = ?", (cursor.lastrowid,)
++    ).fetchone()
++    return jsonify(invoice_dict(row)), 201
++
++
++# ---------------------------------------------------------------- collections
++
++
++@app.post("/api/subscriptions/<int:sub_id>/collections")
++@require_auth
++def record_collection(sub_id: int):
++    get_subscription_or_404(sub_id)
++    data = json_body()
++    outcome = data.get("outcome")
++    if outcome not in ("failed", "succeeded"):
++        raise ValidationError("outcome must be 'failed' or 'succeeded'")
++
++    now = utcnow()
++    db = get_db()
++    open_rows = db.execute(
++        "SELECT id FROM invoices WHERE subscription_id = ? AND status = 'open'",
++        (sub_id,),
++    ).fetchall()
++
++    if outcome == "succeeded":
++        db.execute(
++            """
++            UPDATE invoices
++            SET status = 'paid', paid_at = ?
++            WHERE subscription_id = ? AND status = 'open'
++            """,
++            (now, sub_id),
++        )
++    else:
++        db.execute(
++            """
++            UPDATE subscriptions
++            SET failed_payment_count = failed_payment_count + 1
++            WHERE id = ?
++            """,
++            (sub_id,),
++        )
++
++    cursor = db.execute(
++        """
++        INSERT INTO collections
++            (subscription_id, outcome, invoices_affected, created_at)
++        VALUES (?, ?, ?, ?)
++        """,
++        (sub_id, outcome, len(open_rows), now),
++    )
++    db.commit()
++
++    return (
++        jsonify(
++            {
++                "id": cursor.lastrowid,
++                "subscription_id": sub_id,
++                "outcome": outcome,
++                "invoices_affected": len(open_rows),
++                "created_at": now,
++            }
++        ),
++        201,
++    )
++
++
++# ---------------------------------------------------------------- public stats
++
++
++@app.get("/api/public/stats")
++def public_stats():
++    db = get_db()
++    counts: dict[str, int] = {status: 0 for status in STATUSES}
++    aliases: dict[str, int] = {}
++    total = Decimal("0")
++    for row in db.execute(
++        "SELECT status, COUNT(*) AS n, COALESCE(SUM(monthly_amount), 0) AS s "
++        "FROM subscriptions GROUP BY status"
++    ):
++        status = row["status"]
++        key = canonical_status(status)
++        counts[key] = counts.get(key, 0) + int(row["n"])
++        if status != key:
++            aliases[status] = int(row["n"])
++        if key in MRR_STATUSES:
++            total += Decimal(str(row["s"]))
++    counts.update(aliases)
++
++    mrr = float(total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
++    return jsonify({"mrr": mrr, "counts": counts})
++
++
++# ---------------------------------------------------------------- misc / frontend
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +622,24 @@ def health():
+     return {"status": "ok"}
+ 
+ 
+-@app.get("/")
+-@app.get("/<path:path>")
++API_METHODS = ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"]
++
++
++@app.route("/", methods=API_METHODS)
++@app.route("/<path:path>", methods=API_METHODS)
+ def frontend(path: str = "index.html"):
+-    if (DIST / path).is_file():
+-        return send_from_directory(DIST, path)
+-    return send_from_directory(DIST, "index.html")
++    if path.startswith("api/") or path == "api":
++        return jsonify({"error": "not found"}), 404
++    target = DIST_DIR / path
++    if path != "index.html" and target.is_file() and target.is_relative_to(DIST_DIR):
++        return send_from_directory(DIST_DIR, path)
++    index = DIST_DIR / "index.html"
++    if index.is_file():
++        return send_from_directory(DIST_DIR, "index.html")
++    return jsonify({"error": "frontend build not found"}), 404
++
++
++init_db()
++
++if __name__ == "__main__":
++    app.run(host="0.0.0.0", port=8000, debug=False)
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..c5f1b40 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Subscription Billing Console</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..08de16a 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,10 +10,65 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "4.3.5",
++        "@types/react": "19.3.0",
++        "@types/react-dom": "19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "4.3.5",
++        "typescript": "5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +359,376 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,6 +759,13 @@
+         }
+       }
+     },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +776,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +823,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1113,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -789,6 +1262,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1300,20 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..2751fb5 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -11,7 +11,12 @@
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "4.3.5",
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "4.3.5",
++    "typescript": "5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..d96e971 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,190 @@
++import { useEffect, type ReactNode } from "react";
++import { signOut } from "./api";
++import { LoadingNote } from "./components";
++import { navigate, useAuth, usePathname } from "./router";
++import AuthPage from "./pages/AuthPage";
++import PublicPage from "./pages/PublicPage";
++import SubscriptionDetailPage from "./pages/SubscriptionDetailPage";
++import SubscriptionsPage from "./pages/SubscriptionsPage";
++
++function NavLink({
++  to,
++  label,
++  active,
++}: {
++  to: string;
++  label: string;
++  active: boolean;
++}) {
++  return (
++    <a
++      href={to}
++      onClick={(event) => {
++        event.preventDefault();
++        navigate(to);
++      }}
++      className={`rounded-md px-3 py-2 text-sm font-medium transition ${
++        active
++          ? "bg-slate-100 text-slate-900"
++          : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
++      }`}
++    >
++      {label}
++    </a>
++  );
++}
++
++function Header() {
++  const auth = useAuth();
++  const path = usePathname();
++
++  return (
++    <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/95 backdrop-blur">
++      <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
++        <div className="flex items-center gap-2">
++          <a
++            href="/"
++            onClick={(event) => {
++              event.preventDefault();
++              navigate("/");
++            }}
++            className="flex items-center gap-2 text-sm font-semibold tracking-tight text-slate-900"
++          >
++            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-bold text-white">
++              B
++            </span>
++            <span>Billing Console</span>
++          </a>
++          <nav className="ml-4 hidden items-center gap-1 sm:flex">
++            <NavLink to="/" label="Summary" active={path === "/"} />
++            {auth.token && (
++              <NavLink
++                to="/subscriptions"
++                label="Subscriptions"
++                active={path.startsWith("/subscriptions")}
++              />
++            )}
++          </nav>
++        </div>
++
++        <div className="flex items-center gap-3">
++          {auth.token ? (
++            <>
++              <span className="hidden text-sm text-slate-600 sm:inline">
++                {auth.username}
++              </span>
++              <button
++                type="button"
++                onClick={() => {
++                  signOut();
++                  navigate("/");
++                }}
++                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
++              >
++                Sign out
++              </button>
++            </>
++          ) : (
++            <>
++              <a
++                href="/login"
++                onClick={(event) => {
++                  event.preventDefault();
++                  navigate("/login");
++                }}
++                className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-600 transition hover:text-slate-900"
++              >
++                Sign in
++              </a>
++              <a
++                href="/register"
++                onClick={(event) => {
++                  event.preventDefault();
++                  navigate("/register");
++                }}
++                className="rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-indigo-500"
++              >
++                Register
++              </a>
++            </>
++          )}
++        </div>
++      </div>
++    </header>
++  );
++}
++
++function RequireAuth({ children }: { children: ReactNode }) {
++  const auth = useAuth();
++  useEffect(() => {
++    if (!auth.token) navigate("/login");
++  }, [auth.token]);
++  if (!auth.token) {
++    return (
++      <div className="mx-auto max-w-6xl px-4 py-16">
++        <LoadingNote label="Redirecting to sign in…" />
++      </div>
++    );
++  }
++  return <>{children}</>;
++}
++
++function NotFoundPage() {
++  return (
++    <div className="mx-auto max-w-6xl px-4 py-16 text-center">
++      <p className="text-sm font-medium text-slate-500">404</p>
++      <h1 className="mt-2 text-2xl font-semibold text-slate-900">
++        Page not found
++      </h1>
++      <a
++        href="/"
++        onClick={(event) => {
++          event.preventDefault();
++          navigate("/");
++        }}
++        className="mt-6 inline-block rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
++      >
++        Back to summary
++      </a>
++    </div>
++  );
++}
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const path = usePathname();
++
++  let page: ReactNode;
++  const detailMatch = /^\/subscriptions\/(\d+)\/?$/.exec(path);
++
++  if (path === "/" || path === "") {
++    page = <PublicPage />;
++  } else if (path === "/login") {
++    page = <AuthPage mode="login" />;
++  } else if (path === "/register") {
++    page = <AuthPage mode="register" />;
++  } else if (path === "/subscriptions" || path === "/subscriptions/") {
++    page = (
++      <RequireAuth>
++        <SubscriptionsPage />
++      </RequireAuth>
++    );
++  } else if (detailMatch) {
++    page = (
++      <RequireAuth>
++        <SubscriptionDetailPage id={Number(detailMatch[1])} />
++      </RequireAuth>
++    );
++  } else {
++    page = <NotFoundPage />;
++  }
++
++  return (
++    <div className="min-h-screen">
++      <Header />
++      <main className="mx-auto max-w-6xl px-4 py-8">{page}</main>
++      <footer className="mx-auto max-w-6xl px-4 pb-8 text-center text-xs text-slate-400">
++        Subscription billing console
++      </footer>
++    </div>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..394745c
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,248 @@
++export type Status = "trial" | "active" | "past_due" | "cancelled";
++export type CollectionOutcome = "failed" | "succeeded";
++
++export interface Subscription {
++  id: number;
++  customer_name: string;
++  plan: string;
++  monthly_amount: number;
++  renewal_date: string;
++  status: Status;
++  failed_payment_count: number;
++  created_at: string;
++}
++
++export interface Invoice {
++  id: number;
++  subscription_id: number;
++  amount_due: number;
++  due_date: string;
++  status: string;
++  paid_at: string | null;
++}
++
++export interface SubscriptionPage {
++  items: Subscription[];
++  total: number;
++  page: number;
++  page_size: number;
++}
++
++export interface Stats {
++  mrr: number;
++  counts: Record<string, number>;
++}
++
++export interface CollectionResult {
++  id: number;
++  subscription_id: number;
++  outcome: CollectionOutcome;
++  invoices_affected: number;
++  created_at: string;
++}
++
++export interface AuthSnapshot {
++  token: string | null;
++  username: string | null;
++}
++
++const TOKEN_KEY = "billing.token";
++const USERNAME_KEY = "billing.username";
++
++function loadAuth(): AuthSnapshot {
++  return {
++    token: localStorage.getItem(TOKEN_KEY),
++    username: localStorage.getItem(USERNAME_KEY),
++  };
++}
++
++let authState: AuthSnapshot = loadAuth();
++const authListeners = new Set<() => void>();
++
++function commitAuth(next: AuthSnapshot): void {
++  authState = next;
++  if (next.token) {
++    localStorage.setItem(TOKEN_KEY, next.token);
++  } else {
++    localStorage.removeItem(TOKEN_KEY);
++  }
++  if (next.username) {
++    localStorage.setItem(USERNAME_KEY, next.username);
++  } else {
++    localStorage.removeItem(USERNAME_KEY);
++  }
++  authListeners.forEach((listener) => listener());
++}
++
++export function subscribeAuth(listener: () => void): () => void {
++  authListeners.add(listener);
++  return () => {
++    authListeners.delete(listener);
++  };
++}
++
++export function getAuth(): AuthSnapshot {
++  return authState;
++}
++
++export function signIn(token: string, username: string): void {
++  commitAuth({ token, username });
++}
++
++export function signOut(): void {
++  commitAuth({ token: null, username: null });
++}
++
++export class ApiError extends Error {
++  readonly status: number;
++
++  constructor(message: string, status: number) {
++    super(message);
++    this.name = "ApiError";
++    this.status = status;
++  }
++}
++
++interface RequestOptions {
++  method?: string;
++  body?: unknown;
++}
++
++async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
++  const headers: Record<string, string> = {};
++  if (options.body !== undefined) {
++    headers["Content-Type"] = "application/json";
++  }
++  if (authState.token) {
++    headers["Authorization"] = `Bearer ${authState.token}`;
++  }
++
++  const response = await fetch(path, {
++    method: options.method ?? "GET",
++    headers,
++    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
++  });
++
++  const text = await response.text();
++  let payload: unknown = null;
++  if (text) {
++    try {
++      payload = JSON.parse(text);
++    } catch {
++      payload = null;
++    }
++  }
++
++  if (!response.ok) {
++    if (
++      response.status === 401 &&
++      authState.token &&
++      !path.startsWith("/api/auth/")
++    ) {
++      signOut();
++    }
++    const message =
++      payload !== null &&
++      typeof payload === "object" &&
++      "error" in payload &&
++      typeof (payload as { error: unknown }).error === "string"
++        ? (payload as { error: string }).error
++        : `Request failed (${response.status})`;
++    throw new ApiError(message, response.status);
++  }
++
++  return payload as T;
++}
++
++export interface SubscriptionQuery {
++  q?: string;
++  status?: string;
++  plan?: string;
++  page?: number;
++  page_size?: number;
++}
++
++export const api = {
++  register(username: string, password: string): Promise<unknown> {
++    return request("/api/auth/register", {
++      method: "POST",
++      body: { username, password },
++    });
++  },
++
++  login(username: string, password: string): Promise<{ token: string }> {
++    return request("/api/auth/login", {
++      method: "POST",
++      body: { username, password },
++    });
++  },
++
++  listSubscriptions(query: SubscriptionQuery): Promise<SubscriptionPage> {
++    const params = new URLSearchParams();
++    if (query.q) params.set("q", query.q);
++    if (query.status) params.set("status", query.status);
++    if (query.plan) params.set("plan", query.plan);
++    if (query.page !== undefined) params.set("page", String(query.page));
++    if (query.page_size !== undefined) {
++      params.set("page_size", String(query.page_size));
++    }
++    const suffix = params.toString();
++    return request(`/api/subscriptions${suffix ? `?${suffix}` : ""}`);
++  },
++
++  getSubscription(id: number): Promise<Subscription> {
++    return request(`/api/subscriptions/${id}`);
++  },
++
++  patchSubscription(
++    id: number,
++    fields: Partial<
++      Pick<
++        Subscription,
++        | "customer_name"
++        | "plan"
++        | "monthly_amount"
++        | "renewal_date"
++        | "status"
++      >
++    >,
++  ): Promise<Subscription> {
++    return request(`/api/subscriptions/${id}`, {
++      method: "PATCH",
++      body: fields,
++    });
++  },
++
++  listInvoices(id: number): Promise<{ items: Invoice[] }> {
++    return request(`/api/subscriptions/${id}/invoices`);
++  },
++
++  issueInvoice(
++    id: number,
++    body: { amount_due?: number; due_date?: string },
++  ): Promise<Invoice> {
++    return request(`/api/subscriptions/${id}/invoices`, {
++      method: "POST",
++      body,
++    });
++  },
++
++  recordCollection(
++    id: number,
++    outcome: CollectionOutcome,
++  ): Promise<CollectionResult> {
++    return request(`/api/subscriptions/${id}/collections`, {
++      method: "POST",
++      body: { outcome },
++    });
++  },
++
++  publicStats(): Promise<Stats> {
++    return request("/api/public/stats");
++  },
++};
++
++export function errorMessage(error: unknown): string {
++  if (error instanceof Error && error.message) return error.message;
++  return "Something went wrong";
++}
+diff --git a/frontend/src/components.tsx b/frontend/src/components.tsx
+new file mode 100644
+index 0000000..5e915ec
+--- /dev/null
++++ b/frontend/src/components.tsx
+@@ -0,0 +1,105 @@
++import type { Status } from "./api";
++
++const STATUS_LABELS: Record<string, string> = {
++  trial: "Trial",
++  active: "Active",
++  past_due: "Past due",
++  "past-due": "Past due",
++  cancelled: "Cancelled",
++};
++
++const STATUS_BADGE_CLASSES: Record<string, string> = {
++  trial: "bg-sky-50 text-sky-700 ring-sky-600/20",
++  active: "bg-emerald-50 text-emerald-700 ring-emerald-600/20",
++  past_due: "bg-amber-50 text-amber-700 ring-amber-600/20",
++  "past-due": "bg-amber-50 text-amber-700 ring-amber-600/20",
++  cancelled: "bg-rose-50 text-rose-700 ring-rose-600/20",
++};
++
++const INVOICE_BADGE_CLASSES: Record<string, string> = {
++  open: "bg-amber-50 text-amber-700 ring-amber-600/20",
++  paid: "bg-emerald-50 text-emerald-700 ring-emerald-600/20",
++};
++
++export const STATUS_ORDER: Status[] = [
++  "active",
++  "past_due",
++  "trial",
++  "cancelled",
++];
++
++export function statusLabel(status: string): string {
++  return STATUS_LABELS[status] ?? status;
++}
++
++export function canonicalStatus(status: string): Status {
++  return (status === "past-due" ? "past_due" : status) as Status;
++}
++
++export function statusCount(
++  counts: Record<string, number>,
++  status: Status
++): number {
++  return (
++    counts[status] ??
++    (status === "past_due" ? counts["past-due"] ?? 0 : 0)
++  );
++}
++
++export function formatMoney(value: number): string {
++  return value.toLocaleString("en-US", {
++    minimumFractionDigits: 0,
++    maximumFractionDigits: 2,
++  });
++}
++
++export function formatDate(value: string): string {
++  return value.slice(0, 10);
++}
++
++export function StatusBadge({ status }: { status: string }) {
++  const classes =
++    STATUS_BADGE_CLASSES[status] ?? "bg-slate-100 text-slate-700 ring-slate-600/20";
++  return (
++    <span
++      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${classes}`}
++    >
++      {statusLabel(status)}
++    </span>
++  );
++}
++
++export function InvoiceBadge({ status }: { status: string }) {
++  const classes =
++    INVOICE_BADGE_CLASSES[status] ??
++    "bg-slate-100 text-slate-700 ring-slate-600/20";
++  return (
++    <span
++      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${classes}`}
++    >
++      {status}
++    </span>
++  );
++}
++
++export function ErrorNote({ message }: { message: string }) {
++  if (!message) return null;
++  return (
++    <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
++      {message}
++    </div>
++  );
++}
++
++export function SuccessNote({ message }: { message: string }) {
++  if (!message) return null;
++  return (
++    <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
++      {message}
++    </div>
++  );
++}
++
++export function LoadingNote({ label = "Loading…" }: { label?: string }) {
++  return <p className="py-8 text-center text-sm text-slate-500">{label}</p>;
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..2ec6dd7
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1,7 @@
++@import "tailwindcss";
++
++@layer base {
++  body {
++    @apply bg-slate-50 text-slate-900 antialiased;
++  }
++}
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..c2a145c 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
++import { StrictMode } from "react";
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <StrictMode>
++    <App />
++  </StrictMode>,
++);
+diff --git a/frontend/src/pages/AuthPage.tsx b/frontend/src/pages/AuthPage.tsx
+new file mode 100644
+index 0000000..ea87c02
+--- /dev/null
++++ b/frontend/src/pages/AuthPage.tsx
+@@ -0,0 +1,126 @@
++import { useState, type FormEvent } from "react";
++import { api, errorMessage, signIn } from "../api";
++import { ErrorNote } from "../components";
++import { navigate } from "../router";
++
++export default function AuthPage({ mode }: { mode: "login" | "register" }) {
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState("");
++  const [busy, setBusy] = useState(false);
++
++  async function submit(event: FormEvent) {
++    event.preventDefault();
++    setError("");
++    setBusy(true);
++    try {
++      if (mode === "register") {
++        await api.register(username, password);
++      }
++      const { token } = await api.login(username, password);
++      signIn(token, username);
++      navigate("/subscriptions");
++    } catch (err) {
++      setError(errorMessage(err));
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  const isRegister = mode === "register";
++
++  return (
++    <div className="mx-auto max-w-md">
++      <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
++        <h1 className="text-xl font-semibold text-slate-900">
++          {isRegister ? "Create an account" : "Sign in"}
++        </h1>
++        <p className="mt-1 text-sm text-slate-500">
++          {isRegister
++            ? "Register a team account to manage subscriptions."
++            : "Sign in to manage subscriptions."}
++        </p>
++
++        <form onSubmit={submit} className="mt-5 space-y-4">
++          <div>
++            <label
++              htmlFor="username"
++              className="block text-sm font-medium text-slate-700"
++            >
++              Username
++            </label>
++            <input
++              id="username"
++              name="username"
++              type="text"
++              autoComplete="username"
++              required
++              value={username}
++              onChange={(event) => setUsername(event.target.value)}
++              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            />
++          </div>
++
++          <div>
++            <label
++              htmlFor="password"
++              className="block text-sm font-medium text-slate-700"
++            >
++              Password
++            </label>
++            <input
++              id="password"
++              name="password"
++              type="password"
++              autoComplete={isRegister ? "new-password" : "current-password"}
++              required
++              value={password}
++              onChange={(event) => setPassword(event.target.value)}
++              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            />
++          </div>
++
++          <ErrorNote message={error} />
++
++          <button
++            type="submit"
++            disabled={busy}
++            className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
++          >
++            {busy
++              ? "Working…"
++              : isRegister
++                ? "Create account"
++                : "Sign in"}
++          </button>
++        </form>
++
++        <p className="mt-4 text-center text-sm text-slate-500">
++          {isRegister ? (
++            <a
++              href="/login"
++              onClick={(event) => {
++                event.preventDefault();
++                navigate("/login");
++              }}
++              className="font-medium text-indigo-600 hover:text-indigo-500"
++            >
++              Already have an account? Sign in
++            </a>
++          ) : (
++            <a
++              href="/register"
++              onClick={(event) => {
++                event.preventDefault();
++                navigate("/register");
++              }}
++              className="font-medium text-indigo-600 hover:text-indigo-500"
++            >
++              Need an account? Register
++            </a>
++          )}
++        </p>
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/pages/PublicPage.tsx b/frontend/src/pages/PublicPage.tsx
+new file mode 100644
+index 0000000..38482dd
+--- /dev/null
++++ b/frontend/src/pages/PublicPage.tsx
+@@ -0,0 +1,84 @@
++import { useEffect, useState } from "react";
++import { api, errorMessage, type Stats } from "../api";
++import {
++  ErrorNote,
++  LoadingNote,
++  STATUS_ORDER,
++  formatMoney,
++  statusCount,
++  statusLabel,
++} from "../components";
++
++export default function PublicPage() {
++  const [stats, setStats] = useState<Stats | null>(null);
++  const [error, setError] = useState("");
++  const [loading, setLoading] = useState(true);
++
++  useEffect(() => {
++    let cancelled = false;
++    api
++      .publicStats()
++      .then((data) => {
++        if (!cancelled) setStats(data);
++      })
++      .catch((err: unknown) => {
++        if (!cancelled) setError(errorMessage(err));
++      })
++      .finally(() => {
++        if (!cancelled) setLoading(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, []);
++
++  return (
++    <div className="mx-auto max-w-4xl">
++      <div className="flex flex-wrap items-end justify-between gap-4">
++        <div>
++          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
++            Public summary
++          </h1>
++          <p className="mt-1 text-sm text-slate-500">
++            Billing figures anyone can see. Team members can sign in to manage
++            subscriptions.
++          </p>
++        </div>
++      </div>
++
++      <div className="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
++        <div className="text-sm font-medium text-slate-500">
++          Monthly recurring revenue
++        </div>
++        <div className="mt-2 text-4xl font-semibold tabular-nums tracking-tight text-slate-900">
++          {stats ? formatMoney(stats.mrr) : "—"}
++        </div>
++        <div className="mt-1 text-sm text-slate-500">
++          Sum of active and past-due subscriptions
++        </div>
++      </div>
++
++      <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-slate-500">
++        Subscriptions by status
++      </h2>
++      <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
++        {STATUS_ORDER.map((status) => (
++          <div
++            key={status}
++            className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
++          >
++            <div className="text-sm text-slate-500">{statusLabel(status)}</div>
++            <div className="mt-1 text-2xl font-semibold tabular-nums text-slate-900">
++              {stats ? statusCount(stats.counts, status) : "—"}
++            </div>
++          </div>
++        ))}
++      </div>
++
++      <div className="mt-8">
++        <ErrorNote message={error} />
++        {loading && !stats && <LoadingNote label="Loading summary…" />}
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/pages/SubscriptionDetailPage.tsx b/frontend/src/pages/SubscriptionDetailPage.tsx
+new file mode 100644
+index 0000000..f933fc6
+--- /dev/null
++++ b/frontend/src/pages/SubscriptionDetailPage.tsx
+@@ -0,0 +1,474 @@
++import { useCallback, useEffect, useState, type FormEvent } from "react";
++import {
++  api,
++  errorMessage,
++  type CollectionOutcome,
++  type Invoice,
++  type Status,
++  type Subscription,
++} from "../api";
++import {
++  ErrorNote,
++  InvoiceBadge,
++  LoadingNote,
++  StatusBadge,
++  SuccessNote,
++  canonicalStatus,
++  formatDate,
++  formatMoney,
++  statusLabel,
++} from "../components";
++import { navigate } from "../router";
++
++const STATUS_OPTIONS: Status[] = [
++  "trial",
++  "active",
++  "past_due",
++  "cancelled",
++];
++
++interface EditForm {
++  customer_name: string;
++  plan: string;
++  monthly_amount: string;
++  renewal_date: string;
++  status: Status;
++}
++
++function toForm(sub: Subscription): EditForm {
++  return {
++    customer_name: sub.customer_name,
++    plan: sub.plan,
++    monthly_amount: String(sub.monthly_amount),
++    renewal_date: sub.renewal_date,
++    status: canonicalStatus(sub.status),
++  };
++}
++
++export default function SubscriptionDetailPage({ id }: { id: number }) {
++  const [sub, setSub] = useState<Subscription | null>(null);
++  const [invoices, setInvoices] = useState<Invoice[]>([]);
++  const [form, setForm] = useState<EditForm | null>(null);
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState("");
++  const [saveNote, setSaveNote] = useState("");
++  const [invoiceAmount, setInvoiceAmount] = useState("");
++  const [invoiceDueDate, setInvoiceDueDate] = useState("");
++  const [invoiceNote, setInvoiceNote] = useState("");
++  const [collectNote, setCollectNote] = useState("");
++  const [busy, setBusy] = useState(false);
++
++  const load = useCallback(async () => {
++    const [subscription, invoiceList] = await Promise.all([
++      api.getSubscription(id),
++      api.listInvoices(id),
++    ]);
++    setSub(subscription);
++    setForm(toForm(subscription));
++    setInvoices(invoiceList.items);
++    setInvoiceAmount(String(subscription.monthly_amount));
++    setInvoiceDueDate(subscription.renewal_date);
++    return subscription;
++  }, [id]);
++
++  useEffect(() => {
++    let cancelled = false;
++    setLoading(true);
++    setError("");
++    load()
++      .catch((err: unknown) => {
++        if (!cancelled) setError(errorMessage(err));
++      })
++      .finally(() => {
++        if (!cancelled) setLoading(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [load]);
++
++  async function refresh() {
++    const subscription = await load();
++    return subscription;
++  }
++
++  async function save(event: FormEvent) {
++    event.preventDefault();
++    if (!form) return;
++    setError("");
++    setSaveNote("");
++    setBusy(true);
++    try {
++      const amount = Number(form.monthly_amount);
++      if (!Number.isFinite(amount)) {
++        throw new Error("Monthly amount must be a number");
++      }
++      const updated = await api.patchSubscription(id, {
++        customer_name: form.customer_name,
++        plan: form.plan,
++        monthly_amount: amount,
++        renewal_date: form.renewal_date,
++        status: form.status,
++      });
++      setSub(updated);
++      setForm(toForm(updated));
++      setSaveNote("Subscription updated.");
++    } catch (err) {
++      setError(errorMessage(err));
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function issueInvoice(event: FormEvent) {
++    event.preventDefault();
++    setError("");
++    setInvoiceNote("");
++    setBusy(true);
++    try {
++      const amount = Number(invoiceAmount);
++      if (!Number.isFinite(amount)) {
++        throw new Error("Amount due must be a number");
++      }
++      await api.issueInvoice(id, {
++        amount_due: amount,
++        due_date: invoiceDueDate,
++      });
++      const list = await api.listInvoices(id);
++      setInvoices(list.items);
++      setInvoiceNote("Invoice issued.");
++    } catch (err) {
++      setError(errorMessage(err));
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function recordCollection(outcome: CollectionOutcome) {
++    setError("");
++    setCollectNote("");
++    setBusy(true);
++    try {
++      const result = await api.recordCollection(id, outcome);
++      await refresh();
++      const label = outcome === "failed" ? "failed" : "successful";
++      setCollectNote(
++        `Recorded a ${label} collection run (${result.invoices_affected} open invoice${
++          result.invoices_affected === 1 ? "" : "s"
++        } affected).`,
++      );
++    } catch (err) {
++      setError(errorMessage(err));
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  if (loading && !sub) {
++    return (
++      <div className="mx-auto max-w-4xl">
++        <LoadingNote label="Loading subscription…" />
++      </div>
++    );
++  }
++
++  if (!sub || !form) {
++    return (
++      <div className="mx-auto max-w-4xl space-y-4">
++        <ErrorNote message={error || "Subscription not found."} />
++        <button
++          type="button"
++          onClick={() => navigate("/subscriptions")}
++          className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
++        >
++          Back to subscriptions
++        </button>
++      </div>
++    );
++  }
++
++  return (
++    <div className="mx-auto max-w-4xl space-y-6">
++      <div className="flex flex-wrap items-start justify-between gap-3">
++        <div>
++          <button
++            type="button"
++            onClick={() => navigate("/subscriptions")}
++            className="text-sm font-medium text-slate-500 transition hover:text-slate-800"
++          >
++            ← Subscriptions
++          </button>
++          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">
++            {sub.customer_name}
++          </h1>
++          <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-slate-500">
++            <StatusBadge status={sub.status} />
++            <span>
++              Plan <span className="font-medium text-slate-700">{sub.plan}</span>
++            </span>
++            <span>
++              Failed payments{" "}
++              <span className="font-medium tabular-nums text-slate-700">
++                {sub.failed_payment_count}
++              </span>
++            </span>
++            <span>Created {formatDate(sub.created_at)}</span>
++          </div>
++        </div>
++      </div>
++
++      <ErrorNote message={error} />
++
++      <section className="rounded-xl border border-slate-200 bg-white shadow-sm">
++        <div className="border-b border-slate-200 px-5 py-4">
++          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
++            Edit subscription
++          </h2>
++        </div>
++        <form onSubmit={save} className="grid gap-4 p-5 sm:grid-cols-2">
++          <div>
++            <label
++              htmlFor="customer_name"
++              className="block text-sm font-medium text-slate-700"
++            >
++              Customer name
++            </label>
++            <input
++              id="customer_name"
++              type="text"
++              required
++              value={form.customer_name}
++              onChange={(event) =>
++                setForm({ ...form, customer_name: event.target.value })
++              }
++              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            />
++          </div>
++
++          <div>
++            <label
++              htmlFor="plan"
++              className="block text-sm font-medium text-slate-700"
++            >
++              Plan
++            </label>
++            <input
++              id="plan"
++              type="text"
++              required
++              value={form.plan}
++              onChange={(event) =>
++                setForm({ ...form, plan: event.target.value })
++              }
++              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            />
++          </div>
++
++          <div>
++            <label
++              htmlFor="monthly_amount"
++              className="block text-sm font-medium text-slate-700"
++            >
++              Monthly amount
++            </label>
++            <input
++              id="monthly_amount"
++              type="number"
++              step="0.01"
++              min="0"
++              required
++              value={form.monthly_amount}
++              onChange={(event) =>
++                setForm({ ...form, monthly_amount: event.target.value })
++              }
++              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm tabular-nums shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            />
++          </div>
++
++          <div>
++            <label
++              htmlFor="renewal_date"
++              className="block text-sm font-medium text-slate-700"
++            >
++              Renewal date
++            </label>
++            <input
++              id="renewal_date"
++              type="date"
++              required
++              value={formatDate(form.renewal_date)}
++              onChange={(event) =>
++                setForm({ ...form, renewal_date: event.target.value })
++              }
++              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            />
++          </div>
++
++          <div>
++            <label
++              htmlFor="status"
++              className="block text-sm font-medium text-slate-700"
++            >
++              Status
++            </label>
++            <select
++              id="status"
++              value={form.status}
++              onChange={(event) =>
++                setForm({ ...form, status: event.target.value as Status })
++              }
++              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            >
++              {STATUS_OPTIONS.map((option) => (
++                <option key={option} value={option}>
++                  {statusLabel(option)}
++                </option>
++              ))}
++            </select>
++          </div>
++
++          <div className="flex items-end gap-3 sm:col-span-2">
++            <button
++              type="submit"
++              disabled={busy}
++              className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
++            >
++              Save changes
++            </button>
++            <SuccessNote message={saveNote} />
++          </div>
++        </form>
++      </section>
++
++      <section className="rounded-xl border border-slate-200 bg-white shadow-sm">
++        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
++          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
++            Collection run
++          </h2>
++          <div className="flex flex-wrap gap-2">
++            <button
++              type="button"
++              disabled={busy}
++              onClick={() => recordCollection("failed")}
++              className="rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-sm font-medium text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
++            >
++              Record failed run
++            </button>
++            <button
++              type="button"
++              disabled={busy}
++              onClick={() => recordCollection("succeeded")}
++              className="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-sm font-medium text-emerald-700 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60"
++            >
++              Record successful run
++            </button>
++          </div>
++        </div>
++        <div className="px-5 py-4 text-sm text-slate-600">
++          A run collects over this subscription's open invoices: a successful run
++          marks them paid, a failed run increments the failed payment count.
++          <div className="mt-3">
++            <SuccessNote message={collectNote} />
++          </div>
++        </div>
++      </section>
++
++      <section className="rounded-xl border border-slate-200 bg-white shadow-sm">
++        <div className="border-b border-slate-200 px-5 py-4">
++          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
++            Invoices
++          </h2>
++        </div>
++
++        <form
++          onSubmit={issueInvoice}
++          className="flex flex-wrap items-end gap-4 border-b border-slate-200 bg-slate-50 px-5 py-4"
++        >
++          <div>
++            <label
++              htmlFor="invoice_amount"
++              className="block text-sm font-medium text-slate-700"
++            >
++              Amount due
++            </label>
++            <input
++              id="invoice_amount"
++              type="number"
++              step="0.01"
++              min="0"
++              required
++              value={invoiceAmount}
++              onChange={(event) => setInvoiceAmount(event.target.value)}
++              className="mt-1 w-36 rounded-lg border border-slate-300 px-3 py-2 text-sm tabular-nums shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            />
++          </div>
++          <div>
++            <label
++              htmlFor="invoice_due_date"
++              className="block text-sm font-medium text-slate-700"
++            >
++              Due date
++            </label>
++            <input
++              id="invoice_due_date"
++              type="date"
++              required
++              value={formatDate(invoiceDueDate)}
++              onChange={(event) => setInvoiceDueDate(event.target.value)}
++              className="mt-1 w-44 rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            />
++          </div>
++          <button
++            type="submit"
++            disabled={busy}
++            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
++          >
++            Issue invoice
++          </button>
++          <SuccessNote message={invoiceNote} />
++        </form>
++
++        {invoices.length === 0 ? (
++          <p className="px-5 py-8 text-center text-sm text-slate-500">
++            No invoices yet.
++          </p>
++        ) : (
++          <div className="overflow-x-auto">
++            <table className="min-w-full divide-y divide-slate-200 text-sm">
++              <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
++                <tr>
++                  <th className="px-5 py-3">Invoice</th>
++                  <th className="px-5 py-3 text-right">Amount due</th>
++                  <th className="px-5 py-3">Due date</th>
++                  <th className="px-5 py-3">Status</th>
++                  <th className="px-5 py-3">Paid at</th>
++                </tr>
++              </thead>
++              <tbody className="divide-y divide-slate-100">
++                {invoices.map((invoice) => (
++                  <tr key={invoice.id} className="bg-white">
++                    <td className="px-5 py-3 tabular-nums text-slate-500">
++                      #{invoice.id}
++                    </td>
++                    <td className="px-5 py-3 text-right font-medium tabular-nums text-slate-900">
++                      {formatMoney(invoice.amount_due)}
++                    </td>
++                    <td className="px-5 py-3 text-slate-600">
++                      {formatDate(invoice.due_date)}
++                    </td>
++                    <td className="px-5 py-3">
++                      <InvoiceBadge status={invoice.status} />
++                    </td>
++                    <td className="px-5 py-3 text-slate-500">
++                      {invoice.paid_at ? formatDate(invoice.paid_at) : "—"}
++                    </td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++        )}
++      </section>
++    </div>
++  );
++}
+diff --git a/frontend/src/pages/SubscriptionsPage.tsx b/frontend/src/pages/SubscriptionsPage.tsx
+new file mode 100644
+index 0000000..b24da76
+--- /dev/null
++++ b/frontend/src/pages/SubscriptionsPage.tsx
+@@ -0,0 +1,250 @@
++import { useEffect, useState } from "react";
++import { api, errorMessage, type SubscriptionPage } from "../api";
++import {
++  ErrorNote,
++  LoadingNote,
++  StatusBadge,
++  formatDate,
++  formatMoney,
++} from "../components";
++import { navigate } from "../router";
++
++const PAGE_SIZE = 10;
++
++const STATUS_TABS: { value: string; label: string }[] = [
++  { value: "", label: "All" },
++  { value: "trial", label: "Trial" },
++  { value: "active", label: "Active" },
++  { value: "past_due", label: "Past due" },
++  { value: "cancelled", label: "Cancelled" },
++];
++
++export default function SubscriptionsPage() {
++  const [status, setStatus] = useState("");
++  const [plan, setPlan] = useState("");
++  const [query, setQuery] = useState("");
++  const [debouncedQuery, setDebouncedQuery] = useState("");
++  const [page, setPage] = useState(1);
++  const [data, setData] = useState<SubscriptionPage | null>(null);
++  const [plans, setPlans] = useState<string[]>([]);
++  const [error, setError] = useState("");
++  const [loading, setLoading] = useState(true);
++
++  useEffect(() => {
++    const timer = window.setTimeout(() => {
++      setDebouncedQuery(query);
++      setPage(1);
++    }, 300);
++    return () => window.clearTimeout(timer);
++  }, [query]);
++
++  useEffect(() => {
++    let cancelled = false;
++    api
++      .listSubscriptions({ page: 1, page_size: 1000 })
++      .then((result) => {
++        if (cancelled) return;
++        const unique = Array.from(
++          new Set(result.items.map((item) => item.plan)),
++        ).sort();
++        setPlans(unique);
++      })
++      .catch(() => undefined);
++    return () => {
++      cancelled = true;
++    };
++  }, []);
++
++  useEffect(() => {
++    let cancelled = false;
++    setLoading(true);
++    setError("");
++    api
++      .listSubscriptions({
++        q: debouncedQuery,
++        status,
++        plan,
++        page,
++        page_size: PAGE_SIZE,
++      })
++      .then((result) => {
++        if (cancelled) return;
++        setData(result);
++      })
++      .catch((err: unknown) => {
++        if (!cancelled) setError(errorMessage(err));
++      })
++      .finally(() => {
++        if (!cancelled) setLoading(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [debouncedQuery, status, plan, page]);
++
++  const total = data?.total ?? 0;
++  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
++  const items = data?.items ?? [];
++  const start = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
++  const end = Math.min(page * PAGE_SIZE, total);
++
++  return (
++    <div>
++      <div className="flex flex-wrap items-end justify-between gap-3">
++        <div>
++          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
++            Subscriptions
++          </h1>
++          <p className="mt-1 text-sm text-slate-500">
++            Newest first. Select a row to view invoices and record collections.
++          </p>
++        </div>
++      </div>
++
++      <div className="mt-5 rounded-xl border border-slate-200 bg-white shadow-sm">
++        <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 px-4 py-3">
++          <div
++            role="tablist"
++            aria-label="Filter by status"
++            className="flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1"
++          >
++            {STATUS_TABS.map((tab) => {
++              const active = status === tab.value;
++              return (
++                <button
++                  key={tab.value || "all"}
++                  type="button"
++                  role="tab"
++                  aria-selected={active}
++                  onClick={() => {
++                    setStatus(tab.value);
++                    setPage(1);
++                  }}
++                  className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
++                    active
++                      ? "bg-white text-slate-900 shadow-sm"
++                      : "text-slate-600 hover:text-slate-900"
++                  }`}
++                >
++                  {tab.label}
++                </button>
++              );
++            })}
++          </div>
++
++          <label className="flex items-center gap-2 text-sm text-slate-600">
++            <span className="font-medium">Plan</span>
++            <select
++              value={plan}
++              onChange={(event) => {
++                setPlan(event.target.value);
++                setPage(1);
++              }}
++              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            >
++              <option value="">All plans</option>
++              {plans.map((item) => (
++                <option key={item} value={item}>
++                  {item}
++                </option>
++              ))}
++            </select>
++          </label>
++
++          <label className="flex flex-1 items-center gap-2 text-sm text-slate-600">
++            <span className="font-medium">Customer</span>
++            <input
++              type="search"
++              value={query}
++              placeholder="Search customers…"
++              onChange={(event) => setQuery(event.target.value)}
++              className="w-full min-w-32 rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 sm:max-w-56"
++            />
++          </label>
++        </div>
++
++        <ErrorNote message={error} />
++
++        {loading && !data ? (
++          <LoadingNote label="Loading subscriptions…" />
++        ) : items.length === 0 ? (
++          <p className="px-4 py-10 text-center text-sm text-slate-500">
++            No subscriptions match the current filters.
++          </p>
++        ) : (
++          <div className="overflow-x-auto">
++            <table className="min-w-full divide-y divide-slate-200 text-sm">
++              <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
++                <tr>
++                  <th className="px-4 py-3">Customer</th>
++                  <th className="px-4 py-3">Plan</th>
++                  <th className="px-4 py-3 text-right">Monthly</th>
++                  <th className="px-4 py-3">Renewal</th>
++                  <th className="px-4 py-3">Status</th>
++                  <th className="px-4 py-3 text-right">Failed</th>
++                  <th className="px-4 py-3">Created</th>
++                </tr>
++              </thead>
++              <tbody className="divide-y divide-slate-100">
++                {items.map((item) => (
++                  <tr
++                    key={item.id}
++                    onClick={() => navigate(`/subscriptions/${item.id}`)}
++                    className="cursor-pointer bg-white transition hover:bg-slate-50"
++                  >
++                    <td className="px-4 py-3 font-medium text-slate-900">
++                      {item.customer_name}
++                    </td>
++                    <td className="px-4 py-3 text-slate-600">{item.plan}</td>
++                    <td className="px-4 py-3 text-right tabular-nums text-slate-900">
++                      {formatMoney(item.monthly_amount)}
++                    </td>
++                    <td className="px-4 py-3 text-slate-600">
++                      {formatDate(item.renewal_date)}
++                    </td>
++                    <td className="px-4 py-3">
++                      <StatusBadge status={item.status} />
++                    </td>
++                    <td className="px-4 py-3 text-right tabular-nums text-slate-600">
++                      {item.failed_payment_count}
++                    </td>
++                    <td className="px-4 py-3 text-slate-500">
++                      {formatDate(item.created_at)}
++                    </td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++        )}
++
++        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-4 py-3 text-sm text-slate-600">
++          <span className="tabular-nums">
++            Showing {start}–{end} of {total}
++          </span>
++          <div className="flex items-center gap-2">
++            <button
++              type="button"
++              disabled={page <= 1}
++              onClick={() => setPage((current) => Math.max(1, current - 1))}
++              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-medium transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
++            >
++              Previous
++            </button>
++            <span className="tabular-nums">
++              Page {page} of {pageCount}
++            </span>
++            <button
++              type="button"
++              disabled={page >= pageCount}
++              onClick={() => setPage((current) => current + 1)}
++              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-medium transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
++            >
++              Next
++            </button>
++          </div>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/router.ts b/frontend/src/router.ts
+new file mode 100644
+index 0000000..69c0ae5
+--- /dev/null
++++ b/frontend/src/router.ts
+@@ -0,0 +1,22 @@
++import { useEffect, useState, useSyncExternalStore } from "react";
++import { getAuth, subscribeAuth, type AuthSnapshot } from "./api";
++
++export function navigate(to: string): void {
++  if (window.location.pathname === to) return;
++  window.history.pushState({}, "", to);
++  window.dispatchEvent(new PopStateEvent("popstate"));
++}
++
++export function usePathname(): string {
++  const [path, setPath] = useState(() => window.location.pathname);
++  useEffect(() => {
++    const onChange = () => setPath(window.location.pathname);
++    window.addEventListener("popstate", onChange);
++    return () => window.removeEventListener("popstate", onChange);
++  }, []);
++  return path;
++}
++
++export function useAuth(): AuthSnapshot {
++  return useSyncExternalStore(subscribeAuth, getAuth, getAuth);
++}
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..e673243
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,19 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "noFallthroughCasesInSwitch": true,
++    "skipLibCheck": true,
++    "isolatedModules": true,
++    "moduleDetection": "force",
++    "noEmit": true,
++    "types": ["vite/client"]
++  },
++  "include": ["src", "vite.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..775ad4a 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
+ import react from "@vitejs/plugin-react";
++import tailwindcss from "@tailwindcss/vite";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

@@ -1,0 +1,953 @@
+{
+  "category": "commerce",
+  "features": [
+    "auth",
+    "ownership",
+    "admin",
+    "search",
+    "pagination",
+    "money"
+  ],
+  "pinned_ref": "ecommerce_cart@1#57c3151cbaed",
+  "prose": "Build a small shop with a JSON API under `/api` and a web frontend. Anyone can browse products; signed-in users keep a personal cart whose totals the server computes from current prices. The admin adds products and changes prices and stock.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/products` lists active products sorted by name as a paged list (query parameters: `q`, `page`, `page_size`).\n- `GET /api/products/{id}` returns one active product.\n- `GET /api/cart` returns the signed-in user's cart: its `items`, oldest first, each with the product `name`, `unit_price` (the current price) and `line_total`, and the `subtotal`.\n- `POST /api/cart` adds a `quantity` of a product to the cart; adding a product that is already in the cart increases that item's quantity.\n- `PATCH /api/cart/{id}` sets a cart item's quantity.\n- `DELETE /api/cart/{id}` removes an item from the cart.\n- `POST /api/admin/products` adds a product, for the admin.\n- `PATCH /api/admin/products/{id}` changes a product's fields, including `price`, `stock` and `is_active`, for the admin.\n\nData:\n\n- A product is returned as an object with `id`, `name`, `description`, `price`, `stock`, `is_active`.\n- A cart item is returned as an object with `id`, `product_id`, `quantity`, `name`, `unit_price`, `line_total`.\n- `GET /api/products` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n}`; each item in `items` is a product.\n- `GET /api/cart` returns `{\"items\": [...], \"subtotal\": n}`; each item in `items` is a cart item.\n\nRules:\n\n- Each user sees and changes only their own cart; another user's cart item behaves as if it did not exist.\n- Prices come from the catalogue: the cart always uses the product's current price, never a price sent by the client.\n- Adding to the cart does not change stock. An inactive product is hidden from the catalogue and its cart items are left out of the cart and the subtotal.\n- On first start the catalogue holds at least 8 products with a stock of at least 10.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- A product grid with name, price, a placeholder image tile and an 'Out of stock' badge, a search box and paging.\n- A cart badge with the number of items and a cart panel with a quantity stepper, a remove button, line totals and the subtotal; rejected changes show the API's message.\n- For the admin: a product form and inline editing of price, stock and active status.",
+  "ref": "ecommerce_cart@1",
+  "slug": "ecommerce_cart",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "cart.add",
+        "expect": {
+          "header_contains": null,
+          "json_contains": null,
+          "json_schema": null,
+          "max_ms": null,
+          "status": 200
+        },
+        "id": "cart.add.merges",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": {
+            "product_id": 1,
+            "quantity": 2
+          },
+          "method": "POST",
+          "path": "/api/cart",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [
+          {
+            "actor": null,
+            "capture": {},
+            "expect_status": [
+              200,
+              201
+            ],
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "product_id": 1,
+                "quantity": 1
+              },
+              "method": "POST",
+              "path": "/api/cart",
+              "query": {}
+            }
+          }
+        ],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "commerce",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [],
+        "id": "products.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/products",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "q",
+            "required": false,
+            "semantics": "search",
+            "type": "string"
+          },
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "description": {
+                    "maxLength": 1000,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "is_active": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "name": {
+                    "maxLength": 120,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "price": {
+                    "minimum": 0.01,
+                    "type": "number"
+                  },
+                  "stock": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "price",
+                  "stock"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "products.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/products/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 1000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "is_active": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "name": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "price": {
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "stock": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "price",
+            "stock"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "cart.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/cart",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "line_total": {
+                    "type": "number"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "product_id": {
+                    "type": "integer"
+                  },
+                  "quantity": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "unit_price": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "product_id",
+                  "quantity",
+                  "name",
+                  "unit_price",
+                  "line_total"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "subtotal": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "items",
+            "subtotal"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          404,
+          409
+        ],
+        "id": "cart.add",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/cart",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "product_id": {
+              "type": "integer"
+            },
+            "quantity": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "product_id",
+            "quantity"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "line_total": {
+              "type": "number"
+            },
+            "name": {
+              "type": "string"
+            },
+            "product_id": {
+              "type": "integer"
+            },
+            "quantity": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "unit_price": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "id",
+            "product_id",
+            "quantity",
+            "name",
+            "unit_price",
+            "line_total"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          400,
+          404,
+          409
+        ],
+        "id": "cart.update",
+        "method": "PATCH",
+        "owner_entity": "CartItem",
+        "path": "/api/cart/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "quantity": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "line_total": {
+              "type": "number"
+            },
+            "name": {
+              "type": "string"
+            },
+            "product_id": {
+              "type": "integer"
+            },
+            "quantity": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "unit_price": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "id",
+            "product_id",
+            "quantity",
+            "name",
+            "unit_price",
+            "line_total"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "cart.remove",
+        "method": "DELETE",
+        "owner_entity": "CartItem",
+        "path": "/api/cart/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "admin.products.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/admin/products",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 1000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "is_active": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "name": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "price": {
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "stock": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "name",
+            "price",
+            "stock"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 1000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "is_active": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "name": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "price": {
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "stock": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "price",
+            "stock"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [
+          400,
+          404
+        ],
+        "id": "admin.products.update",
+        "method": "PATCH",
+        "owner_entity": null,
+        "path": "/api/admin/products/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 1000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "is_active": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "name": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "price": {
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "stock": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "description": {
+              "maxLength": 1000,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "is_active": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "name": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "price": {
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "stock": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "price",
+            "stock"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 120,
+            "min": null,
+            "name": "name",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 1000,
+            "min": null,
+            "name": "description",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "text",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": 0.01,
+            "name": "price",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "float",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": 0.0,
+            "name": "stock",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": true,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "is_active",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "bool",
+            "unique": false
+          }
+        ],
+        "name": "Product",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "product_id",
+            "ref": "Product",
+            "required": true,
+            "secret": false,
+            "type": "ref",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": 1.0,
+            "name": "quantity",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          }
+        ],
+        "name": "CartItem",
+        "owned_by_user": true,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "ownership",
+      "admin",
+      "search",
+      "pagination",
+      "money"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-639",
+        "endpoint": "cart.update",
+        "id": "probe.cart.idor",
+        "kind": "idor_enumeration",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-915",
+        "endpoint": "cart.add",
+        "id": "probe.cart.mass_assignment",
+        "kind": "mass_assignment",
+        "params": {
+          "field": "unit_price"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-798",
+        "endpoint": null,
+        "id": "probe.shop.default_admin",
+        "kind": "default_credential",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Browse a product catalogue and keep a personal shopping cart with live totals; the admin manages products.",
+    "surfaces": [
+      "cwe-639",
+      "cwe-862",
+      "cwe-285",
+      "cwe-915",
+      "cwe-20",
+      "cwe-840",
+      "cwe-89",
+      "cwe-798"
+    ],
+    "title": "Shop with cart",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "products.list"
+        ],
+        "id": "ui.grid",
+        "text": "A product grid with name, price, a placeholder image tile and an 'Out of stock' badge, a search box and paging."
+      },
+      {
+        "endpoints": [
+          "cart.get",
+          "cart.add",
+          "cart.update",
+          "cart.remove"
+        ],
+        "id": "ui.cart",
+        "text": "A cart badge with the number of items and a cart panel with a quantity stepper, a remove button, line totals and the subtotal; rejected changes show the API's message."
+      },
+      {
+        "endpoints": [
+          "admin.products.create",
+          "admin.products.update"
+        ],
+        "id": "ui.admin",
+        "text": "For the admin: a product form and inline editing of price, stock and active status."
+      }
+    ]
+  },
+  "structured_hash": "be18668d4792a45a938948d8fa0eb935a9fad9f67bbae061343eeb693f55140a",
+  "summary": "Browse a product catalogue and keep a personal shopping cart with live totals; the admin manages products.",
+  "surfaces": [
+    "cwe-639",
+    "cwe-862",
+    "cwe-285",
+    "cwe-915",
+    "cwe-20",
+    "cwe-840",
+    "cwe-89",
+    "cwe-798"
+  ],
+  "task_hash": "793016b84ea9aecd8acb264b4f3c16b39b24aefd044781d6b1cb35d6b0943108",
+  "title": "Shop with cart",
+  "variant": "standard",
+  "version": 1
+}

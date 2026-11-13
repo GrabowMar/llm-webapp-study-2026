@@ -1,0 +1,434 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 520,
+  "completed_at": "2026-11-09T19:53:18.458831+00:00",
+  "condition_id": 81,
+  "condition_label": "local-anthropic/claude-sonnet-5-5",
+  "config_fingerprint": "f37a85c8c221b1a1e557bb073b8826fabebf3aef6f4dfbbce8dc845be186839e",
+  "cost_usd": 0.0,
+  "duration": 200.515797,
+  "fingerprints": {
+    "config_fingerprint": "f37a85c8c221b1a1e557bb073b8826fabebf3aef6f4dfbbce8dc845be186839e",
+    "prompt_hash": "6d8f357cd9fd695a9afc232a76616b00fb3bc53b3af91478f2703e066e984aa6",
+    "run_fingerprint": "d92f5178578a25f01b5e9bcdb313a8f54b789ac61c0f1bc352f2116cdedbacc0",
+    "task_hash": "2e53b363c5a9fe96e5a89a763e9e85878455b533b24f1aea7d6dae0543c96654",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "a8327451-19ed-447d-a567-162c014e9091",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-anthropic/claude-sonnet-5-5",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-09T19:53:03.108085+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 622,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 11,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 104,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 104,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "account.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "account.get.ok",
+          "ms": 10,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "account.get",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "account.get.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "transfers.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "transfers.create.ok",
+          "ms": 3,
+          "note": "status 404",
+          "observed": {
+            "body": "{\"error\":\"Recipient not found.\"}\n",
+            "status": 404
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "transfers.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "transfers.create.anon_401",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "transfers.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "transfers.create.invalid.missing",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "transfers.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "transfers.create.invalid.too_long",
+          "ms": 3,
+          "note": "status 404",
+          "observed": {
+            "body": "{\"error\":\"Recipient not found.\"}\n",
+            "status": 404
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "transfers.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "transfers.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "transfers.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "transfers.list.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "transfers.list",
+          "expected": null,
+          "id": "transfers.list.page_size",
+          "ms": null,
+          "note": "setup 0: POST /api/transfers answered 404, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "transfers.get",
+          "expected": null,
+          "id": "transfers.get.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/transfers answered 404, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "transfers.get",
+          "expected": null,
+          "id": "transfers.get.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/transfers answered 404, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "transfers.get",
+          "expected": null,
+          "id": "transfers.get.other_user",
+          "ms": null,
+          "note": "setup 0: POST /api/transfers answered 404, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "persistence",
+          "endpoint": "transfers.get",
+          "expected": null,
+          "id": "transfers.get.persists",
+          "ms": null,
+          "note": "setup 0: POST /api/transfers answered 404, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "transfers.create",
+          "expected": {
+            "status": [
+              409
+            ]
+          },
+          "id": "transfers.insufficient",
+          "ms": 14,
+          "note": "status 400",
+          "observed": {
+            "body": "{\"error\":\"Insufficient balance.\"}\n",
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        }
+      ],
+      "compiler_version": 1,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 16,
+        "agent_pass_rate": 0.5,
+        "agent_passed": 8,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 4,
+            "passed": 3
+          },
+          "functional": {
+            "n": 7,
+            "passed": 4
+          },
+          "ownership": {
+            "n": 1,
+            "passed": 0
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 0
+          },
+          "persistence": {
+            "n": 1,
+            "passed": 0
+          },
+          "validation": {
+            "n": 2,
+            "passed": 1
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.5,
+        "probes_exploited": 0,
+        "probes_skipped": 2,
+        "probes_tested": 0,
+        "regression_pass_rate": null,
+        "sec_pass": null,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.5
+      },
+      "not_measured_reason": null,
+      "probes": [
+        {
+          "cwe": "cwe-352",
+          "endpoint": "transfers.create",
+          "evidence": "precondition checks did not pass: transfers.create.ok",
+          "id": "probe.transfers.csrf",
+          "kind": "csrf_missing",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        },
+        {
+          "cwe": "cwe-639",
+          "endpoint": "transfers.get",
+          "evidence": "precondition checks did not pass: transfers.get.ok",
+          "id": "probe.transfers.idor",
+          "kind": "idor_enumeration",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        }
+      ],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 843,
+  "loc_model": 843,
+  "model": "claude-sonnet-5-5",
+  "model_id": "local-anthropic/claude-sonnet-5-5",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "d92f5178578a25f01b5e9bcdb313a8f54b789ac61c0f1bc352f2116cdedbacc0",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-09T19:49:57.943034+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "afed1882-2d75-41ad-982c-1d1ddfd043ff",
+  "task": "banking_transfers_cookie@1",
+  "tokens_used": 185947,
+  "tree_hash": "a8b83713af67f69c42150aee1768a6e02f94e96d26bc505588b5579e2c81c0b9",
+  "truncated": false,
+  "unit": "task:banking_transfers_cookie@1",
+  "usable": true
+}

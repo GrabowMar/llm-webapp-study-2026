@@ -1,0 +1,537 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 731,
+  "completed_at": "2026-11-11T05:03:31.989787+00:00",
+  "condition_id": 99,
+  "condition_label": "local-opencode-go/minimax-m3",
+  "config_fingerprint": "b2538f2d75cdd849e407a0e837f6637cd41d3e4481efe9b6892c8e945a8be28c",
+  "cost_usd": 0.0,
+  "duration": 582.972861,
+  "fingerprints": {
+    "config_fingerprint": "b2538f2d75cdd849e407a0e837f6637cd41d3e4481efe9b6892c8e945a8be28c",
+    "prompt_hash": "2eb177a943d899ef85c43c2f60bfb744ddbd8384ff7c98d0731f4e70b5f50392",
+    "run_fingerprint": "2e2708357989a69da508bb2a77550d9ad95d8b4300a2dfbb0243b34e3d6f6c72",
+    "task_hash": "96ca93b6dfef48b15cfef5ed9d44673181cff9cdb5708c90b52d983e3223e6e6",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "d8fcc1ba-61a4-412a-8069-4d54bf78f7ef",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/minimax-m3",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-11T05:03:05.230647+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 842,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 13,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 124,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 117,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "sensors.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "sensors.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "sensors.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "sensors.create.ok",
+          "ms": 4,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "sensors.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "sensors.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "sensors.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "sensors.create.invalid.missing",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "sensors.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "sensors.create.invalid.too_long",
+          "ms": 4,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"id\":2,\"last_updated\":null,\"last_value\":null,\"location\":\"llmlab location\",\"name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"owner\":\"usera1f180569\",\"unit\":\"llmlab unit\"}\n",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "sensors.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "sensors.get.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "sensors.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "sensors.delete.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 204
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "sensors.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "sensors.delete.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "sensors.delete",
+          "expected": {
+            "status": [
+              403,
+              404
+            ]
+          },
+          "id": "sensors.delete.other_user",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "readings.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "readings.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "readings.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "readings.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "readings.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "readings.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "readings.create",
+          "expected": {
+            "status": [
+              403,
+              404
+            ]
+          },
+          "id": "readings.create.other_user",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "readings.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "readings.create.invalid.missing",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "sensors.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "readings.updates_last_value",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 17,
+        "agent_pass_rate": 0.9411764705882353,
+        "agent_passed": 16,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 3,
+            "passed": 3
+          },
+          "functional": {
+            "n": 9,
+            "passed": 9
+          },
+          "ownership": {
+            "n": 2,
+            "passed": 2
+          },
+          "validation": {
+            "n": 3,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.9411764705882353,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 2,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.9411764705882353
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-639",
+          "endpoint": "readings.create",
+          "evidence": "user_b got 403",
+          "id": "probe.sensors.idor",
+          "kind": "idor_enumeration",
+          "skip_reason": null,
+          "status": "not_exploited"
+        },
+        {
+          "cwe": "cwe-79",
+          "endpoint": "sensors.create",
+          "evidence": "payload not served unescaped as HTML",
+          "id": "probe.sensors.xss",
+          "kind": "xss_stored",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1376,
+  "loc_model": 1376,
+  "model": "minimax-m3",
+  "model_id": "local-opencode-go/minimax-m3",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "2e2708357989a69da508bb2a77550d9ad95d8b4300a2dfbb0243b34e3d6f6c72",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-11T04:53:49.016926+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "iot_sensor_display@1",
+  "tokens_used": 2779357,
+  "tree_hash": "a93880730e4c8188be5ecaa39b981fb1c1f6a7001c49fbb3f8f489ad87eb3ce5",
+  "truncated": true,
+  "unit": "task:iot_sensor_display@1",
+  "usable": true
+}

@@ -1,0 +1,2832 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..07b6b20
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,5 @@
++node_modules
++dist
++.venv
++data/
++__pycache__
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..bd3de36 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,573 @@
+-"""Flask entry point."""
++"""Recipe book: Flask JSON API plus the built frontend."""
+ 
++import hashlib
++import json
++import os
++import secrets
++import sqlite3
++from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.exceptions import HTTPException
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", "data")).resolve()
++DB_PATH = DATA_DIR / "recipes.db"
++TOKEN_TTL = timedelta(days=30)
++MAX_PAGE_SIZE = 100
++DEFAULT_PAGE_SIZE = 10
+ 
+ app = Flask(__name__, static_folder=None)
++app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
++    password_hash TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS tokens (
++    token_hash TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    expires_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS recipes (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    title TEXT NOT NULL,
++    ingredients TEXT NOT NULL,
++    instructions TEXT NOT NULL,
++    category TEXT NOT NULL,
++    prep_minutes INTEGER NOT NULL,
++    servings INTEGER NOT NULL,
++    created_at TEXT NOT NULL,
++    author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE
++);
++CREATE INDEX IF NOT EXISTS recipes_created ON recipes(created_at DESC, id DESC);
++CREATE INDEX IF NOT EXISTS recipes_category ON recipes(category COLLATE NOCASE);
++CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
++"""
++
++SAMPLES = [
++    {
++        "title": "Classic Margherita Pizza",
++        "category": "Main course",
++        "prep_minutes": 30,
++        "servings": 2,
++        "ingredients": [
++            "300 g pizza dough",
++            "120 ml tomato passata",
++            "200 g fresh mozzarella",
++            "A handful of fresh basil leaves",
++            "2 tbsp olive oil",
++            "Salt",
++        ],
++        "instructions": "Heat the oven to its highest setting with a baking tray inside.\n"
++        "Stretch the dough into a thin round on a sheet of baking paper.\n"
++        "Spread the passata, tear over the mozzarella and drizzle with oil.\n"
++        "Slide onto the hot tray and bake for 8 to 10 minutes.\n"
++        "Top with basil and serve immediately.",
++    },
++    {
++        "title": "Creamy Tomato Soup",
++        "category": "Soup",
++        "prep_minutes": 35,
++        "servings": 4,
++        "ingredients": [
++            "1 kg ripe tomatoes",
++            "1 onion, chopped",
++            "2 cloves garlic",
++            "500 ml vegetable stock",
++            "100 ml cream",
++            "1 tbsp butter",
++        ],
++        "instructions": "Melt the butter and soften the onion and garlic.\n"
++        "Add the quartered tomatoes and stock and simmer for 20 minutes.\n"
++        "Blend until smooth, stir in the cream and season to taste.",
++    },
++    {
++        "title": "Fluffy Pancakes",
++        "category": "Breakfast",
++        "prep_minutes": 20,
++        "servings": 4,
++        "ingredients": [
++            "200 g plain flour",
++            "2 tsp baking powder",
++            "1 tbsp sugar",
++            "250 ml milk",
++            "1 egg",
++            "30 g melted butter",
++        ],
++        "instructions": "Whisk the dry ingredients together.\n"
++        "Beat in the milk, egg and butter until just combined.\n\n"
++        "Cook ladlefuls in a hot greased pan until bubbles form, flip and cook for another minute.",
++    },
++    {
++        "title": "Chocolate Mug Cake",
++        "category": "Dessert",
++        "prep_minutes": 5,
++        "servings": 1,
++        "ingredients": [
++            "4 tbsp plain flour",
++            "3 tbsp sugar",
++            "2 tbsp cocoa powder",
++            "3 tbsp milk",
++            "2 tbsp vegetable oil",
++        ],
++        "instructions": "Mix everything in a large mug until smooth.\n"
++        "Microwave for 90 seconds and let it cool slightly before eating.",
++    },
++]
++
++
++def now_iso():
++    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
++
++
++def connect():
++    conn = sqlite3.connect(DB_PATH, timeout=30)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    return conn
++
++
++def init_db():
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = connect()
++    try:
++        conn.execute("PRAGMA journal_mode = WAL")
++        conn.executescript(SCHEMA)
++        conn.execute("BEGIN IMMEDIATE")
++        seeded = conn.execute("SELECT 1 FROM meta WHERE key = 'seeded'").fetchone()
++        if not seeded:
++            cur = conn.execute(
++                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++                (
++                    "chef",
++                    generate_password_hash(secrets.token_urlsafe(32)),
++                    now_iso(),
++                ),
++            )
++            chef_id = cur.lastrowid
++            base = datetime.now(timezone.utc)
++            for i, s in enumerate(SAMPLES):
++                created = (base - timedelta(minutes=len(SAMPLES) - i)).strftime(
++                    "%Y-%m-%dT%H:%M:%S.%fZ"
++                )
++                conn.execute(
++                    "INSERT INTO recipes (title, ingredients, instructions, category,"
++                    " prep_minutes, servings, created_at, author_id)"
++                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
++                    (
++                        s["title"],
++                        json.dumps(s["ingredients"]),
++                        s["instructions"],
++                        s["category"],
++                        s["prep_minutes"],
++                        s["servings"],
++                        created,
++                        chef_id,
++                    ),
++                )
++            conn.execute("INSERT INTO meta (key, value) VALUES ('seeded', '1')")
++        conn.commit()
++    finally:
++        conn.close()
++
++
++def db():
++    if "db" not in g:
++        g.db = connect()
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc):
++    conn = g.pop("db", None)
++    if conn is not None:
++        conn.close()
++
++
++def error(status, message, errors=None):
++    body = {"error": message}
++    if errors:
++        body["errors"] = errors
++    return jsonify(body), status
++
++
++@app.errorhandler(HTTPException)
++def http_error(exc):
++    if request.path.startswith("/api/") or request.path == "/api":
++        return error(exc.code or 500, exc.description or exc.name)
++    return exc
++
++
++def hash_token(token):
++    return hashlib.sha256(token.encode()).hexdigest()
++
++
++def current_user():
++    header = request.headers.get("Authorization", "")
++    parts = header.split(None, 1)
++    if len(parts) != 2 or parts[0].lower() != "bearer":
++        return None
++    token = parts[1].strip()
++    if not token:
++        return None
++    row = db().execute(
++        "SELECT u.id, u.username, t.expires_at FROM tokens t JOIN users u ON u.id = t.user_id"
++        " WHERE t.token_hash = ?",
++        (hash_token(token),),
++    ).fetchone()
++    if row is None or row["expires_at"] < now_iso():
++        return None
++    return {"id": row["id"], "username": row["username"]}
++
++
++def json_body():
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        return None
++    return data
++
++
++# ---------- auth ----------
++
++
++def credentials():
++    data = json_body()
++    if data is None:
++        return None, None, error(400, "Request body must be a JSON object")
++    username = data.get("username")
++    password = data.get("password")
++    return username, password, None
++
++
++@app.post("/api/auth/register")
++def register():
++    username, password, err = credentials()
++    if err:
++        return err
++    errors = {}
++    if not isinstance(username, str) or not username.strip():
++        errors["username"] = "Username is required"
++    else:
++        username = username.strip()
++        if not 3 <= len(username) <= 32:
++            errors["username"] = "Username must be 3 to 32 characters long"
++        elif any(c.isspace() or not c.isprintable() for c in username):
++            errors["username"] = "Username must not contain whitespace"
++    if not isinstance(password, str) or not password:
++        errors["password"] = "Password is required"
++    elif len(password) < 6:
++        errors["password"] = "Password must be at least 6 characters long"
++    elif len(password) > 200:
++        errors["password"] = "Password must be at most 200 characters long"
++    if errors:
++        return error(400, "Validation failed", errors)
++    try:
++        db().execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, generate_password_hash(password), now_iso()),
++        )
++        db().commit()
++    except sqlite3.IntegrityError:
++        return error(409, "Username is already taken", {"username": "Username is already taken"})
++    return jsonify({"username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    username, password, err = credentials()
++    if err:
++        return err
++    if not isinstance(username, str) or not isinstance(password, str):
++        return error(400, "Username and password are required")
++    row = db().execute(
++        "SELECT id, username, password_hash FROM users WHERE username = ?",
++        (username.strip(),),
++    ).fetchone()
++    if row is None or not check_password_hash(row["password_hash"], password):
++        return error(401, "Invalid username or password")
++    token = secrets.token_urlsafe(32)
++    conn = db()
++    conn.execute("DELETE FROM tokens WHERE expires_at < ?", (now_iso(),))
++    conn.execute(
++        "INSERT INTO tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
++        (
++            hash_token(token),
++            row["id"],
++            (datetime.now(timezone.utc) + TOKEN_TTL).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
++        ),
++    )
++    conn.commit()
++    return jsonify({"token": token, "username": row["username"]})
++
++
++@app.get("/api/auth/me")
++def me():
++    user = current_user()
++    if user is None:
++        return error(401, "Authentication required")
++    return jsonify({"username": user["username"]})
++
++
++# ---------- recipes ----------
++
++RECIPE_COLUMNS = (
++    "r.id, r.title, r.ingredients, r.instructions, r.category, r.prep_minutes,"
++    " r.servings, r.created_at, r.author_id, u.username AS author"
++)
++
++
++def full_recipe(row):
++    return {
++        "id": row["id"],
++        "title": row["title"],
++        "ingredients": json.loads(row["ingredients"]),
++        "instructions": row["instructions"],
++        "category": row["category"],
++        "prep_minutes": row["prep_minutes"],
++        "servings": row["servings"],
++        "created_at": row["created_at"],
++        "author": row["author"],
++    }
++
++
++def is_int(value):
++    return isinstance(value, int) and not isinstance(value, bool)
++
++
++def validate_recipe(data):
++    errors = {}
++    clean = {}
++
++    title = data.get("title")
++    if not isinstance(title, str) or not title.strip():
++        errors["title"] = "Title is required"
++    elif len(title.strip()) > 200:
++        errors["title"] = "Title must be at most 200 characters long"
++    else:
++        clean["title"] = title.strip()
++
++    category = data.get("category")
++    if not isinstance(category, str) or not category.strip():
++        errors["category"] = "Category is required"
++    elif len(category.strip()) > 60:
++        errors["category"] = "Category must be at most 60 characters long"
++    else:
++        clean["category"] = category.strip()
++
++    instructions = data.get("instructions")
++    if not isinstance(instructions, str) or not instructions.strip():
++        errors["instructions"] = "Instructions are required"
++    elif len(instructions) > 20000:
++        errors["instructions"] = "Instructions must be at most 20000 characters long"
++    else:
++        clean["instructions"] = instructions.strip()
++
++    ingredients = data.get("ingredients")
++    if not isinstance(ingredients, list) or not ingredients:
++        errors["ingredients"] = "At least one ingredient is required"
++    elif len(ingredients) > 200:
++        errors["ingredients"] = "At most 200 ingredients are allowed"
++    elif not all(isinstance(i, str) and i.strip() for i in ingredients):
++        errors["ingredients"] = "Each ingredient must be a non-empty string"
++    elif any(len(i.strip()) > 300 for i in ingredients):
++        errors["ingredients"] = "Each ingredient must be at most 300 characters long"
++    else:
++        clean["ingredients"] = [i.strip() for i in ingredients]
++
++    prep = data.get("prep_minutes")
++    if not is_int(prep) or prep < 0:
++        errors["prep_minutes"] = "Prep time must be a whole number of minutes, 0 or more"
++    elif prep > 100000:
++        errors["prep_minutes"] = "Prep time is too large"
++    else:
++        clean["prep_minutes"] = prep
++
++    servings = data.get("servings")
++    if not is_int(servings) or servings < 1:
++        errors["servings"] = "Servings must be a whole number, 1 or more"
++    elif servings > 10000:
++        errors["servings"] = "Servings is too large"
++    else:
++        clean["servings"] = servings
++
++    return clean, errors
++
++
++def fetch_recipe(recipe_id):
++    return db().execute(
++        f"SELECT {RECIPE_COLUMNS} FROM recipes r JOIN users u ON u.id = r.author_id"
++        " WHERE r.id = ?",
++        (recipe_id,),
++    ).fetchone()
++
++
++@app.post("/api/recipes")
++def create_recipe():
++    user = current_user()
++    if user is None:
++        return error(401, "Authentication required")
++    data = json_body()
++    if data is None:
++        return error(400, "Request body must be a JSON object")
++    clean, errors = validate_recipe(data)
++    if errors:
++        return error(400, "Validation failed", errors)
++    conn = db()
++    cur = conn.execute(
++        "INSERT INTO recipes (title, ingredients, instructions, category, prep_minutes,"
++        " servings, created_at, author_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
++        (
++            clean["title"],
++            json.dumps(clean["ingredients"]),
++            clean["instructions"],
++            clean["category"],
++            clean["prep_minutes"],
++            clean["servings"],
++            now_iso(),
++            user["id"],
++        ),
++    )
++    conn.commit()
++    return jsonify(full_recipe(fetch_recipe(cur.lastrowid))), 201
++
++
++def positive_int_arg(name, default):
++    raw = request.args.get(name)
++    if raw is None or raw == "":
++        return default, None
++    try:
++        value = int(raw)
++    except ValueError:
++        return None, f"{name} must be a positive integer"
++    if value < 1:
++        return None, f"{name} must be a positive integer"
++    return value, None
++
++
++def like_escape(text):
++    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
++
++
++@app.get("/api/recipes")
++def list_recipes():
++    page, err = positive_int_arg("page", 1)
++    if err:
++        return error(400, err, {"page": err})
++    page_size, err = positive_int_arg("page_size", DEFAULT_PAGE_SIZE)
++    if err:
++        return error(400, err, {"page_size": err})
++    page_size = min(page_size, MAX_PAGE_SIZE)
++
++    where = []
++    params = []
++    category = request.args.get("category", "").strip()
++    if category:
++        where.append("r.category = ? COLLATE NOCASE")
++        params.append(category)
++    q = request.args.get("q", "").strip()
++    if q:
++        where.append("r.title LIKE ? ESCAPE '\\'")
++        params.append(f"%{like_escape(q)}%")
++    clause = f" WHERE {' AND '.join(where)}" if where else ""
++
++    conn = db()
++    total = conn.execute(f"SELECT COUNT(*) FROM recipes r{clause}", params).fetchone()[0]
++    rows = conn.execute(
++        "SELECT r.id, r.title, r.category, r.prep_minutes, u.username AS author"
++        f" FROM recipes r JOIN users u ON u.id = r.author_id{clause}"
++        " ORDER BY r.created_at DESC, r.id DESC LIMIT ? OFFSET ?",
++        [*params, page_size, (page - 1) * page_size],
++    ).fetchall()
++    return jsonify(
++        {
++            "items": [
++                {
++                    "id": r["id"],
++                    "title": r["title"],
++                    "category": r["category"],
++                    "prep_minutes": r["prep_minutes"],
++                    "author": r["author"],
++                }
++                for r in rows
++            ],
++            "total": total,
++            "page": page,
++            "page_size": page_size,
++        }
++    )
++
++
++@app.get("/api/categories")
++def list_categories():
++    rows = db().execute(
++        "SELECT MIN(category) AS category FROM recipes GROUP BY category COLLATE NOCASE"
++        " ORDER BY category COLLATE NOCASE"
++    ).fetchall()
++    return jsonify({"items": [r["category"] for r in rows]})
++
++
++@app.get("/api/recipes/<int:recipe_id>")
++def get_recipe(recipe_id):
++    row = fetch_recipe(recipe_id)
++    if row is None:
++        return error(404, "Recipe not found")
++    return jsonify(full_recipe(row))
++
++
++@app.put("/api/recipes/<int:recipe_id>")
++def update_recipe(recipe_id):
++    user = current_user()
++    if user is None:
++        return error(401, "Authentication required")
++    row = fetch_recipe(recipe_id)
++    if row is None:
++        return error(404, "Recipe not found")
++    if row["author_id"] != user["id"]:
++        return error(403, "Only the author may change this recipe")
++    data = json_body()
++    if data is None:
++        return error(400, "Request body must be a JSON object")
++    clean, errors = validate_recipe(data)
++    if errors:
++        return error(400, "Validation failed", errors)
++    conn = db()
++    conn.execute(
++        "UPDATE recipes SET title = ?, ingredients = ?, instructions = ?, category = ?,"
++        " prep_minutes = ?, servings = ? WHERE id = ?",
++        (
++            clean["title"],
++            json.dumps(clean["ingredients"]),
++            clean["instructions"],
++            clean["category"],
++            clean["prep_minutes"],
++            clean["servings"],
++            recipe_id,
++        ),
++    )
++    conn.commit()
++    return jsonify(full_recipe(fetch_recipe(recipe_id)))
++
++
++@app.delete("/api/recipes/<int:recipe_id>")
++def delete_recipe(recipe_id):
++    user = current_user()
++    if user is None:
++        return error(401, "Authentication required")
++    row = fetch_recipe(recipe_id)
++    if row is None:
++        return error(404, "Recipe not found")
++    if row["author_id"] != user["id"]:
++        return error(403, "Only the author may delete this recipe")
++    conn = db()
++    conn.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
++    conn.commit()
++    return "", 204
+ 
+ 
+ @app.get("/api/health")
+@@ -18,6 +578,11 @@ def health():
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
++    if path == "api" or path.startswith("api/"):
++        return error(404, "Not found")
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
++
++
++init_db()
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..943443a 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Recipe Book</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..dc490c9 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -7,303 +7,1069 @@
+       "name": "app-frontend",
+       "dependencies": {
+         "react": "19.3.1",
+-        "react-dom": "19.3.1"
++        "react-dom": "19.3.1",
++        "react-router-dom": "^7.18.5"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "^4.3.5",
++        "@types/react": "^19.3.0",
++        "@types/react-dom": "^19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "^4.3.5",
++        "typescript": "^7.0.2",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+       "integrity": "sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==",
+       "dev": true,
+-      "license": "MIT",
+-      "funding": {
+-        "url": "https://github.com/sponsors/oxc-project"
++      "license": "MIT",
++      "funding": {
++        "url": "https://github.com/sponsors/oxc-project"
++      }
++    },
++    "node_modules/@rolldown/binding-android-arm-eabi": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.16.tgz",
++      "integrity": "sha512-ia3DwAs0OsMGS7+IConptSiyk9pEXkOx/AbJ2n/lAGxH3QkWQus1t8d7gnAT38FCU2sQu8lUbeR6AiZFv4JxaA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-android-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.16.tgz",
++      "integrity": "sha512-kx5wBiMB6E7TEvpl2B9gjLU004BkvEm2Dr941BFjx/SontPwSzNuQUIoVKxHHoSjpFIfHMmcguyLOtyn0hObRg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-darwin-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.16.tgz",
++      "integrity": "sha512-qslZrXnKJU4cUpjoAmtAo/KQM9e2IRMlmpig6Zpwj+8KWxW8v+nkAf9216Bsek9lOC1jvg2yCjygCFo2f83msQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-darwin-x64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.16.tgz",
++      "integrity": "sha512-FdF+y48ND13eAyM2mQn+85kvAqNlvRWROy2rhgA463X/0Gv4vGtazZtfaF1mRBLscYvtOlh4QnLjOWiFzX69OQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-freebsd-x64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.16.tgz",
++      "integrity": "sha512-ddjqFM5e95AgLbUPtKIS7V1KTVlA0RUgCVr5mn+/IEhsdy3pr+Vuj/HZ7nlMN2FyxIwUktOH1LEPIQXO1v9y1Q==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm-gnueabihf": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.16.tgz",
++      "integrity": "sha512-tHdKWbFkFBI687iim3LIyIvyL7j66VvQYkDPss5Stn/qyE2tWkR1YD0dXmXPFKKqT/o5ZEJVsaRsWS2meQwGOA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.16.tgz",
++      "integrity": "sha512-FJiLGAblPBMlBEdbOqw6kW6QcXDWAf/oJu7gYs9ZJZwmg+K+/zjFLxPTIY9izJUzxzc24FHvmseyA0IvJSl17w==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm64-musl": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.16.tgz",
++      "integrity": "sha512-hrJpblMsrQ58U9veWpbXzkhV5zStunds6HWLprqq1qauvgBr1E6P+24kLj6lSLI9vjRn/RYpjprhkHQPKGWpNg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-ppc64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.16.tgz",
++      "integrity": "sha512-qJd/dC6j6CwLG9/s/RP2nb1RZ0GIgj7Ioj7x/SYa3RzjVrlzrmH0fhIOpfvqQDeIsdP0loi+kHaMhJzY1PBIaA==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-s390x-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.16.tgz",
++      "integrity": "sha512-Vx7Xg5uUJuNcujJjI70OICaH0EYj80BtOLZTSN7uOYg8QOLlyKnaG0IW7Fn/J0IpJsaKzmDKMhOQv1JBM9m9vg==",
++      "cpu": [
++        "s390x"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-x64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.16.tgz",
++      "integrity": "sha512-TNKhgE3uJTsTzatUSSYt0Kgo+Oa2uSlSjz4r1aEIea7HX6ULBym4fAlYUhG1i6pjNf2njfCUAfKwr6C3E9Xg1w==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-x64-musl": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.16.tgz",
++      "integrity": "sha512-7chXdpjXZ8qG0+mIxECN3cT9kvhZ3/oZhMX6Pp876P7CDrIy8nJswva6Mq357JR7eYXfuskwZxMeV1SzoZdHrA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-openharmony-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.16.tgz",
++      "integrity": "sha512-Kwjt+7uNTJK5/MDkGWGVO2KQPnj8yAV75dMpfwyHZrJSXWHrniOB0aUEWlVYf3H1hOqFLIStLdM5QXq6bnKmOQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "openharmony"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-win32-arm64-msvc": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.16.tgz",
++      "integrity": "sha512-/LH6WfjDRXXJz/p5xl4TmU+jpcnwcxbKEQBW/GZE0JHfN0lGIyTtsUEGaQ/q/GikkGJ2yLKe6pwm7AnEWO8pdw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-win32-x64-msvc": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.16.tgz",
++      "integrity": "sha512-1lv1KvX0Z871zfk7vw+dnXMMnHNyDwMzWG8Kv3HxDXMOhzCX4SHc7HK319fInP0i+0p9D8brkfzL7pJOaGl+tw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/pluginutils": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
++      "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
++    "node_modules/@typescript/typescript-aix-ppc64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-aix-ppc64/-/typescript-aix-ppc64-7.0.2.tgz",
++      "integrity": "sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "aix"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-darwin-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.0.2.tgz",
++      "integrity": "sha512-gowzar9MwS/aRWp6f3a4KUqzRjAZjOsmGNCM6LcTgXum+dBfgsBVMN+AgvOCCbguXyick6LJhpBszxMebJ8syA==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-darwin-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-darwin-x64/-/typescript-darwin-x64-7.0.2.tgz",
++      "integrity": "sha512-SZ9xZInqApNlNGc9s0W1VSsktYSOe9cFqNOIqmN1Gs8SmkjKZYFt017G4VwPxASInODuAdbTW7sXiFUf893RgA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-freebsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-freebsd-arm64/-/typescript-freebsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-W5NH4y/J0plIIS5b2xvTEkU7JFxyqdMAOgf+Ilhl0vHQXKO5dZoxd+C/jEtq56c4F3wk71RB4BMRQ2XdI+bwYQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-android-arm-eabi": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.16.tgz",
+-      "integrity": "sha512-ia3DwAs0OsMGS7+IConptSiyk9pEXkOx/AbJ2n/lAGxH3QkWQus1t8d7gnAT38FCU2sQu8lUbeR6AiZFv4JxaA==",
++    "node_modules/@typescript/typescript-freebsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-freebsd-x64/-/typescript-freebsd-x64-7.0.2.tgz",
++      "integrity": "sha512-UMGDx5sTpzNw3WiPebH7l90IWfJggEd+egHt/q6p7/Cm3zqoV7VxkGXt+3DxPIw8CcmvAB0j3sVVfbhX+M4Tpw==",
+       "cpu": [
+-        "arm"
++        "x64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "android"
++        "freebsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-android-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.16.tgz",
+-      "integrity": "sha512-kx5wBiMB6E7TEvpl2B9gjLU004BkvEm2Dr941BFjx/SontPwSzNuQUIoVKxHHoSjpFIfHMmcguyLOtyn0hObRg==",
++    "node_modules/@typescript/typescript-linux-arm": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-arm/-/typescript-linux-arm-7.0.2.tgz",
++      "integrity": "sha512-gffT3xPz9sR7j/YJExkyPntrI0P2EP9XbOyWzth2/Gs0RstK+90RBcO0ncXoXy/beYll1SXw846Nf2zdnEz0QQ==",
+       "cpu": [
+-        "arm64"
++        "arm"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "android"
++        "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-darwin-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.16.tgz",
+-      "integrity": "sha512-qslZrXnKJU4cUpjoAmtAo/KQM9e2IRMlmpig6Zpwj+8KWxW8v+nkAf9216Bsek9lOC1jvg2yCjygCFo2f83msQ==",
++    "node_modules/@typescript/typescript-linux-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz",
++      "integrity": "sha512-Qh4eU4/y3yDjnfjjyPYihMj5/ODIlmt+Bzu17OI+fiSRDW57QmU5SiN63exPRNJPKUzcc1INa1NXdrJ+MqHjUQ==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "darwin"
++        "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-darwin-x64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.16.tgz",
+-      "integrity": "sha512-FdF+y48ND13eAyM2mQn+85kvAqNlvRWROy2rhgA463X/0Gv4vGtazZtfaF1mRBLscYvtOlh4QnLjOWiFzX69OQ==",
++    "node_modules/@typescript/typescript-linux-loong64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-loong64/-/typescript-linux-loong64-7.0.2.tgz",
++      "integrity": "sha512-uEHck9i8hoAzXPiYRib1O7miOnz23SxIeVl6F4LXox+qov1K35jHcEW6VHKvZI+pyvl7fZEP4MCU5LYvIq1GuQ==",
+       "cpu": [
+-        "x64"
++        "loong64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "darwin"
++        "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-freebsd-x64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.16.tgz",
+-      "integrity": "sha512-ddjqFM5e95AgLbUPtKIS7V1KTVlA0RUgCVr5mn+/IEhsdy3pr+Vuj/HZ7nlMN2FyxIwUktOH1LEPIQXO1v9y1Q==",
++    "node_modules/@typescript/typescript-linux-mips64el": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-mips64el/-/typescript-linux-mips64el-7.0.2.tgz",
++      "integrity": "sha512-R4KvAMnE43W5Qeqb0Ly56O3mWMWIAgsMyz36DCaycd5nbg/9kzm0liw3JocfRqyJY0KPmzFjbswozXyW0DnIYA==",
+       "cpu": [
+-        "x64"
++        "mips64el"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "freebsd"
++        "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm-gnueabihf": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.16.tgz",
+-      "integrity": "sha512-tHdKWbFkFBI687iim3LIyIvyL7j66VvQYkDPss5Stn/qyE2tWkR1YD0dXmXPFKKqT/o5ZEJVsaRsWS2meQwGOA==",
++    "node_modules/@typescript/typescript-linux-ppc64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-ppc64/-/typescript-linux-ppc64-7.0.2.tgz",
++      "integrity": "sha512-DORx5b3sd/4S7eayxm4FQv+A7CrkUIGRaHiwI8oiHTAI1fAPWhF4J0vAlkC8biAlHSVVwxMQ3tjZ2/DVbnQiiA==",
+       "cpu": [
+-        "arm"
++        "ppc64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-FJiLGAblPBMlBEdbOqw6kW6QcXDWAf/oJu7gYs9ZJZwmg+K+/zjFLxPTIY9izJUzxzc24FHvmseyA0IvJSl17w==",
++    "node_modules/@typescript/typescript-linux-riscv64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-riscv64/-/typescript-linux-riscv64-7.0.2.tgz",
++      "integrity": "sha512-wf0jqEDOjrPRnKwYRyyJDRo11KMbvMFrU+q4zqKyChODBzvlkbhNQfKvLxQCcwTpdDaXSHZTVuh0JoCrKCUMHQ==",
+       "cpu": [
+-        "arm64"
++        "riscv64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm64-musl": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.16.tgz",
+-      "integrity": "sha512-hrJpblMsrQ58U9veWpbXzkhV5zStunds6HWLprqq1qauvgBr1E6P+24kLj6lSLI9vjRn/RYpjprhkHQPKGWpNg==",
++    "node_modules/@typescript/typescript-linux-s390x": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-s390x/-/typescript-linux-s390x-7.0.2.tgz",
++      "integrity": "sha512-IkwJc3L7yhytWd/ewjyxNDfOmswCm9GWMJT/ue/dU4aZNbwZeYAetq42VyLmsmSjvoX7z74X6ZaYCtzAr0EuGw==",
+       "cpu": [
+-        "arm64"
++        "s390x"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-ppc64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-qJd/dC6j6CwLG9/s/RP2nb1RZ0GIgj7Ioj7x/SYa3RzjVrlzrmH0fhIOpfvqQDeIsdP0loi+kHaMhJzY1PBIaA==",
++    "node_modules/@typescript/typescript-linux-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-7.0.2.tgz",
++      "integrity": "sha512-EYdf2cNg7rgCWJnxCdJ+F3V39O8ihb37eHAu1LK8oAFizgTQbPOK7zHHXbPt8rX24COqODXeI3sIf0fCXG7H/A==",
+       "cpu": [
+-        "ppc64"
++        "x64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-s390x-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.16.tgz",
+-      "integrity": "sha512-Vx7Xg5uUJuNcujJjI70OICaH0EYj80BtOLZTSN7uOYg8QOLlyKnaG0IW7Fn/J0IpJsaKzmDKMhOQv1JBM9m9vg==",
++    "node_modules/@typescript/typescript-netbsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-netbsd-arm64/-/typescript-netbsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-+polYF4MF04aPpO5FTkHran9yUQDSXqy5GiSDKpsll5jy3l3+g9QLhpf39T+ePtefhXLOGrLl0QIjkQP6VnelA==",
+       "cpu": [
+-        "s390x"
++        "arm64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "linux"
++        "netbsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-x64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-TNKhgE3uJTsTzatUSSYt0Kgo+Oa2uSlSjz4r1aEIea7HX6ULBym4fAlYUhG1i6pjNf2njfCUAfKwr6C3E9Xg1w==",
++    "node_modules/@typescript/typescript-netbsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-netbsd-x64/-/typescript-netbsd-x64-7.0.2.tgz",
++      "integrity": "sha512-8YIT0EHM/3dq10ZOVF/A7pc/YSMtbcecct4rWtexrnSCHOPcpC2KTLXfTCR6vDpnSiY12heNb1GiN/wu+T/FyA==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "netbsd"
+       ],
+-      "license": "MIT",
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-openbsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-openbsd-arm64/-/typescript-openbsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-APT8+ClYnuYm1u9+kgGXoMj2VzWzcymwh2gNSQVySHfkRDGOTVkoWLjCmOQSaO+PoqQ57B0flRp9SA+7GnnkzQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "linux"
++        "openbsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-x64-musl": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.16.tgz",
+-      "integrity": "sha512-7chXdpjXZ8qG0+mIxECN3cT9kvhZ3/oZhMX6Pp876P7CDrIy8nJswva6Mq357JR7eYXfuskwZxMeV1SzoZdHrA==",
++    "node_modules/@typescript/typescript-openbsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-openbsd-x64/-/typescript-openbsd-x64-7.0.2.tgz",
++      "integrity": "sha512-yX7s+Q0Dln0Dt9tEzZsAjXXR/+ytBM7AlglaqyeMPxQszJ1JhlJdZ6jLA+IzldHtflX81em7lDao1xXu+aRRkg==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "linux"
++        "openbsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-openharmony-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.16.tgz",
+-      "integrity": "sha512-Kwjt+7uNTJK5/MDkGWGVO2KQPnj8yAV75dMpfwyHZrJSXWHrniOB0aUEWlVYf3H1hOqFLIStLdM5QXq6bnKmOQ==",
++    "node_modules/@typescript/typescript-sunos-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-sunos-x64/-/typescript-sunos-x64-7.0.2.tgz",
++      "integrity": "sha512-dLJDGaLZ1D4HPQn62u1n8mBDkJREwMsAkCdkwd4Ieqw+x3TUyTsqY0YiBCtE6H6OzzgGk3iuZ3vFWRS+E8/d1g==",
+       "cpu": [
+-        "arm64"
++        "x64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "openharmony"
++        "sunos"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-win32-arm64-msvc": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.16.tgz",
+-      "integrity": "sha512-/LH6WfjDRXXJz/p5xl4TmU+jpcnwcxbKEQBW/GZE0JHfN0lGIyTtsUEGaQ/q/GikkGJ2yLKe6pwm7AnEWO8pdw==",
++    "node_modules/@typescript/typescript-win32-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-win32-arm64/-/typescript-win32-arm64-7.0.2.tgz",
++      "integrity": "sha512-Gyl1Vy6OsWesLzmq+EP0Fb7b4Nid5232AvcA2SFcdYreldpNtYFFofPjnt62y9hQy7VTaZp65ICJjuAQRaVcIQ==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "win32"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-win32-x64-msvc": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.16.tgz",
+-      "integrity": "sha512-1lv1KvX0Z871zfk7vw+dnXMMnHNyDwMzWG8Kv3HxDXMOhzCX4SHc7HK319fInP0i+0p9D8brkfzL7pJOaGl+tw==",
++    "node_modules/@typescript/typescript-win32-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-win32-x64/-/typescript-win32-x64-7.0.2.tgz",
++      "integrity": "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "win32"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/pluginutils": {
+-      "version": "1.0.1",
+-      "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
+-      "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
+-      "dev": true,
+-      "license": "MIT"
+-    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,6 +1100,26 @@
+         }
+       }
+     },
++    "node_modules/cookie": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/cookie/-/cookie-1.1.1.tgz",
++      "integrity": "sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/express"
++      }
++    },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +1130,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +1177,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1467,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -739,6 +1566,44 @@
+         "react": "^19.3.1"
+       }
+     },
++    "node_modules/react-router": {
++      "version": "7.18.5",
++      "resolved": "https://registry.npmjs.org/react-router/-/react-router-7.18.5.tgz",
++      "integrity": "sha512-dTgvcXDOrLPrlLHrcZAqWveiK1hMSqN+rGAJzegP8HtmNkfRxOoshGWBNX3ZJ0cZjOHkRdlUJtaIhZMLLyGyPw==",
++      "license": "MIT",
++      "dependencies": {
++        "cookie": "^1.0.1",
++        "set-cookie-parser": "^2.6.0"
++      },
++      "engines": {
++        "node": ">=20.0.0"
++      },
++      "peerDependencies": {
++        "react": ">=18",
++        "react-dom": ">=18"
++      },
++      "peerDependenciesMeta": {
++        "react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/react-router-dom": {
++      "version": "7.18.5",
++      "resolved": "https://registry.npmjs.org/react-router-dom/-/react-router-dom-7.18.5.tgz",
++      "integrity": "sha512-9HcfDMU6JJ/fp6gJZYGwNE6RknVGS4kBjH1HkNw959mCJi70TVwdipQWv2FEol9uGpi+SZTFtVpJPtEQfayeOw==",
++      "license": "MIT",
++      "dependencies": {
++        "react-router": "7.18.5"
++      },
++      "engines": {
++        "node": ">=20.0.0"
++      },
++      "peerDependencies": {
++        "react": ">=18",
++        "react-dom": ">=18"
++      }
++    },
+     "node_modules/rolldown": {
+       "version": "1.2.16",
+       "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz",
+@@ -779,6 +1644,12 @@
+       "integrity": "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==",
+       "license": "MIT"
+     },
++    "node_modules/set-cookie-parser": {
++      "version": "2.7.3",
++      "resolved": "https://registry.npmjs.org/set-cookie-parser/-/set-cookie-parser-2.7.3.tgz",
++      "integrity": "sha512-irZHtTqurLna57KQG/s+fzOwv/J6XSH4cs8M/vsrY3uCaQ3S6+QJguAH0WdN47SXlk82voMZ4naWMQf8fdEoIg==",
++      "license": "MIT"
++    },
+     "node_modules/source-map-js": {
+       "version": "1.2.2",
+       "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz",
+@@ -789,6 +1660,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1698,41 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-7.0.2.tgz",
++      "integrity": "sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc"
++      },
++      "engines": {
++        "node": ">=16.20.0"
++      },
++      "optionalDependencies": {
++        "@typescript/typescript-aix-ppc64": "7.0.2",
++        "@typescript/typescript-darwin-arm64": "7.0.2",
++        "@typescript/typescript-darwin-x64": "7.0.2",
++        "@typescript/typescript-freebsd-arm64": "7.0.2",
++        "@typescript/typescript-freebsd-x64": "7.0.2",
++        "@typescript/typescript-linux-arm": "7.0.2",
++        "@typescript/typescript-linux-arm64": "7.0.2",
++        "@typescript/typescript-linux-loong64": "7.0.2",
++        "@typescript/typescript-linux-mips64el": "7.0.2",
++        "@typescript/typescript-linux-ppc64": "7.0.2",
++        "@typescript/typescript-linux-riscv64": "7.0.2",
++        "@typescript/typescript-linux-s390x": "7.0.2",
++        "@typescript/typescript-linux-x64": "7.0.2",
++        "@typescript/typescript-netbsd-arm64": "7.0.2",
++        "@typescript/typescript-netbsd-x64": "7.0.2",
++        "@typescript/typescript-openbsd-arm64": "7.0.2",
++        "@typescript/typescript-openbsd-x64": "7.0.2",
++        "@typescript/typescript-sunos-x64": "7.0.2",
++        "@typescript/typescript-win32-arm64": "7.0.2",
++        "@typescript/typescript-win32-x64": "7.0.2"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..84140f1 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,20 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "tsc && vite build"
+   },
+   "dependencies": {
+     "react": "19.3.1",
+-    "react-dom": "19.3.1"
++    "react-dom": "19.3.1",
++    "react-router-dom": "^7.18.5"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "^4.3.5",
++    "@types/react": "^19.3.0",
++    "@types/react-dom": "^19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "^4.3.5",
++    "typescript": "^7.0.2",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..7809fd6 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,77 @@
++import { Link, Navigate, Route, Routes, useNavigate } from "react-router-dom";
++import { useAuth } from "./auth";
++import { AuthForm } from "./pages/AuthForm";
++import { RecipeForm } from "./pages/RecipeForm";
++import { RecipeList } from "./pages/RecipeList";
++import { RecipePage } from "./pages/RecipePage";
++import { secondaryBtn, primaryBtn } from "./ui";
++
++function Header() {
++  const { username, signOut } = useAuth();
++  const navigate = useNavigate();
++  return (
++    <header className="border-b border-stone-200 bg-white">
++      <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-3">
++        <Link to="/" className="text-xl font-semibold text-amber-800">
++          Recipe Book
++        </Link>
++        <nav className="flex flex-wrap items-center gap-3 text-sm">
++          {username ? (
++            <>
++              <Link to="/recipes/new" className={primaryBtn}>
++                Add recipe
++              </Link>
++              <span>
++                Signed in as <strong data-testid="current-user">{username}</strong>
++              </span>
++              <button
++                type="button"
++                className={secondaryBtn}
++                onClick={() => {
++                  signOut();
++                  navigate("/");
++                }}
++              >
++                Sign out
++              </button>
++            </>
++          ) : (
++            <>
++              <Link to="/login" className={secondaryBtn}>
++                Sign in
++              </Link>
++              <Link to="/register" className={primaryBtn}>
++                Register
++              </Link>
++            </>
++          )}
++        </nav>
++      </div>
++    </header>
++  );
++}
++
++function RequireAuth({ children }: { children: React.ReactNode }) {
++  const { username } = useAuth();
++  if (!username) return <Navigate to="/login" replace />;
++  return <>{children}</>;
++}
++
+ export default function App() {
+-  return <h1>App</h1>;
++  return (
++    <div className="min-h-screen bg-stone-50 text-stone-900">
++      <Header />
++      <main className="mx-auto max-w-5xl px-4 py-6">
++        <Routes>
++          <Route path="/" element={<RecipeList />} />
++          <Route path="/login" element={<AuthForm mode="login" />} />
++          <Route path="/register" element={<AuthForm mode="register" />} />
++          <Route path="/recipes/new" element={<RequireAuth><RecipeForm /></RequireAuth>} />
++          <Route path="/recipes/:id" element={<RecipePage />} />
++          <Route path="/recipes/:id/edit" element={<RequireAuth><RecipeForm /></RequireAuth>} />
++          <Route path="*" element={<p>Page not found.</p>} />
++        </Routes>
++      </main>
++    </div>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..cac1184
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,109 @@
++export type RecipeSummary = {
++  id: number;
++  title: string;
++  category: string;
++  prep_minutes: number;
++  author: string;
++};
++
++export type Recipe = RecipeSummary & {
++  ingredients: string[];
++  instructions: string;
++  servings: number;
++  created_at: string;
++};
++
++export type RecipeInput = {
++  title: string;
++  category: string;
++  prep_minutes: number | null;
++  servings: number | null;
++  ingredients: string[];
++  instructions: string;
++};
++
++export type RecipePage = {
++  items: RecipeSummary[];
++  total: number;
++  page: number;
++  page_size: number;
++};
++
++export class ApiError extends Error {
++  status: number;
++  fields: Record<string, string>;
++  constructor(status: number, message: string, fields: Record<string, string> = {}) {
++    super(message);
++    this.status = status;
++    this.fields = fields;
++  }
++}
++
++const TOKEN_KEY = "recipe-token";
++const USER_KEY = "recipe-user";
++
++export const session = {
++  get token() {
++    return localStorage.getItem(TOKEN_KEY);
++  },
++  get username() {
++    return localStorage.getItem(USER_KEY);
++  },
++  set(token: string, username: string) {
++    localStorage.setItem(TOKEN_KEY, token);
++    localStorage.setItem(USER_KEY, username);
++  },
++  clear() {
++    localStorage.removeItem(TOKEN_KEY);
++    localStorage.removeItem(USER_KEY);
++  },
++};
++
++async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
++  const headers: Record<string, string> = {};
++  if (body !== undefined) headers["Content-Type"] = "application/json";
++  const token = session.token;
++  if (token) headers["Authorization"] = `Bearer ${token}`;
++  let res: Response;
++  try {
++    res = await fetch(path, {
++      method,
++      headers,
++      body: body === undefined ? undefined : JSON.stringify(body),
++    });
++  } catch {
++    throw new ApiError(0, "Could not reach the server");
++  }
++  if (res.status === 204) return undefined as T;
++  let data: any = null;
++  try {
++    data = await res.json();
++  } catch {
++    data = null;
++  }
++  if (!res.ok) {
++    throw new ApiError(res.status, data?.error ?? `Request failed (${res.status})`, data?.errors ?? {});
++  }
++  return data as T;
++}
++
++export const api = {
++  register: (username: string, password: string) =>
++    request<{ username: string }>("POST", "/api/auth/register", { username, password }),
++  login: (username: string, password: string) =>
++    request<{ token: string; username: string }>("POST", "/api/auth/login", { username, password }),
++  me: () => request<{ username: string }>("GET", "/api/auth/me"),
++  categories: () => request<{ items: string[] }>("GET", "/api/categories"),
++  list: (params: { category: string; q: string; page: number; page_size: number }) => {
++    const qs = new URLSearchParams();
++    if (params.category) qs.set("category", params.category);
++    if (params.q) qs.set("q", params.q);
++    qs.set("page", String(params.page));
++    qs.set("page_size", String(params.page_size));
++    return request<RecipePage>("GET", `/api/recipes?${qs}`);
++  },
++  get: (id: string | number) => request<Recipe>("GET", `/api/recipes/${id}`),
++  create: (input: RecipeInput) => request<Recipe>("POST", "/api/recipes", input),
++  update: (id: string | number, input: RecipeInput) => request<Recipe>("PUT", `/api/recipes/${id}`, input),
++  remove: (id: string | number) => request<void>("DELETE", `/api/recipes/${id}`),
++};
+diff --git a/frontend/src/auth.tsx b/frontend/src/auth.tsx
+new file mode 100644
+index 0000000..871e3cf
+--- /dev/null
++++ b/frontend/src/auth.tsx
+@@ -0,0 +1,36 @@
++import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
++import { api, session } from "./api";
++
++type AuthState = {
++  username: string | null;
++  signIn: (token: string, username: string) => void;
++  signOut: () => void;
++};
++
++const AuthContext = createContext<AuthState>({ username: null, signIn: () => {}, signOut: () => {} });
++
++export function AuthProvider({ children }: { children: ReactNode }) {
++  const [username, setUsername] = useState<string | null>(session.username);
++
++  useEffect(() => {
++    if (!session.token) return;
++    api.me().catch((e) => {
++      if (e.status === 401) {
++        session.clear();
++        setUsername(null);
++      }
++    });
++  }, []);
++
++  const signIn = (token: string, name: string) => {
++    session.set(token, name);
++    setUsername(name);
++  };
++  const signOut = () => {
++    session.clear();
++    setUsername(null);
++  };
++  return <AuthContext.Provider value={{ username, signIn, signOut }}>{children}</AuthContext.Provider>;
++}
++
++export const useAuth = () => useContext(AuthContext);
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..4e13cfc 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,13 @@
+ import { createRoot } from "react-dom/client";
++import { BrowserRouter } from "react-router-dom";
+ import App from "./App";
++import { AuthProvider } from "./auth";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <BrowserRouter>
++    <AuthProvider>
++      <App />
++    </AuthProvider>
++  </BrowserRouter>,
++);
+diff --git a/frontend/src/pages/AuthForm.tsx b/frontend/src/pages/AuthForm.tsx
+new file mode 100644
+index 0000000..c531bd1
+--- /dev/null
++++ b/frontend/src/pages/AuthForm.tsx
+@@ -0,0 +1,61 @@
++import { useState, type FormEvent } from "react";
++import { Link, useNavigate } from "react-router-dom";
++import { api, ApiError } from "../api";
++import { useAuth } from "../auth";
++import { ErrorBox, Field, inputCls, primaryBtn } from "../ui";
++
++export function AuthForm({ mode }: { mode: "login" | "register" }) {
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState("");
++  const [fields, setFields] = useState<Record<string, string>>({});
++  const [busy, setBusy] = useState(false);
++  const { signIn } = useAuth();
++  const navigate = useNavigate();
++  const isRegister = mode === "register";
++
++  async function submit(e: FormEvent) {
++    e.preventDefault();
++    setError("");
++    setFields({});
++    setBusy(true);
++    try {
++      if (isRegister) await api.register(username, password);
++      const res = await api.login(username.trim(), password);
++      signIn(res.token, res.username);
++      navigate("/");
++    } catch (err) {
++      if (err instanceof ApiError) {
++        setFields(err.fields);
++        setError(Object.keys(err.fields).length ? "" : err.message);
++      } else {
++        setError("Something went wrong");
++      }
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <form onSubmit={submit} className="mx-auto max-w-sm space-y-4 rounded-lg border border-stone-200 bg-white p-6 shadow-sm">
++      <h1 className="text-xl font-semibold">{isRegister ? "Create an account" : "Sign in"}</h1>
++      {error && <ErrorBox message={error} />}
++      <Field label="Username" htmlFor="username" error={fields.username}>
++        <input id="username" name="username" className={inputCls} value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required />
++      </Field>
++      <Field label="Password" htmlFor="password" error={fields.password}>
++        <input id="password" name="password" type="password" className={inputCls} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={isRegister ? "new-password" : "current-password"} required />
++      </Field>
++      <button type="submit" className={`${primaryBtn} w-full`} disabled={busy}>
++        {isRegister ? "Register" : "Sign in"}
++      </button>
++      <p className="text-sm text-stone-600">
++        {isRegister ? (
++          <>Already have an account? <Link className="text-amber-800 underline" to="/login">Sign in</Link></>
++        ) : (
++          <>No account yet? <Link className="text-amber-800 underline" to="/register">Register</Link></>
++        )}
++      </p>
++    </form>
++  );
++}
+diff --git a/frontend/src/pages/RecipeForm.tsx b/frontend/src/pages/RecipeForm.tsx
+new file mode 100644
+index 0000000..e1516ea
+--- /dev/null
++++ b/frontend/src/pages/RecipeForm.tsx
+@@ -0,0 +1,138 @@
++import { useEffect, useState, type FormEvent } from "react";
++import { Link, useNavigate, useParams } from "react-router-dom";
++import { api, ApiError } from "../api";
++import { useAuth } from "../auth";
++import { ErrorBox, Field, inputCls, primaryBtn, secondaryBtn } from "../ui";
++
++export function RecipeForm() {
++  const { id } = useParams();
++  const editing = id !== undefined;
++  const navigate = useNavigate();
++  const { username, signOut } = useAuth();
++  const [title, setTitle] = useState("");
++  const [category, setCategory] = useState("");
++  const [prep, setPrep] = useState("");
++  const [servings, setServings] = useState("");
++  const [ingredients, setIngredients] = useState<string[]>([""]);
++  const [instructions, setInstructions] = useState("");
++  const [fields, setFields] = useState<Record<string, string>>({});
++  const [error, setError] = useState("");
++  const [loading, setLoading] = useState(editing);
++  const [busy, setBusy] = useState(false);
++
++  useEffect(() => {
++    if (!editing) return;
++    api
++      .get(id)
++      .then((r) => {
++        if (r.author !== username) {
++          setError("Only the author may edit this recipe");
++          return;
++        }
++        setTitle(r.title);
++        setCategory(r.category);
++        setPrep(String(r.prep_minutes));
++        setServings(String(r.servings));
++        setIngredients(r.ingredients.length ? r.ingredients : [""]);
++        setInstructions(r.instructions);
++        setLoading(false);
++      })
++      .catch((e) => setError(e.message));
++  }, [id, editing, username]);
++
++  function toNumber(s: string): number | null {
++    return /^\s*\d+\s*$/.test(s) ? Number(s) : null;
++  }
++
++  async function submit(e: FormEvent) {
++    e.preventDefault();
++    setError("");
++    setFields({});
++    setBusy(true);
++    const input = {
++      title,
++      category,
++      prep_minutes: toNumber(prep),
++      servings: toNumber(servings),
++      ingredients: ingredients.filter((i) => i.trim() !== ""),
++      instructions,
++    };
++    try {
++      const saved = editing ? await api.update(id, input) : await api.create(input);
++      navigate(`/recipes/${saved.id}`);
++    } catch (err) {
++      if (err instanceof ApiError) {
++        if (err.status === 401) {
++          signOut();
++          navigate("/login");
++          return;
++        }
++        setFields(err.fields);
++        setError(Object.keys(err.fields).length ? "" : err.message);
++      } else {
++        setError("Something went wrong");
++      }
++      setBusy(false);
++    }
++  }
++
++  const setIngredient = (i: number, v: string) => setIngredients(ingredients.map((x, j) => (j === i ? v : x)));
++
++  if (loading) return error ? <ErrorBox message={error} /> : <p className="text-stone-500">Loading…</p>;
++
++  return (
++    <form onSubmit={submit} className="space-y-4 rounded-lg border border-stone-200 bg-white p-6 shadow-sm">
++      <h1 className="text-xl font-semibold">{editing ? "Edit recipe" : "Add a recipe"}</h1>
++      {error && <ErrorBox message={error} />}
++      <Field label="Title" htmlFor="title" error={fields.title}>
++        <input id="title" className={inputCls} value={title} onChange={(e) => setTitle(e.target.value)} />
++      </Field>
++      <div className="grid gap-4 sm:grid-cols-3">
++        <Field label="Category" htmlFor="category" error={fields.category}>
++          <input id="category" className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)} />
++        </Field>
++        <Field label="Prep time (minutes)" htmlFor="prep" error={fields.prep_minutes}>
++          <input id="prep" inputMode="numeric" className={inputCls} value={prep} onChange={(e) => setPrep(e.target.value)} />
++        </Field>
++        <Field label="Servings" htmlFor="servings" error={fields.servings}>
++          <input id="servings" inputMode="numeric" className={inputCls} value={servings} onChange={(e) => setServings(e.target.value)} />
++        </Field>
++      </div>
++      <fieldset className="space-y-2">
++        <legend className="text-sm font-medium text-stone-700">Ingredients</legend>
++        {ingredients.map((ing, i) => (
++          <div key={i} className="flex gap-2">
++            <input aria-label={`Ingredient ${i + 1}`} className={inputCls} value={ing} onChange={(e) => setIngredient(i, e.target.value)} />
++            <button
++              type="button"
++              className={secondaryBtn}
++              aria-label={`Remove ingredient ${i + 1}`}
++              onClick={() => setIngredients(ingredients.length > 1 ? ingredients.filter((_, j) => j !== i) : [""])}
++            >
++              Remove
++            </button>
++          </div>
++        ))}
++        {fields.ingredients && (
++          <p role="alert" className="text-sm text-red-700">
++            {fields.ingredients}
++          </p>
++        )}
++        <button type="button" className={secondaryBtn} onClick={() => setIngredients([...ingredients, ""])}>
++          Add ingredient
++        </button>
++      </fieldset>
++      <Field label="Instructions" htmlFor="instructions" error={fields.instructions}>
++        <textarea id="instructions" rows={8} className={inputCls} value={instructions} onChange={(e) => setInstructions(e.target.value)} />
++      </Field>
++      <div className="flex gap-3">
++        <button type="submit" className={primaryBtn} disabled={busy}>
++          {editing ? "Save changes" : "Add recipe"}
++        </button>
++        <Link to={editing ? `/recipes/${id}` : "/"} className={secondaryBtn}>
++          Cancel
++        </Link>
++      </div>
++    </form>
++  );
++}
+diff --git a/frontend/src/pages/RecipeList.tsx b/frontend/src/pages/RecipeList.tsx
+new file mode 100644
+index 0000000..1e6241b
+--- /dev/null
++++ b/frontend/src/pages/RecipeList.tsx
+@@ -0,0 +1,107 @@
++import { useEffect, useState } from "react";
++import { Link, useSearchParams } from "react-router-dom";
++import { api, type RecipePage } from "../api";
++import { ErrorBox, inputCls, secondaryBtn } from "../ui";
++
++const PAGE_SIZE = 6;
++
++export function RecipeList() {
++  const [params, setParams] = useSearchParams();
++  const category = params.get("category") ?? "";
++  const q = params.get("q") ?? "";
++  const page = Math.max(1, Number(params.get("page")) || 1);
++  const [search, setSearch] = useState(q);
++  const [categories, setCategories] = useState<string[]>([]);
++  const [data, setData] = useState<RecipePage | null>(null);
++  const [error, setError] = useState("");
++
++  useEffect(() => {
++    api.categories().then((r) => setCategories(r.items)).catch(() => {});
++  }, []);
++
++  useEffect(() => {
++    setSearch(q);
++  }, [q]);
++
++  useEffect(() => {
++    let cancelled = false;
++    setError("");
++    api
++      .list({ category, q, page, page_size: PAGE_SIZE })
++      .then((r) => !cancelled && setData(r))
++      .catch((e) => !cancelled && setError(e.message));
++    return () => {
++      cancelled = true;
++    };
++  }, [category, q, page]);
++
++  function update(next: { category?: string; q?: string; page?: number }) {
++    const p = new URLSearchParams(params);
++    for (const [k, v] of Object.entries(next)) {
++      if (v === "" || v === undefined || (k === "page" && v === 1)) p.delete(k);
++      else p.set(k, String(v));
++    }
++    setParams(p);
++  }
++
++  const pages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
++
++  return (
++    <div className="space-y-5">
++      <form
++        className="flex flex-wrap gap-3"
++        onSubmit={(e) => {
++          e.preventDefault();
++          update({ q: search.trim(), page: 1 });
++        }}
++      >
++        <select aria-label="Category" className={`${inputCls} sm:w-56`} value={category} onChange={(e) => update({ category: e.target.value, page: 1 })}>
++          <option value="">All categories</option>
++          {categories.map((c) => (
++            <option key={c} value={c}>
++              {c}
++            </option>
++          ))}
++        </select>
++        <input aria-label="Search title" type="search" placeholder="Search by title" className={`${inputCls} flex-1 sm:min-w-64`} value={search} onChange={(e) => setSearch(e.target.value)} />
++        <button type="submit" className={secondaryBtn}>
++          Search
++        </button>
++      </form>
++
++      {error && <ErrorBox message={error} />}
++      {!data && !error && <p className="text-stone-500">Loading…</p>}
++      {data && data.items.length === 0 && <p className="text-stone-600">No recipes found.</p>}
++      {data && data.items.length > 0 && (
++        <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
++          {data.items.map((r) => (
++            <li key={r.id} className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm hover:shadow">
++              <Link to={`/recipes/${r.id}`} className="block space-y-2">
++                <h2 className="text-lg font-semibold text-amber-900">{r.title}</h2>
++                <p className="text-sm">
++                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-900">{r.category}</span>
++                </p>
++                <p className="text-sm text-stone-600">{r.prep_minutes} min prep</p>
++                <p className="text-sm text-stone-500">by {r.author}</p>
++              </Link>
++            </li>
++          ))}
++        </ul>
++      )}
++
++      {data && data.total > 0 && (
++        <nav className="flex items-center justify-between" aria-label="Pagination">
++          <button type="button" className={secondaryBtn} disabled={page <= 1} onClick={() => update({ page: page - 1 })}>
++            Previous
++          </button>
++          <span className="text-sm text-stone-600">
++            Page {data.page} of {pages}
++          </span>
++          <button type="button" className={secondaryBtn} disabled={page >= pages} onClick={() => update({ page: page + 1 })}>
++            Next
++          </button>
++        </nav>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/src/pages/RecipePage.tsx b/frontend/src/pages/RecipePage.tsx
+new file mode 100644
+index 0000000..f5170b0
+--- /dev/null
++++ b/frontend/src/pages/RecipePage.tsx
+@@ -0,0 +1,89 @@
++import { useEffect, useState } from "react";
++import { Link, useNavigate, useParams } from "react-router-dom";
++import { api, ApiError, type Recipe } from "../api";
++import { useAuth } from "../auth";
++import { dangerBtn, ErrorBox, secondaryBtn } from "../ui";
++
++export function RecipePage() {
++  const { id = "" } = useParams();
++  const { username } = useAuth();
++  const navigate = useNavigate();
++  const [recipe, setRecipe] = useState<Recipe | null>(null);
++  const [error, setError] = useState("");
++  const [confirming, setConfirming] = useState(false);
++  const [busy, setBusy] = useState(false);
++
++  useEffect(() => {
++    setRecipe(null);
++    setError("");
++    api.get(id).then(setRecipe).catch((e) => setError(e.message));
++  }, [id]);
++
++  async function remove() {
++    setBusy(true);
++    try {
++      await api.remove(id);
++      navigate("/");
++    } catch (e) {
++      setError(e instanceof ApiError ? e.message : "Delete failed");
++      setConfirming(false);
++      setBusy(false);
++    }
++  }
++
++  if (error && !recipe) return <ErrorBox message={error} />;
++  if (!recipe) return <p className="text-stone-500">Loading…</p>;
++  const mine = username === recipe.author;
++
++  return (
++    <article className="space-y-5 rounded-lg border border-stone-200 bg-white p-6 shadow-sm">
++      <Link to="/" className="text-sm text-amber-800 underline">
++        &larr; All recipes
++      </Link>
++      <header className="space-y-2">
++        <h1 className="text-3xl font-semibold">{recipe.title}</h1>
++        <p className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-stone-600">
++          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-900">{recipe.category}</span>
++          <span>{recipe.prep_minutes} min prep</span>
++          <span>Serves {recipe.servings}</span>
++          <span>by {recipe.author}</span>
++        </p>
++      </header>
++      {error && <ErrorBox message={error} />}
++      <section>
++        <h2 className="mb-2 text-lg font-semibold">Ingredients</h2>
++        <ul className="list-disc space-y-1 pl-6">
++          {recipe.ingredients.map((ing, i) => (
++            <li key={i}>{ing}</li>
++          ))}
++        </ul>
++      </section>
++      <section>
++        <h2 className="mb-2 text-lg font-semibold">Instructions</h2>
++        <p className="whitespace-pre-line">{recipe.instructions}</p>
++      </section>
++      {mine && (
++        <footer className="flex flex-wrap items-center gap-3 border-t border-stone-200 pt-4">
++          <Link to={`/recipes/${recipe.id}/edit`} className={secondaryBtn}>
++            Edit
++          </Link>
++          {confirming ? (
++            <>
++              <span className="text-sm">Delete this recipe permanently?</span>
++              <button type="button" className={dangerBtn} onClick={remove} disabled={busy}>
++                Yes, delete
++              </button>
++              <button type="button" className={secondaryBtn} onClick={() => setConfirming(false)} disabled={busy}>
++                Cancel
++              </button>
++            </>
++          ) : (
++            <button type="button" className={dangerBtn} onClick={() => setConfirming(true)}>
++              Delete
++            </button>
++          )}
++        </footer>
++      )}
++    </article>
++  );
++}
+diff --git a/frontend/src/ui.tsx b/frontend/src/ui.tsx
+new file mode 100644
+index 0000000..16c4690
+--- /dev/null
++++ b/frontend/src/ui.tsx
+@@ -0,0 +1,34 @@
++import type { ReactNode } from "react";
++
++export const inputCls =
++  "w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-amber-600 focus:outline-none focus:ring-1 focus:ring-amber-600";
++export const primaryBtn =
++  "inline-flex items-center justify-center rounded-md bg-amber-700 px-4 py-2 text-sm font-medium text-white hover:bg-amber-800 disabled:opacity-50";
++export const secondaryBtn =
++  "inline-flex items-center justify-center rounded-md border border-stone-300 bg-white px-4 py-2 text-sm font-medium text-stone-700 hover:bg-stone-100 disabled:opacity-50";
++export const dangerBtn =
++  "inline-flex items-center justify-center rounded-md bg-red-700 px-4 py-2 text-sm font-medium text-white hover:bg-red-800 disabled:opacity-50";
++
++export function Field({ label, error, children, htmlFor }: { label: string; error?: string; children: ReactNode; htmlFor?: string }) {
++  return (
++    <div className="space-y-1">
++      <label htmlFor={htmlFor} className="block text-sm font-medium text-stone-700">
++        {label}
++      </label>
++      {children}
++      {error && (
++        <p role="alert" className="text-sm text-red-700">
++          {error}
++        </p>
++      )}
++    </div>
++  );
++}
++
++export function ErrorBox({ message }: { message: string }) {
++  return (
++    <p role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
++      {message}
++    </p>
++  );
++}
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..9b8d21b
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,15 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "noEmit": true,
++    "skipLibCheck": true,
++    "isolatedModules": true,
++    "types": ["vite/client"]
++  },
++  "include": ["src"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

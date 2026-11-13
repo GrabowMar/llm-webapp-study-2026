@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "Segoe UI", Arial, sans-serif;
+  --font-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  --color-paper: #f8f9f5;
+  --color-ink: #293b31;
+  --color-muted: #7c8178;
+  --color-line: #e4e7de;
+  --color-leaf: #e9efdc;
+  --color-moss: #354b3e;
+}
+
+@layer base {
+  body {
+    @apply m-0 bg-paper font-sans text-ink antialiased;
+  }
+  button, a, input, textarea {
+    @apply outline-offset-4 focus-visible:outline-2 focus-visible:outline-moss;
+  }
+  button:not(:disabled), a {
+    @apply cursor-pointer;
+  }
+  button:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+  ::selection {
+    @apply bg-leaf text-ink;
+  }
+  dialog::backdrop {
+    @apply bg-ink/35 backdrop-blur-sm;
+  }
+}

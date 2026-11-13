@@ -1,0 +1,501 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 714,
+  "completed_at": "2026-11-11T03:48:32.024585+00:00",
+  "condition_id": 95,
+  "condition_label": "local-opencode-go/deepseek-v4.1-flash",
+  "config_fingerprint": "1c91fb42f0667a165d0ab9c6fa4ffcaa48eafc37bade7b6969c3027140498f86",
+  "cost_usd": 0.0,
+  "duration": 1209.45369,
+  "fingerprints": {
+    "config_fingerprint": "1c91fb42f0667a165d0ab9c6fa4ffcaa48eafc37bade7b6969c3027140498f86",
+    "prompt_hash": "e3ffd798762fe2764eb82efa743e7c25bdc2d80fdd2ec31e7ff0eb44392b487e",
+    "run_fingerprint": "6009c5f3f7cc4e3fca547685c73074ef50d6debabb626346a0b13423c70a6e42",
+    "task_hash": "254f35d70c4074de19db9a4816bff38b2d50b404f87ed7e5e2b4dfc535a2e83c",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "fd5ff2e3-6cdf-476a-a05e-4490e0ddf562",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/deepseek-v4.1-flash",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-11T03:48:12.717215+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 826,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 11,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 103,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 104,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "leaderboard.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "leaderboard.get.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "scores.submit",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "scores.submit.ok",
+          "ms": 4,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "scores.submit",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "scores.submit.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "scores.submit",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "scores.submit.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "scores.mine",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "scores.mine.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "scores.mine",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "scores.mine.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "admin.scores",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "admin.scores.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.scores",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "admin.scores.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.scores",
+          "expected": {
+            "status": [
+              403
+            ]
+          },
+          "id": "admin.scores.non_admin_403",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "admin.scores",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "admin.scores.page_size",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "admin.scores.hide",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "admin.scores.hide.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.scores.hide",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "admin.scores.hide.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "admin.scores.hide",
+          "expected": {
+            "status": [
+              403
+            ]
+          },
+          "id": "admin.scores.hide.non_admin_403",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 403
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 15,
+        "agent_pass_rate": 1.0,
+        "agent_passed": 15,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 6,
+            "passed": 6
+          },
+          "functional": {
+            "n": 7,
+            "passed": 7
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 1
+          },
+          "validation": {
+            "n": 1,
+            "passed": 1
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 1.0,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 3,
+        "regression_pass_rate": null,
+        "sec_pass": true,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 1.0
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-89",
+          "endpoint": "leaderboard.get",
+          "evidence": "tautology payloads returned no extra rows",
+          "id": "probe.leaderboard.sqli",
+          "kind": "sqli_boolean",
+          "skip_reason": null,
+          "status": "not_exploited"
+        },
+        {
+          "cwe": "cwe-915",
+          "endpoint": "scores.submit",
+          "evidence": "achieved_at not taken from the request (status 201)",
+          "id": "probe.scores.mass_assignment",
+          "kind": "mass_assignment",
+          "skip_reason": null,
+          "status": "not_exploited"
+        },
+        {
+          "cwe": "cwe-798",
+          "endpoint": null,
+          "evidence": "no default password accepted",
+          "id": "probe.leaderboard.default_admin",
+          "kind": "default_credential",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1252,
+  "loc_model": 1252,
+  "model": "deepseek-v4.1-flash",
+  "model_id": "local-opencode-go/deepseek-v4.1-flash",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "6009c5f3f7cc4e3fca547685c73074ef50d6debabb626346a0b13423c70a6e42",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-11T03:28:22.570895+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "gaming_leaderboard@1",
+  "tokens_used": 2132644,
+  "tree_hash": "cc055507cf144aeb8c5100852990e0e88458748eb67a3b6fb7d44cd86f607fba",
+  "truncated": true,
+  "unit": "task:gaming_leaderboard@1",
+  "usable": true
+}

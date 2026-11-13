@@ -1,0 +1,485 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 666,
+  "completed_at": "2026-11-10T23:53:25.499183+00:00",
+  "condition_id": 96,
+  "condition_label": "local-opencode-go/mimo-v2.6-flash",
+  "config_fingerprint": "2b82e549faba25f9fc8ff15d7d099bb6b3b5e73f824cef7fcad57083f7ff953c",
+  "cost_usd": 0.0,
+  "duration": 2636.493232,
+  "fingerprints": {
+    "config_fingerprint": "2b82e549faba25f9fc8ff15d7d099bb6b3b5e73f824cef7fcad57083f7ff953c",
+    "prompt_hash": "83280a5c31201c50781736011f146579a4207ab97f783b69bcc7f8d681e7adca",
+    "run_fingerprint": "1ad18bce3fd99aaf4f652b19600c271a3f80d05361f9a59d7fbf59a4e56f3830",
+    "task_hash": "4d972a734c886699b78f18d63032a5240c53d82ab903581936719899c7c8b6e7",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "9579a0f6-ff20-4099-867c-d7870ad48041",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/mimo-v2.6-flash",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-10T23:53:05.929559+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 786,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 12,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 109,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 106,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "events.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "events.list.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "events.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "events.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "events.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "events.create.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "events.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "events.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "events.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "events.create.invalid.too_long",
+          "ms": 2,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"created_at\":\"2026-11-10T23:53:18Z\",\"created_by\":\"usera4ae3d09d\",\"description\":\"llmlab description\",\"end_time\":\"2030-01-15T10:00:00Z\",\"id\":2,\"location\":\"llmlab location\",\"start_time\":\"2030-01-15T10:00:00Z\",\"title\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "events.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "events.get.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "events.replace",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "events.replace.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "events.replace",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "events.replace.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "events.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "events.replace.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "events.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "events.replace.invalid.too_long",
+          "ms": 2,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"created_at\":\"2026-11-10T23:53:18Z\",\"created_by\":\"usera4ae3d09d\",\"description\":\"llmlab description\",\"end_time\":\"2030-01-15T10:00:00Z\",\"id\":7,\"location\":\"llmlab location\",\"start_time\":\"2030-01-15T10:00:00Z\",\"title\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "events.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "events.delete.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 204
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "events.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "events.delete.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "events.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "events.utc",
+          "ms": 1,
+          "note": "status 400",
+          "observed": {
+            "body": "{\"error\":\"end_time is required\",\"field\":\"end_time\"}\n",
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 15,
+        "agent_pass_rate": 0.8,
+        "agent_passed": 12,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 3,
+            "passed": 3
+          },
+          "functional": {
+            "n": 8,
+            "passed": 7
+          },
+          "validation": {
+            "n": 4,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.8,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 1,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.8
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-79",
+          "endpoint": "events.create",
+          "evidence": "payload not served unescaped as HTML",
+          "id": "probe.events.xss",
+          "kind": "xss_stored",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1866,
+  "loc_model": 1866,
+  "model": "mimo-v2.6-flash",
+  "model_id": "local-opencode-go/mimo-v2.6-flash",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "1ad18bce3fd99aaf4f652b19600c271a3f80d05361f9a59d7fbf59a4e56f3830",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-10T23:09:29.005951+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "scheduling_event_list@1",
+  "tokens_used": 3889116,
+  "tree_hash": "f3f1f002a60c7b8f56b5947c28b5eb8688e3f24ea4b9c228bebd7c2cb7c22b31",
+  "truncated": true,
+  "unit": "task:scheduling_event_list@1",
+  "usable": true
+}

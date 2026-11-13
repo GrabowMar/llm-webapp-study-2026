@@ -1,0 +1,743 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 639,
+  "completed_at": "2026-11-10T21:12:41.850008+00:00",
+  "condition_id": 93,
+  "condition_label": "local-opencode-go/hy4",
+  "config_fingerprint": "9e5b6182664ee1e8e057690d33c47b93699bd73d8c18e7e4a94cb7e73bf76429",
+  "cost_usd": 0.0,
+  "duration": 1175.497927,
+  "fingerprints": {
+    "config_fingerprint": "9e5b6182664ee1e8e057690d33c47b93699bd73d8c18e7e4a94cb7e73bf76429",
+    "prompt_hash": "f9e8094518db66ad561760aab49d7306396498545524e2a41b0ad11a011df8e1",
+    "run_fingerprint": "f15cdb821345a3fbc26d6e4d55d941923384c58f7c3a3b7ef5d7d4b9fd2c63cd",
+    "task_hash": "34f383080feaebb6aa77211ca325f91fe62bc7581ccfc0ae31902d30bc7c8276",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "8f98fe84-93ed-417f-8d47-6bb96cd514b7",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/hy4",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-10T21:12:19.461378+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 756,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 62,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 107,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 105,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "customers.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "customers.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "customers.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "customers.list.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "customers.list",
+          "expected": null,
+          "id": "customers.list.page_size",
+          "ms": null,
+          "note": "setup 1: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "filter",
+          "endpoint": "customers.list",
+          "expected": null,
+          "id": "customers.list.search",
+          "ms": null,
+          "note": "setup 1: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "customers.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "customers.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "customers.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "customers.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "customers.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "customers.create.invalid.missing",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "customers.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "customers.create.invalid.too_long",
+          "ms": 6,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"company\":\"llmlab company\",\"created_at\":\"2026-11-10T21:12:35.428485+00:00\",\"email\":\"llmlabdaf271e8@example.com\",\"id\":4,\"interaction_count\":0,\"last_contacted_at\":null,\"name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"notes\":\"llmlab notes\"",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "negative",
+          "endpoint": "customers.create",
+          "expected": {
+            "status": [
+              409
+            ]
+          },
+          "id": "customers.create.duplicate",
+          "ms": 2,
+          "note": "status 400",
+          "observed": {
+            "body": "{\"errors\":{\"email\":\"A customer with this email already exists.\"},\"message\":\"A customer with this email already exists.\"}\n",
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "customers.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "customers.get.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "customers.get",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "customers.get.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "customers.replace",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "customers.replace.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "customers.replace",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "customers.replace.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "customers.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "customers.replace.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "customers.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "customers.replace.invalid.too_long",
+          "ms": 3,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"company\":\"llmlab company\",\"created_at\":\"2026-11-10T21:12:35.470299+00:00\",\"email\":\"llmlab321cab6b@example.com\",\"id\":11,\"interaction_count\":0,\"last_contacted_at\":null,\"name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"notes\":\"llmlab notes",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "customers.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "customers.delete.ok",
+          "ms": 3,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"ok\":true}\n",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "customers.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "customers.delete.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "interactions.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "interactions.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "interactions.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "interactions.list.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "interactions.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "interactions.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "interactions.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "interactions.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "interactions.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "interactions.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "interactions.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "interactions.create.invalid.too_long",
+          "ms": 3,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"customer_id\":19,\"id\":2,\"kind\":\"call\",\"logged_by\":\"useracb4518b4\",\"occurred_at\":\"2030-01-15T10:00:00+00:00\",\"summary\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "interactions.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "interactions.create.invalid.enum",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "persistence",
+          "endpoint": "customers.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "customers.get.persists",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 27,
+        "agent_pass_rate": 0.7407407407407407,
+        "agent_passed": 20,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 7,
+            "passed": 7
+          },
+          "filter": {
+            "n": 1,
+            "passed": 0
+          },
+          "functional": {
+            "n": 9,
+            "passed": 8
+          },
+          "negative": {
+            "n": 1,
+            "passed": 0
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 0
+          },
+          "persistence": {
+            "n": 1,
+            "passed": 1
+          },
+          "validation": {
+            "n": 7,
+            "passed": 4
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.7407407407407407,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 2,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.7407407407407407
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-89",
+          "endpoint": "customers.list",
+          "evidence": "tautology payloads returned no extra rows",
+          "id": "probe.customers.sqli",
+          "kind": "sqli_boolean",
+          "skip_reason": null,
+          "status": "not_exploited"
+        },
+        {
+          "cwe": "cwe-79",
+          "endpoint": "customers.create",
+          "evidence": "store request answered 400",
+          "id": "probe.customers.xss",
+          "kind": "xss_stored",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1582,
+  "loc_model": 1582,
+  "model": "hy4",
+  "model_id": "local-opencode-go/hy4",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "f15cdb821345a3fbc26d6e4d55d941923384c58f7c3a3b7ef5d7d4b9fd2c63cd",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-10T20:53:06.352081+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "crm_customer_list@1",
+  "tokens_used": 1264028,
+  "tree_hash": "d8cd05c282f7133b6df0d98360135ba3fead3f909ca561988b046b67e0c1c934",
+  "truncated": true,
+  "unit": "task:crm_customer_list@1",
+  "usable": true
+}

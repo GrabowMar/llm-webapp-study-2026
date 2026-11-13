@@ -1,0 +1,1402 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..2dfd211
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,5 @@
++node_modules
++frontend/dist
++__pycache__
++data/*.db*
++.venv
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..5bf1f46 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,187 @@
+-"""Flask entry point."""
++"""Flask entry point: base64 converter API and frontend host."""
+ 
++import base64
++import binascii
++import hashlib
++import os
++import secrets
++import sqlite3
++from datetime import datetime, timezone
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.exceptions import HTTPException
++from werkzeug.security import check_password_hash, generate_password_hash, safe_join
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
++DB_PATH = DATA_DIR / "app.db"
++
++PREVIEW_LENGTH = 100
++MAX_USERNAME = 64
++MAX_PASSWORD = 256
++DEFAULT_PAGE_SIZE = 20
++MAX_PAGE_SIZE = 100
+ 
+ app = Flask(__name__, static_folder=None)
++app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
++    password_hash TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS tokens (
++    token_hash TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS conversions (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    direction TEXT NOT NULL,
++    input TEXT NOT NULL,
++    output TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
++CREATE INDEX IF NOT EXISTS idx_conversions_user ON conversions(user_id, id DESC);
++"""
++
++
++class ApiError(Exception):
++    def __init__(self, message: str, status: int = 400):
++        super().__init__(message)
++        self.message = message
++        self.status = status
++
++
++def connect() -> sqlite3.Connection:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH, timeout=30)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    return conn
++
++
++def init_db() -> None:
++    conn = connect()
++    try:
++        conn.execute("PRAGMA journal_mode = WAL")
++        conn.executescript(SCHEMA)
++        conn.commit()
++    finally:
++        conn.close()
++
++
++def db() -> sqlite3.Connection:
++    if "db" not in g:
++        g.db = connect()
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc):
++    conn = g.pop("db", None)
++    if conn is not None:
++        conn.close()
++
++
++def now() -> str:
++    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
++
++
++def hash_token(token: str) -> str:
++    return hashlib.sha256(token.encode()).hexdigest()
++
++
++def json_body() -> dict:
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        raise ApiError("Request body must be a JSON object")
++    return data
++
++
++def require_user() -> sqlite3.Row:
++    header = request.headers.get("Authorization", "")
++    scheme, _, token = header.partition(" ")
++    token = token.strip()
++    if scheme.lower() != "bearer" or not token:
++        raise ApiError("Authentication required", 401)
++    row = db().execute(
++        "SELECT users.id, users.username FROM tokens JOIN users ON users.id = tokens.user_id "
++        "WHERE tokens.token_hash = ?",
++        (hash_token(token),),
++    ).fetchone()
++    if row is None:
++        raise ApiError("Invalid or expired token", 401)
++    g.token_hash = hash_token(token)
++    return row
++
++
++@app.errorhandler(ApiError)
++def handle_api_error(err: ApiError):
++    return jsonify({"error": err.message}), err.status
++
++
++@app.errorhandler(HTTPException)
++def handle_http_error(err: HTTPException):
++    if request.path.startswith("/api/") or request.path == "/api":
++        message = err.description or err.name
++        if err.code == 413:
++            message = "Request body too large"
++        return jsonify({"error": message}), err.code
++    return err
++
++
++@app.errorhandler(Exception)
++def handle_unexpected(err: Exception):
++    app.logger.exception("Unhandled error")
++    return jsonify({"error": "Internal server error"}), 500
++
++
++def encode_text(text) -> str:
++    if not isinstance(text, str):
++        raise ApiError("'text' must be a string")
++    try:
++        raw = text.encode("utf-8")
++    except UnicodeEncodeError:
++        raise ApiError("'text' is not valid Unicode text")
++    return base64.b64encode(raw).decode("ascii")
++
++
++def decode_text(encoded) -> str:
++    if not isinstance(encoded, str):
++        raise ApiError("'encoded' must be a string")
++    compact = "".join(encoded.split())
++    try:
++        raw = base64.b64decode(compact.encode("ascii"), validate=True)
++    except (binascii.Error, UnicodeEncodeError, ValueError):
++        raise ApiError("Input is not valid base64")
++    try:
++        return raw.decode("utf-8")
++    except UnicodeDecodeError:
++        raise ApiError("Decoded data is not valid UTF-8 text")
++
++
++def preview(value: str) -> str:
++    if len(value) <= PREVIEW_LENGTH:
++        return value
++    return value[:PREVIEW_LENGTH] + "…"
++
++
++def conversion_dict(row: sqlite3.Row, full: bool = False) -> dict:
++    data = {
++        "id": row["id"],
++        "direction": row["direction"],
++        "input_preview": preview(row["input"]),
++        "output_preview": preview(row["output"]),
++        "created_at": row["created_at"],
++    }
++    if full:
++        data["output"] = row["output"]
++    return data
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +189,168 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    data = json_body()
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not username.strip():
++        raise ApiError("'username' is required")
++    username = username.strip()
++    if len(username) > MAX_USERNAME:
++        raise ApiError(f"'username' must be at most {MAX_USERNAME} characters")
++    if not isinstance(password, str) or not password:
++        raise ApiError("'password' is required")
++    if len(password) > MAX_PASSWORD:
++        raise ApiError(f"'password' must be at most {MAX_PASSWORD} characters")
++    conn = db()
++    try:
++        cur = conn.execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, generate_password_hash(password), now()),
++        )
++        conn.commit()
++    except sqlite3.IntegrityError:
++        raise ApiError("Username is already taken", 409)
++    return jsonify({"id": cur.lastrowid, "username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    data = json_body()
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not isinstance(password, str) or not username or not password:
++        raise ApiError("'username' and 'password' are required")
++    conn = db()
++    row = conn.execute(
++        "SELECT id, password_hash FROM users WHERE username = ?", (username.strip(),)
++    ).fetchone()
++    if row is None or not check_password_hash(row["password_hash"], password):
++        raise ApiError("Invalid username or password", 401)
++    token = secrets.token_urlsafe(32)
++    conn.execute(
++        "INSERT INTO tokens (token_hash, user_id, created_at) VALUES (?, ?, ?)",
++        (hash_token(token), row["id"], now()),
++    )
++    conn.commit()
++    return jsonify({"token": token}), 200
++
++
++@app.get("/api/auth/me")
++def me():
++    user = require_user()
++    return jsonify({"id": user["id"], "username": user["username"]})
++
++
++@app.post("/api/auth/logout")
++def logout():
++    require_user()
++    conn = db()
++    conn.execute("DELETE FROM tokens WHERE token_hash = ?", (g.token_hash,))
++    conn.commit()
++    return "", 204
++
++
++@app.post("/api/base64/encode")
++def api_encode():
++    data = json_body()
++    if "text" not in data:
++        raise ApiError("'text' is required")
++    return jsonify({"encoded": encode_text(data["text"])})
++
++
++@app.post("/api/base64/decode")
++def api_decode():
++    data = json_body()
++    if "encoded" not in data:
++        raise ApiError("'encoded' is required")
++    return jsonify({"text": decode_text(data["encoded"])})
++
++
++@app.post("/api/conversions")
++def create_conversion():
++    user = require_user()
++    data = json_body()
++    direction = data.get("direction")
++    if direction not in ("encode", "decode"):
++        raise ApiError("'direction' must be 'encode' or 'decode'")
++    if "input" not in data:
++        raise ApiError("'input' is required")
++    value = data["input"]
++    if not isinstance(value, str):
++        raise ApiError("'input' must be a string")
++    output = encode_text(value) if direction == "encode" else decode_text(value)
++    conn = db()
++    cur = conn.execute(
++        "INSERT INTO conversions (user_id, direction, input, output, created_at) "
++        "VALUES (?, ?, ?, ?, ?)",
++        (user["id"], direction, value, output, now()),
++    )
++    conn.commit()
++    row = conn.execute("SELECT * FROM conversions WHERE id = ?", (cur.lastrowid,)).fetchone()
++    return jsonify(conversion_dict(row, full=True)), 201
++
++
++def int_param(name: str, default: int) -> int:
++    raw = request.args.get(name)
++    if raw is None or raw == "":
++        return default
++    try:
++        value = int(raw)
++    except ValueError:
++        raise ApiError(f"'{name}' must be an integer")
++    if value < 1:
++        raise ApiError(f"'{name}' must be at least 1")
++    return value
++
++
++@app.get("/api/conversions")
++def list_conversions():
++    user = require_user()
++    page = int_param("page", 1)
++    page_size = min(int_param("page_size", DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
++    conn = db()
++    total = conn.execute(
++        "SELECT COUNT(*) FROM conversions WHERE user_id = ?", (user["id"],)
++    ).fetchone()[0]
++    rows = conn.execute(
++        "SELECT * FROM conversions WHERE user_id = ? ORDER BY created_at DESC, id DESC "
++        "LIMIT ? OFFSET ?",
++        (user["id"], page_size, (page - 1) * page_size),
++    ).fetchall()
++    return jsonify(
++        {
++            "items": [conversion_dict(r) for r in rows],
++            "total": total,
++            "page": page,
++            "page_size": page_size,
++        }
++    )
++
++
++@app.delete("/api/conversions/<int:conversion_id>")
++def delete_conversion(conversion_id: int):
++    user = require_user()
++    conn = db()
++    cur = conn.execute(
++        "DELETE FROM conversions WHERE id = ? AND user_id = ?", (conversion_id, user["id"])
++    )
++    conn.commit()
++    if cur.rowcount == 0:
++        raise ApiError("Conversion not found", 404)
++    return "", 204
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+-    if (DIST / path).is_file():
++    if path == "api" or path.startswith("api/"):
++        raise ApiError("Not found", 404)
++    target = safe_join(str(DIST), path)
++    if target is not None and Path(target).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
++
++
++init_db()
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..2887159 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,10 +10,62 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "4.3.5",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "4.3.5",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +356,356 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -344,6 +746,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +793,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1083,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -789,6 +1232,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..2408e86 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -11,7 +11,9 @@
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "4.3.5",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "4.3.5",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..aedbec9 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,174 @@
++import { useEffect, useState } from "react";
++import { api, ApiError, getToken, setToken } from "./api";
++import AuthPanel from "./AuthPanel";
++import History from "./History";
++
++const area =
++  "h-48 w-full resize-y rounded-md border border-slate-300 p-3 font-mono text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500";
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [username, setUsername] = useState<string | null>(null);
++  const [checking, setChecking] = useState(getToken() !== null);
++  const [plain, setPlain] = useState("");
++  const [encoded, setEncoded] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [save, setSave] = useState(false);
++  const [copied, setCopied] = useState<"plain" | "encoded" | null>(null);
++  const [refreshKey, setRefreshKey] = useState(0);
++
++  async function loadUser() {
++    if (!getToken()) {
++      setUsername(null);
++      setChecking(false);
++      return;
++    }
++    try {
++      setUsername((await api.me()).username);
++    } catch (err) {
++      if (err instanceof ApiError && err.status === 401) setToken(null);
++      setUsername(null);
++    } finally {
++      setChecking(false);
++    }
++  }
++
++  useEffect(() => {
++    loadUser();
++  }, []);
++
++  async function signOut() {
++    try {
++      await api.logout();
++    } catch {
++      /* token may already be invalid */
++    }
++    setToken(null);
++    setUsername(null);
++    setSave(false);
++  }
++
++  async function run(direction: "encode" | "decode") {
++    setError(null);
++    const input = direction === "encode" ? plain : encoded;
++    try {
++      let output: string;
++      if (username && save) {
++        output = (await api.save(direction, input)).output;
++        setRefreshKey((k) => k + 1);
++      } else if (direction === "encode") {
++        output = (await api.encode(input)).encoded;
++      } else {
++        output = (await api.decode(input)).text;
++      }
++      if (direction === "encode") setEncoded(output);
++      else setPlain(output);
++    } catch (err) {
++      if (err instanceof ApiError && err.status === 401) {
++        setToken(null);
++        setUsername(null);
++      }
++      setError(err instanceof ApiError ? err.message : "Something went wrong");
++    }
++  }
++
++  async function copy(which: "plain" | "encoded") {
++    try {
++      await navigator.clipboard.writeText(which === "plain" ? plain : encoded);
++      setCopied(which);
++      setTimeout(() => setCopied(null), 1500);
++    } catch {
++      setError("Could not copy to clipboard");
++    }
++  }
++
++  const btn = "rounded-md px-4 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500";
++
++  return (
++    <div className="min-h-screen bg-slate-50 text-slate-900">
++      <header className="border-b border-slate-200 bg-white">
++        <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3">
++          <h1 className="text-xl font-semibold">Base64 converter</h1>
++          {username && (
++            <div className="flex items-center gap-3 text-sm">
++              <span>
++                Signed in as <strong>{username}</strong>
++              </span>
++              <button onClick={signOut} className={`${btn} border border-slate-300 hover:bg-slate-100`}>
++                Sign out
++              </button>
++            </div>
++          )}
++        </div>
++      </header>
++      <main className="mx-auto max-w-4xl space-y-6 px-4 py-6">
++        {!checking && !username && <AuthPanel onSignedIn={loadUser} />}
++
++        <section className="space-y-4 rounded-lg bg-white p-4 shadow-sm ring-1 ring-slate-200">
++          <div className="grid gap-4 md:grid-cols-2">
++            <div>
++              <div className="mb-1 flex items-center justify-between">
++                <label htmlFor="plain" className="text-sm font-medium text-slate-600">
++                  Text
++                </label>
++                <button
++                  onClick={() => copy("plain")}
++                  className="rounded px-2 py-0.5 text-xs text-indigo-600 hover:bg-indigo-50"
++                >
++                  {copied === "plain" ? "Copied" : "Copy"}
++                </button>
++              </div>
++              <textarea id="plain" className={area} value={plain} onChange={(e) => setPlain(e.target.value)} />
++            </div>
++            <div>
++              <div className="mb-1 flex items-center justify-between">
++                <label htmlFor="encoded" className="text-sm font-medium text-slate-600">
++                  Base64
++                </label>
++                <button
++                  onClick={() => copy("encoded")}
++                  className="rounded px-2 py-0.5 text-xs text-indigo-600 hover:bg-indigo-50"
++                >
++                  {copied === "encoded" ? "Copied" : "Copy"}
++                </button>
++              </div>
++              <textarea
++                id="encoded"
++                className={area}
++                value={encoded}
++                onChange={(e) => setEncoded(e.target.value)}
++              />
++            </div>
++          </div>
++          {error && (
++            <p role="alert" className="text-sm text-red-600">
++              {error}
++            </p>
++          )}
++          <div className="flex flex-wrap items-center gap-3">
++            <button onClick={() => run("encode")} className={`${btn} bg-indigo-600 text-white hover:bg-indigo-700`}>
++              Encode
++            </button>
++            <button onClick={() => run("decode")} className={`${btn} bg-slate-800 text-white hover:bg-slate-900`}>
++              Decode
++            </button>
++            {username && (
++              <label className="ml-auto flex cursor-pointer items-center gap-2 text-sm">
++                <input
++                  type="checkbox"
++                  role="switch"
++                  checked={save}
++                  onChange={(e) => setSave(e.target.checked)}
++                  className="peer sr-only"
++                />
++                <span className="relative h-5 w-9 rounded-full bg-slate-300 transition peer-checked:bg-indigo-600 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-500 after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:transition peer-checked:after:translate-x-4" />
++                Save to history
++              </label>
++            )}
++          </div>
++        </section>
++
++        {username && <History refreshKey={refreshKey} />}
++      </main>
++    </div>
++  );
+ }
+diff --git a/frontend/src/AuthPanel.tsx b/frontend/src/AuthPanel.tsx
+new file mode 100644
+index 0000000..c93390a
+--- /dev/null
++++ b/frontend/src/AuthPanel.tsx
+@@ -0,0 +1,90 @@
++import { FormEvent, useState } from "react";
++import { api, ApiError, setToken } from "./api";
++
++const input =
++  "w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500";
++const button =
++  "rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-indigo-500";
++
++export default function AuthPanel({ onSignedIn }: { onSignedIn: () => void }) {
++  const [mode, setMode] = useState<"login" | "register">("login");
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [notice, setNotice] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  async function submit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setNotice(null);
++    setBusy(true);
++    try {
++      if (mode === "register") {
++        await api.register(username, password);
++      }
++      const { token } = await api.login(username, password);
++      setToken(token);
++      onSignedIn();
++    } catch (err) {
++      setError(err instanceof ApiError ? err.message : "Something went wrong");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <form onSubmit={submit} className="space-y-3 rounded-lg bg-white p-4 shadow-sm ring-1 ring-slate-200">
++      <div className="flex gap-2 text-sm">
++        {(["login", "register"] as const).map((m) => (
++          <button
++            key={m}
++            type="button"
++            onClick={() => {
++              setMode(m);
++              setError(null);
++              setNotice(null);
++            }}
++            className={`rounded-md px-3 py-1 font-medium ${
++              mode === m ? "bg-indigo-100 text-indigo-700" : "text-slate-500 hover:text-slate-800"
++            }`}
++          >
++            {m === "login" ? "Sign in" : "Register"}
++          </button>
++        ))}
++      </div>
++      <div className="grid gap-3 sm:grid-cols-2">
++        <label className="block text-sm">
++          <span className="mb-1 block text-slate-600">Username</span>
++          <input
++            className={input}
++            value={username}
++            onChange={(e) => setUsername(e.target.value)}
++            autoComplete="username"
++            required
++          />
++        </label>
++        <label className="block text-sm">
++          <span className="mb-1 block text-slate-600">Password</span>
++          <input
++            className={input}
++            type="password"
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            autoComplete={mode === "login" ? "current-password" : "new-password"}
++            required
++          />
++        </label>
++      </div>
++      {error && (
++        <p role="alert" className="text-sm text-red-600">
++          {error}
++        </p>
++      )}
++      {notice && <p className="text-sm text-green-700">{notice}</p>}
++      <button type="submit" disabled={busy} className={`${button} bg-indigo-600 text-white hover:bg-indigo-700`}>
++        {mode === "login" ? "Sign in" : "Create account"}
++      </button>
++    </form>
++  );
++}
+diff --git a/frontend/src/History.tsx b/frontend/src/History.tsx
+new file mode 100644
+index 0000000..f8c8a9c
+--- /dev/null
++++ b/frontend/src/History.tsx
+@@ -0,0 +1,104 @@
++import { useCallback, useEffect, useState } from "react";
++import { api, ApiError, Conversion } from "./api";
++
++const PAGE_SIZE = 10;
++
++export default function History({ refreshKey }: { refreshKey: number }) {
++  const [page, setPage] = useState(1);
++  const [items, setItems] = useState<Conversion[]>([]);
++  const [total, setTotal] = useState(0);
++  const [error, setError] = useState<string | null>(null);
++
++  const load = useCallback(async (p: number) => {
++    try {
++      const res = await api.history(p, PAGE_SIZE);
++      const pages = Math.max(1, Math.ceil(res.total / PAGE_SIZE));
++      if (p > pages) {
++        setPage(pages);
++        return;
++      }
++      setItems(res.items);
++      setTotal(res.total);
++      setError(null);
++    } catch (err) {
++      setError(err instanceof ApiError ? err.message : "Could not load history");
++    }
++  }, []);
++
++  useEffect(() => {
++    load(page);
++  }, [load, page, refreshKey]);
++
++  async function remove(id: number) {
++    try {
++      await api.remove(id);
++      await load(page);
++    } catch (err) {
++      setError(err instanceof ApiError ? err.message : "Could not delete");
++    }
++  }
++
++  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
++
++  return (
++    <section className="rounded-lg bg-white p-4 shadow-sm ring-1 ring-slate-200">
++      <h2 className="mb-3 text-lg font-semibold">History</h2>
++      {error && (
++        <p role="alert" className="mb-2 text-sm text-red-600">
++          {error}
++        </p>
++      )}
++      {items.length === 0 ? (
++        <p className="text-sm text-slate-500">No saved conversions yet.</p>
++      ) : (
++        <ul className="divide-y divide-slate-100">
++          {items.map((c) => (
++            <li key={c.id} className="flex items-start gap-3 py-2">
++              <span
++                className={`mt-0.5 rounded px-2 py-0.5 text-xs font-medium ${
++                  c.direction === "encode" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
++                }`}
++              >
++                {c.direction}
++              </span>
++              <div className="min-w-0 flex-1 text-sm">
++                <p className="truncate font-mono" title={c.input_preview}>
++                  {c.input_preview || <em className="text-slate-400">(empty)</em>}
++                </p>
++                <p className="truncate font-mono text-slate-500" title={c.output_preview}>
++                  → {c.output_preview || <em className="text-slate-400">(empty)</em>}
++                </p>
++                <p className="text-xs text-slate-400">{new Date(c.created_at).toLocaleString()}</p>
++              </div>
++              <button
++                onClick={() => remove(c.id)}
++                className="rounded-md px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50"
++              >
++                Delete
++              </button>
++            </li>
++          ))}
++        </ul>
++      )}
++      <div className="mt-3 flex items-center justify-between text-sm">
++        <button
++          onClick={() => setPage((p) => Math.max(1, p - 1))}
++          disabled={page <= 1}
++          className="rounded-md border border-slate-300 px-3 py-1 disabled:opacity-40"
++        >
++          Previous
++        </button>
++        <span className="text-slate-500">
++          Page {page} of {pages}
++        </span>
++        <button
++          onClick={() => setPage((p) => Math.min(pages, p + 1))}
++          disabled={page >= pages}
++          className="rounded-md border border-slate-300 px-3 py-1 disabled:opacity-40"
++        >
++          Next
++        </button>
++      </div>
++    </section>
++  );
++}
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..4198026
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,75 @@
++export type Conversion = {
++  id: number;
++  direction: "encode" | "decode";
++  input_preview: string;
++  output_preview: string;
++  created_at: string;
++};
++
++export type HistoryPage = {
++  items: Conversion[];
++  total: number;
++  page: number;
++  page_size: number;
++};
++
++export class ApiError extends Error {
++  status: number;
++  constructor(message: string, status: number) {
++    super(message);
++    this.status = status;
++  }
++}
++
++let token: string | null = localStorage.getItem("token");
++
++export function setToken(value: string | null) {
++  token = value;
++  if (value) localStorage.setItem("token", value);
++  else localStorage.removeItem("token");
++}
++
++export function getToken() {
++  return token;
++}
++
++async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
++  const headers: Record<string, string> = {};
++  if (body !== undefined) headers["Content-Type"] = "application/json";
++  if (token) headers["Authorization"] = `Bearer ${token}`;
++  let res: Response;
++  try {
++    res = await fetch(`/api${path}`, {
++      method,
++      headers,
++      body: body === undefined ? undefined : JSON.stringify(body),
++    });
++  } catch {
++    throw new ApiError("Could not reach the server", 0);
++  }
++  if (res.status === 204) return undefined as T;
++  let data: any = null;
++  try {
++    data = await res.json();
++  } catch {
++    /* ignore */
++  }
++  if (!res.ok) throw new ApiError(data?.error ?? `Request failed (${res.status})`, res.status);
++  return data as T;
++}
++
++export const api = {
++  register: (username: string, password: string) =>
++    request<{ id: number; username: string }>("POST", "/auth/register", { username, password }),
++  login: (username: string, password: string) =>
++    request<{ token: string }>("POST", "/auth/login", { username, password }),
++  me: () => request<{ id: number; username: string }>("GET", "/auth/me"),
++  logout: () => request<void>("POST", "/auth/logout"),
++  encode: (text: string) => request<{ encoded: string }>("POST", "/base64/encode", { text }),
++  decode: (encoded: string) => request<{ text: string }>("POST", "/base64/decode", { encoded }),
++  save: (direction: "encode" | "decode", input: string) =>
++    request<Conversion & { output: string }>("POST", "/conversions", { direction, input }),
++  history: (page: number, pageSize: number) =>
++    request<HistoryPage>("GET", `/conversions?page=${page}&page_size=${pageSize}`),
++  remove: (id: number) => request<void>("DELETE", `/conversions/${id}`),
++};
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..696e0d2 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,5 @@
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+ createRoot(document.getElementById("root")!).render(<App />);
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

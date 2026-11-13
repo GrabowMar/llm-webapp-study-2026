@@ -1,0 +1,2899 @@
+diff --git a/.dockerignore b/.dockerignore
+index 069be25..2a4de29 100644
+--- a/.dockerignore
++++ b/.dockerignore
+@@ -8,3 +8,4 @@ frontend/dist
+ data/*.db
+ data/*.sqlite
+ data/*.sqlite3
++data
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..a02bb9e
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,5 @@
++.venv/
++data/
++frontend/dist/
++node_modules/
++__pycache__/
+diff --git a/Dockerfile b/Dockerfile
+index 214952b..c243fc1 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -14,7 +14,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
+ WORKDIR /app
+ COPY backend/requirements.txt backend/requirements.lock* backend/
+ RUN if [ -f backend/requirements.lock ]; then \
+-      pip install --no-cache-dir -r backend/requirements.txt -c backend/requirements.lock; \
++      pip install --no-cache-dir --require-hashes -r backend/requirements.lock; \
+     else \
+       pip install --no-cache-dir -r backend/requirements.txt; \
+     fi
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..95841b7 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,183 @@
+ """Flask entry point."""
+ 
++import base64
++import binascii
++import hashlib
++import os
++import re
++import secrets
++import sqlite3
++import uuid
++from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, Response, g, jsonify, request, send_from_directory
++from werkzeug.exceptions import HTTPException
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", Path.cwd() / "data")).resolve()
++DB_PATH = DATA_DIR / "app.db"
++IMAGES_DIR = DATA_DIR / "images"
++
++MAX_IMAGE_BYTES = 10 * 1024 * 1024
++MAX_FILENAME_LEN = 255
++MAX_TITLE_LEN = 200
++MAX_USERNAME_LEN = 64
++MAX_PASSWORD_LEN = 1024
++DEFAULT_PAGE_SIZE = 20
++MAX_PAGE_SIZE = 100
++TOKEN_TTL = timedelta(days=30)
+ 
+ app = Flask(__name__, static_folder=None)
++app.config["MAX_CONTENT_LENGTH"] = MAX_IMAGE_BYTES * 4 // 3 + 64 * 1024
++app.json.sort_keys = False
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
++    password_hash TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS tokens (
++    token_hash TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TEXT NOT NULL,
++    expires_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS images (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    filename TEXT NOT NULL,
++    title TEXT,
++    content_type TEXT NOT NULL,
++    size_bytes INTEGER NOT NULL,
++    storage_name TEXT NOT NULL UNIQUE,
++    uploaded_at TEXT NOT NULL
++);
++CREATE INDEX IF NOT EXISTS images_uploaded_idx ON images (uploaded_at DESC, id DESC);
++"""
++
++
++def init_storage() -> None:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH)
++    try:
++        conn.execute("PRAGMA journal_mode=WAL")
++        conn.executescript(SCHEMA)
++        conn.commit()
++    finally:
++        conn.close()
++
++
++def get_db() -> sqlite3.Connection:
++    if "db" not in g:
++        conn = sqlite3.connect(DB_PATH, timeout=30)
++        conn.row_factory = sqlite3.Row
++        conn.execute("PRAGMA foreign_keys=ON")
++        conn.execute("PRAGMA busy_timeout=30000")
++        g.db = conn
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc):
++    conn = g.pop("db", None)
++    if conn is not None:
++        conn.close()
++
++
++class ApiError(Exception):
++    def __init__(self, status: int, message: str):
++        super().__init__(message)
++        self.status = status
++        self.message = message
++
++
++@app.errorhandler(ApiError)
++def handle_api_error(err: ApiError):
++    resp = jsonify({"error": err.message})
++    resp.status_code = err.status
++    if err.status == 401:
++        resp.headers["WWW-Authenticate"] = "Bearer"
++    return resp
++
++
++@app.errorhandler(HTTPException)
++def handle_http_error(err: HTTPException):
++    if not request.path.startswith("/api"):
++        return err
++    messages = {
++        413: f"Request too large; images may be at most {MAX_IMAGE_BYTES // (1024 * 1024)} MB",
++    }
++    resp = jsonify({"error": messages.get(err.code, err.description or err.name)})
++    resp.status_code = err.code or 500
++    return resp
++
++
++@app.errorhandler(Exception)
++def handle_unexpected(err: Exception):
++    app.logger.exception("Unhandled error", exc_info=err)
++    if request.path.startswith("/api"):
++        return jsonify({"error": "Internal server error"}), 500
++    return Response("Internal server error", status=500)
++
++
++@app.after_request
++def security_headers(resp: Response):
++    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
++    return resp
++
++
++def now_utc() -> datetime:
++    return datetime.now(timezone.utc)
++
++
++def iso(dt: datetime) -> str:
++    return dt.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
++
++
++def json_body() -> dict:
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        raise ApiError(400, "Request body must be a JSON object")
++    return data
++
++
++def hash_token(token: str) -> str:
++    return hashlib.sha256(token.encode()).hexdigest()
++
++
++def bearer_token() -> str | None:
++    header = request.headers.get("Authorization", "")
++    scheme, _, value = header.partition(" ")
++    if scheme.lower() != "bearer" or not value.strip():
++        return None
++    return value.strip()
++
++
++def current_user() -> sqlite3.Row | None:
++    if "user" in g:
++        return g.user
++    user = None
++    token = bearer_token()
++    if token:
++        user = get_db().execute(
++            "SELECT u.id, u.username FROM tokens t JOIN users u ON u.id = t.user_id "
++            "WHERE t.token_hash = ? AND t.expires_at > ?",
++            (hash_token(token), iso(now_utc())),
++        ).fetchone()
++    g.user = user
++    return user
++
++
++def require_user() -> sqlite3.Row:
++    user = current_user()
++    if user is None:
++        raise ApiError(401, "Authentication required")
++    return user
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +185,261 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++def validate_credentials(data: dict) -> tuple[str, str]:
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not isinstance(password, str):
++        raise ApiError(400, "username and password are required")
++    username = username.strip()
++    if not username:
++        raise ApiError(400, "username must not be empty")
++    if not password:
++        raise ApiError(400, "password must not be empty")
++    return username, password
++
++
++@app.post("/api/auth/register")
++def register():
++    username, password = validate_credentials(json_body())
++    if len(username) > MAX_USERNAME_LEN:
++        raise ApiError(400, f"username must be at most {MAX_USERNAME_LEN} characters")
++    if re.search(r"[\x00-\x1f\x7f\s]", username):
++        raise ApiError(400, "username must not contain whitespace or control characters")
++    if len(password) > MAX_PASSWORD_LEN:
++        raise ApiError(400, f"password must be at most {MAX_PASSWORD_LEN} characters")
++    db = get_db()
++    try:
++        cur = db.execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, generate_password_hash(password), iso(now_utc())),
++        )
++        db.commit()
++    except sqlite3.IntegrityError:
++        raise ApiError(409, "Username is already taken")
++    return {"id": cur.lastrowid, "username": username}, 201
++
++
++@app.post("/api/auth/login")
++def login():
++    username, password = validate_credentials(json_body())
++    db = get_db()
++    user = db.execute(
++        "SELECT id, username, password_hash FROM users WHERE username = ?", (username,)
++    ).fetchone()
++    if user is None or not check_password_hash(user["password_hash"], password):
++        raise ApiError(401, "Invalid username or password")
++    token = secrets.token_urlsafe(32)
++    now = now_utc()
++    db.execute("DELETE FROM tokens WHERE expires_at <= ?", (iso(now),))
++    db.execute(
++        "INSERT INTO tokens (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
++        (hash_token(token), user["id"], iso(now), iso(now + TOKEN_TTL)),
++    )
++    db.commit()
++    return {"token": token, "username": user["username"]}
++
++
++@app.get("/api/auth/me")
++def me():
++    user = require_user()
++    return {"id": user["id"], "username": user["username"]}
++
++
++@app.post("/api/auth/logout")
++def logout():
++    require_user()
++    db = get_db()
++    db.execute("DELETE FROM tokens WHERE token_hash = ?", (hash_token(bearer_token()),))
++    db.commit()
++    return "", 204
++
++
++def detect_content_type(data: bytes) -> str | None:
++    if data.startswith(b"\x89PNG\r\n\x1a\n"):
++        return "image/png"
++    if data.startswith(b"\xff\xd8\xff"):
++        return "image/jpeg"
++    return None
++
++
++DATA_URL_RE = re.compile(r"^data:[^,]*?;base64,", re.IGNORECASE)
++
++
++def decode_base64(value: str) -> bytes:
++    value = DATA_URL_RE.sub("", value.strip(), count=1)
++    value = re.sub(r"\s+", "", value)
++    if not value:
++        raise ApiError(400, "data must not be empty")
++    if "-" in value or "_" in value:
++        value = value.replace("-", "+").replace("_", "/")
++    value += "=" * (-len(value) % 4)
++    try:
++        return base64.b64decode(value, validate=True)
++    except (binascii.Error, ValueError):
++        raise ApiError(400, "data is not valid base64")
++
++
++def image_json(row: sqlite3.Row) -> dict:
++    return {
++        "id": row["id"],
++        "filename": row["filename"],
++        "title": row["title"],
++        "content_type": row["content_type"],
++        "size_bytes": row["size_bytes"],
++        "uploaded_at": row["uploaded_at"],
++        "url": f"/api/images/{row['id']}/file",
++        "uploader": row["uploader"],
++    }
++
++
++IMAGE_SELECT = (
++    "SELECT i.id, i.filename, i.title, i.content_type, i.size_bytes, i.uploaded_at, "
++    "i.storage_name, i.user_id, u.username AS uploader "
++    "FROM images i JOIN users u ON u.id = i.user_id"
++)
++
++
++def get_image_row(image_id: int) -> sqlite3.Row:
++    row = get_db().execute(f"{IMAGE_SELECT} WHERE i.id = ?", (image_id,)).fetchone()
++    if row is None:
++        raise ApiError(404, "Image not found")
++    return row
++
++
++def int_param(name: str, default: int) -> int:
++    raw = request.args.get(name)
++    if raw is None or raw.strip() == "":
++        return default
++    try:
++        value = int(raw)
++    except ValueError:
++        raise ApiError(400, f"{name} must be a positive integer")
++    if value < 1:
++        raise ApiError(400, f"{name} must be a positive integer")
++    return value
++
++
++@app.get("/api/images")
++def list_images():
++    page = int_param("page", 1)
++    page_size = min(int_param("page_size", DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
++    db = get_db()
++    total = db.execute("SELECT COUNT(*) FROM images").fetchone()[0]
++    rows = db.execute(
++        f"{IMAGE_SELECT} ORDER BY i.uploaded_at DESC, i.id DESC LIMIT ? OFFSET ?",
++        (page_size, (page - 1) * page_size),
++    ).fetchall()
++    return {
++        "items": [image_json(r) for r in rows],
++        "total": total,
++        "page": page,
++        "page_size": page_size,
++    }
++
++
++@app.post("/api/images")
++def create_image():
++    user = require_user()
++    body = json_body()
++
++    filename = body.get("filename")
++    if not isinstance(filename, str) or not filename.strip():
++        raise ApiError(400, "filename is required")
++    filename = filename.strip()
++    if len(filename) > MAX_FILENAME_LEN:
++        raise ApiError(400, f"filename must be at most {MAX_FILENAME_LEN} characters")
++    if re.search(r"[\x00-\x1f\x7f]", filename):
++        raise ApiError(400, "filename must not contain control characters")
++
++    title = body.get("title")
++    if title is not None:
++        if not isinstance(title, str):
++            raise ApiError(400, "title must be a string")
++        title = title.strip() or None
++        if title is not None and len(title) > MAX_TITLE_LEN:
++            raise ApiError(400, f"title must be at most {MAX_TITLE_LEN} characters")
++
++    raw = body.get("data")
++    if not isinstance(raw, str):
++        raise ApiError(400, "data is required and must be a base64 string")
++    data = decode_base64(raw)
++    if not data:
++        raise ApiError(400, "data must not be empty")
++    if len(data) > MAX_IMAGE_BYTES:
++        raise ApiError(413, f"Image is too large; the maximum is {MAX_IMAGE_BYTES // (1024 * 1024)} MB")
++    content_type = detect_content_type(data)
++    if content_type is None:
++        raise ApiError(400, "Unsupported image format; only PNG and JPEG images are accepted")
++
++    storage_name = uuid.uuid4().hex
++    path = IMAGES_DIR / storage_name
++    tmp = path.with_suffix(".tmp")
++    tmp.write_bytes(data)
++    os.replace(tmp, path)
++
++    db = get_db()
++    try:
++        cur = db.execute(
++            "INSERT INTO images (user_id, filename, title, content_type, size_bytes, storage_name, uploaded_at) "
++            "VALUES (?, ?, ?, ?, ?, ?, ?)",
++            (user["id"], filename, title, content_type, len(data), storage_name, iso(now_utc())),
++        )
++        db.commit()
++    except Exception:
++        path.unlink(missing_ok=True)
++        raise
++    row = get_image_row(cur.lastrowid)
++    resp = jsonify(image_json(row))
++    resp.status_code = 201
++    resp.headers["Location"] = f"/api/images/{row['id']}"
++    return resp
++
++
++@app.get("/api/images/<int:image_id>")
++def get_image(image_id: int):
++    return image_json(get_image_row(image_id))
++
++
++@app.get("/api/images/<int:image_id>/file")
++def get_image_file(image_id: int):
++    row = get_image_row(image_id)
++    path = IMAGES_DIR / row["storage_name"]
++    try:
++        data = path.read_bytes()
++    except FileNotFoundError:
++        raise ApiError(404, "Image file not found")
++    resp = Response(data, mimetype=row["content_type"])
++    resp.headers["Content-Length"] = str(len(data))
++    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
++    resp.headers["Content-Security-Policy"] = "default-src 'none'"
++    return resp
++
++
++@app.delete("/api/images/<int:image_id>")
++def delete_image(image_id: int):
++    user = require_user()
++    row = get_image_row(image_id)
++    if row["user_id"] != user["id"]:
++        raise ApiError(403, "Only the uploader may delete this image")
++    db = get_db()
++    db.execute("DELETE FROM images WHERE id = ?", (image_id,))
++    db.commit()
++    (IMAGES_DIR / row["storage_name"]).unlink(missing_ok=True)
++    return "", 204
++
++
++@app.route("/api", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
++@app.route("/api/<path:_path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
++def api_not_found(_path: str = ""):
++    raise ApiError(404, "Not found")
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
++
++
++init_storage()
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..d4874d8 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Image Gallery</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..b5b40c5 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -6,303 +6,1025 @@
+     "": {
+       "name": "app-frontend",
+       "dependencies": {
++        "@tailwindcss/vite": "4.3.5",
+         "react": "19.3.1",
+-        "react-dom": "19.3.1"
++        "react-dom": "19.3.1",
++        "tailwindcss": "4.3.5"
+       },
+       "devDependencies": {
++        "@types/react": "19.3.0",
++        "@types/react-dom": "19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "typescript": "7.0.2",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+       "integrity": "sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==",
+-      "dev": true,
+       "license": "MIT",
+       "funding": {
+         "url": "https://github.com/sponsors/oxc-project"
+       }
+     },
+-    "node_modules/@rolldown/binding-android-arm-eabi": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.16.tgz",
+-      "integrity": "sha512-ia3DwAs0OsMGS7+IConptSiyk9pEXkOx/AbJ2n/lAGxH3QkWQus1t8d7gnAT38FCU2sQu8lUbeR6AiZFv4JxaA==",
++    "node_modules/@rolldown/binding-android-arm-eabi": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.16.tgz",
++      "integrity": "sha512-ia3DwAs0OsMGS7+IConptSiyk9pEXkOx/AbJ2n/lAGxH3QkWQus1t8d7gnAT38FCU2sQu8lUbeR6AiZFv4JxaA==",
++      "cpu": [
++        "arm"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-android-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.16.tgz",
++      "integrity": "sha512-kx5wBiMB6E7TEvpl2B9gjLU004BkvEm2Dr941BFjx/SontPwSzNuQUIoVKxHHoSjpFIfHMmcguyLOtyn0hObRg==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-darwin-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.16.tgz",
++      "integrity": "sha512-qslZrXnKJU4cUpjoAmtAo/KQM9e2IRMlmpig6Zpwj+8KWxW8v+nkAf9216Bsek9lOC1jvg2yCjygCFo2f83msQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-darwin-x64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.16.tgz",
++      "integrity": "sha512-FdF+y48ND13eAyM2mQn+85kvAqNlvRWROy2rhgA463X/0Gv4vGtazZtfaF1mRBLscYvtOlh4QnLjOWiFzX69OQ==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-freebsd-x64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.16.tgz",
++      "integrity": "sha512-ddjqFM5e95AgLbUPtKIS7V1KTVlA0RUgCVr5mn+/IEhsdy3pr+Vuj/HZ7nlMN2FyxIwUktOH1LEPIQXO1v9y1Q==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm-gnueabihf": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.16.tgz",
++      "integrity": "sha512-tHdKWbFkFBI687iim3LIyIvyL7j66VvQYkDPss5Stn/qyE2tWkR1YD0dXmXPFKKqT/o5ZEJVsaRsWS2meQwGOA==",
++      "cpu": [
++        "arm"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.16.tgz",
++      "integrity": "sha512-FJiLGAblPBMlBEdbOqw6kW6QcXDWAf/oJu7gYs9ZJZwmg+K+/zjFLxPTIY9izJUzxzc24FHvmseyA0IvJSl17w==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm64-musl": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.16.tgz",
++      "integrity": "sha512-hrJpblMsrQ58U9veWpbXzkhV5zStunds6HWLprqq1qauvgBr1E6P+24kLj6lSLI9vjRn/RYpjprhkHQPKGWpNg==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-ppc64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.16.tgz",
++      "integrity": "sha512-qJd/dC6j6CwLG9/s/RP2nb1RZ0GIgj7Ioj7x/SYa3RzjVrlzrmH0fhIOpfvqQDeIsdP0loi+kHaMhJzY1PBIaA==",
++      "cpu": [
++        "ppc64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-s390x-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.16.tgz",
++      "integrity": "sha512-Vx7Xg5uUJuNcujJjI70OICaH0EYj80BtOLZTSN7uOYg8QOLlyKnaG0IW7Fn/J0IpJsaKzmDKMhOQv1JBM9m9vg==",
++      "cpu": [
++        "s390x"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-x64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.16.tgz",
++      "integrity": "sha512-TNKhgE3uJTsTzatUSSYt0Kgo+Oa2uSlSjz4r1aEIea7HX6ULBym4fAlYUhG1i6pjNf2njfCUAfKwr6C3E9Xg1w==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-x64-musl": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.16.tgz",
++      "integrity": "sha512-7chXdpjXZ8qG0+mIxECN3cT9kvhZ3/oZhMX6Pp876P7CDrIy8nJswva6Mq357JR7eYXfuskwZxMeV1SzoZdHrA==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-openharmony-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.16.tgz",
++      "integrity": "sha512-Kwjt+7uNTJK5/MDkGWGVO2KQPnj8yAV75dMpfwyHZrJSXWHrniOB0aUEWlVYf3H1hOqFLIStLdM5QXq6bnKmOQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "openharmony"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-win32-arm64-msvc": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.16.tgz",
++      "integrity": "sha512-/LH6WfjDRXXJz/p5xl4TmU+jpcnwcxbKEQBW/GZE0JHfN0lGIyTtsUEGaQ/q/GikkGJ2yLKe6pwm7AnEWO8pdw==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-win32-x64-msvc": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.16.tgz",
++      "integrity": "sha512-1lv1KvX0Z871zfk7vw+dnXMMnHNyDwMzWG8Kv3HxDXMOhzCX4SHc7HK319fInP0i+0p9D8brkfzL7pJOaGl+tw==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/pluginutils": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
++      "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
++      "license": "MIT"
++    },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
++    "node_modules/@typescript/typescript-aix-ppc64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-aix-ppc64/-/typescript-aix-ppc64-7.0.2.tgz",
++      "integrity": "sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==",
+       "cpu": [
+-        "arm"
++        "ppc64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "android"
++        "aix"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-android-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.16.tgz",
+-      "integrity": "sha512-kx5wBiMB6E7TEvpl2B9gjLU004BkvEm2Dr941BFjx/SontPwSzNuQUIoVKxHHoSjpFIfHMmcguyLOtyn0hObRg==",
++    "node_modules/@typescript/typescript-darwin-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.0.2.tgz",
++      "integrity": "sha512-gowzar9MwS/aRWp6f3a4KUqzRjAZjOsmGNCM6LcTgXum+dBfgsBVMN+AgvOCCbguXyick6LJhpBszxMebJ8syA==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "android"
++        "darwin"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-darwin-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.16.tgz",
+-      "integrity": "sha512-qslZrXnKJU4cUpjoAmtAo/KQM9e2IRMlmpig6Zpwj+8KWxW8v+nkAf9216Bsek9lOC1jvg2yCjygCFo2f83msQ==",
++    "node_modules/@typescript/typescript-darwin-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-darwin-x64/-/typescript-darwin-x64-7.0.2.tgz",
++      "integrity": "sha512-SZ9xZInqApNlNGc9s0W1VSsktYSOe9cFqNOIqmN1Gs8SmkjKZYFt017G4VwPxASInODuAdbTW7sXiFUf893RgA==",
+       "cpu": [
+-        "arm64"
++        "x64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "darwin"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-darwin-x64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.16.tgz",
+-      "integrity": "sha512-FdF+y48ND13eAyM2mQn+85kvAqNlvRWROy2rhgA463X/0Gv4vGtazZtfaF1mRBLscYvtOlh4QnLjOWiFzX69OQ==",
++    "node_modules/@typescript/typescript-freebsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-freebsd-arm64/-/typescript-freebsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-W5NH4y/J0plIIS5b2xvTEkU7JFxyqdMAOgf+Ilhl0vHQXKO5dZoxd+C/jEtq56c4F3wk71RB4BMRQ2XdI+bwYQ==",
+       "cpu": [
+-        "x64"
++        "arm64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "darwin"
++        "freebsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-freebsd-x64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.16.tgz",
+-      "integrity": "sha512-ddjqFM5e95AgLbUPtKIS7V1KTVlA0RUgCVr5mn+/IEhsdy3pr+Vuj/HZ7nlMN2FyxIwUktOH1LEPIQXO1v9y1Q==",
++    "node_modules/@typescript/typescript-freebsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-freebsd-x64/-/typescript-freebsd-x64-7.0.2.tgz",
++      "integrity": "sha512-UMGDx5sTpzNw3WiPebH7l90IWfJggEd+egHt/q6p7/Cm3zqoV7VxkGXt+3DxPIw8CcmvAB0j3sVVfbhX+M4Tpw==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "freebsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm-gnueabihf": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.16.tgz",
+-      "integrity": "sha512-tHdKWbFkFBI687iim3LIyIvyL7j66VvQYkDPss5Stn/qyE2tWkR1YD0dXmXPFKKqT/o5ZEJVsaRsWS2meQwGOA==",
++    "node_modules/@typescript/typescript-linux-arm": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-arm/-/typescript-linux-arm-7.0.2.tgz",
++      "integrity": "sha512-gffT3xPz9sR7j/YJExkyPntrI0P2EP9XbOyWzth2/Gs0RstK+90RBcO0ncXoXy/beYll1SXw846Nf2zdnEz0QQ==",
+       "cpu": [
+         "arm"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-FJiLGAblPBMlBEdbOqw6kW6QcXDWAf/oJu7gYs9ZJZwmg+K+/zjFLxPTIY9izJUzxzc24FHvmseyA0IvJSl17w==",
++    "node_modules/@typescript/typescript-linux-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz",
++      "integrity": "sha512-Qh4eU4/y3yDjnfjjyPYihMj5/ODIlmt+Bzu17OI+fiSRDW57QmU5SiN63exPRNJPKUzcc1INa1NXdrJ+MqHjUQ==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm64-musl": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.16.tgz",
+-      "integrity": "sha512-hrJpblMsrQ58U9veWpbXzkhV5zStunds6HWLprqq1qauvgBr1E6P+24kLj6lSLI9vjRn/RYpjprhkHQPKGWpNg==",
++    "node_modules/@typescript/typescript-linux-loong64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-loong64/-/typescript-linux-loong64-7.0.2.tgz",
++      "integrity": "sha512-uEHck9i8hoAzXPiYRib1O7miOnz23SxIeVl6F4LXox+qov1K35jHcEW6VHKvZI+pyvl7fZEP4MCU5LYvIq1GuQ==",
+       "cpu": [
+-        "arm64"
++        "loong64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
+       ],
+-      "license": "MIT",
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-mips64el": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-mips64el/-/typescript-linux-mips64el-7.0.2.tgz",
++      "integrity": "sha512-R4KvAMnE43W5Qeqb0Ly56O3mWMWIAgsMyz36DCaycd5nbg/9kzm0liw3JocfRqyJY0KPmzFjbswozXyW0DnIYA==",
++      "cpu": [
++        "mips64el"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-ppc64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-qJd/dC6j6CwLG9/s/RP2nb1RZ0GIgj7Ioj7x/SYa3RzjVrlzrmH0fhIOpfvqQDeIsdP0loi+kHaMhJzY1PBIaA==",
++    "node_modules/@typescript/typescript-linux-ppc64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-ppc64/-/typescript-linux-ppc64-7.0.2.tgz",
++      "integrity": "sha512-DORx5b3sd/4S7eayxm4FQv+A7CrkUIGRaHiwI8oiHTAI1fAPWhF4J0vAlkC8biAlHSVVwxMQ3tjZ2/DVbnQiiA==",
+       "cpu": [
+         "ppc64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
+       ],
+-      "license": "MIT",
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-riscv64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-riscv64/-/typescript-linux-riscv64-7.0.2.tgz",
++      "integrity": "sha512-wf0jqEDOjrPRnKwYRyyJDRo11KMbvMFrU+q4zqKyChODBzvlkbhNQfKvLxQCcwTpdDaXSHZTVuh0JoCrKCUMHQ==",
++      "cpu": [
++        "riscv64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-s390x-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.16.tgz",
+-      "integrity": "sha512-Vx7Xg5uUJuNcujJjI70OICaH0EYj80BtOLZTSN7uOYg8QOLlyKnaG0IW7Fn/J0IpJsaKzmDKMhOQv1JBM9m9vg==",
++    "node_modules/@typescript/typescript-linux-s390x": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-s390x/-/typescript-linux-s390x-7.0.2.tgz",
++      "integrity": "sha512-IkwJc3L7yhytWd/ewjyxNDfOmswCm9GWMJT/ue/dU4aZNbwZeYAetq42VyLmsmSjvoX7z74X6ZaYCtzAr0EuGw==",
+       "cpu": [
+         "s390x"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-x64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-TNKhgE3uJTsTzatUSSYt0Kgo+Oa2uSlSjz4r1aEIea7HX6ULBym4fAlYUhG1i6pjNf2njfCUAfKwr6C3E9Xg1w==",
++    "node_modules/@typescript/typescript-linux-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-7.0.2.tgz",
++      "integrity": "sha512-EYdf2cNg7rgCWJnxCdJ+F3V39O8ihb37eHAu1LK8oAFizgTQbPOK7zHHXbPt8rX24COqODXeI3sIf0fCXG7H/A==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-x64-musl": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.16.tgz",
+-      "integrity": "sha512-7chXdpjXZ8qG0+mIxECN3cT9kvhZ3/oZhMX6Pp876P7CDrIy8nJswva6Mq357JR7eYXfuskwZxMeV1SzoZdHrA==",
++    "node_modules/@typescript/typescript-netbsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-netbsd-arm64/-/typescript-netbsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-+polYF4MF04aPpO5FTkHran9yUQDSXqy5GiSDKpsll5jy3l3+g9QLhpf39T+ePtefhXLOGrLl0QIjkQP6VnelA==",
+       "cpu": [
+-        "x64"
++        "arm64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "netbsd"
+       ],
+-      "license": "MIT",
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-netbsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-netbsd-x64/-/typescript-netbsd-x64-7.0.2.tgz",
++      "integrity": "sha512-8YIT0EHM/3dq10ZOVF/A7pc/YSMtbcecct4rWtexrnSCHOPcpC2KTLXfTCR6vDpnSiY12heNb1GiN/wu+T/FyA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "linux"
++        "netbsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-openharmony-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.16.tgz",
+-      "integrity": "sha512-Kwjt+7uNTJK5/MDkGWGVO2KQPnj8yAV75dMpfwyHZrJSXWHrniOB0aUEWlVYf3H1hOqFLIStLdM5QXq6bnKmOQ==",
++    "node_modules/@typescript/typescript-openbsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-openbsd-arm64/-/typescript-openbsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-APT8+ClYnuYm1u9+kgGXoMj2VzWzcymwh2gNSQVySHfkRDGOTVkoWLjCmOQSaO+PoqQ57B0flRp9SA+7GnnkzQ==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "openharmony"
++        "openbsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-win32-arm64-msvc": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.16.tgz",
+-      "integrity": "sha512-/LH6WfjDRXXJz/p5xl4TmU+jpcnwcxbKEQBW/GZE0JHfN0lGIyTtsUEGaQ/q/GikkGJ2yLKe6pwm7AnEWO8pdw==",
++    "node_modules/@typescript/typescript-openbsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-openbsd-x64/-/typescript-openbsd-x64-7.0.2.tgz",
++      "integrity": "sha512-yX7s+Q0Dln0Dt9tEzZsAjXXR/+ytBM7AlglaqyeMPxQszJ1JhlJdZ6jLA+IzldHtflX81em7lDao1xXu+aRRkg==",
+       "cpu": [
+-        "arm64"
++        "x64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "win32"
++        "openbsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-win32-x64-msvc": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.16.tgz",
+-      "integrity": "sha512-1lv1KvX0Z871zfk7vw+dnXMMnHNyDwMzWG8Kv3HxDXMOhzCX4SHc7HK319fInP0i+0p9D8brkfzL7pJOaGl+tw==",
++    "node_modules/@typescript/typescript-sunos-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-sunos-x64/-/typescript-sunos-x64-7.0.2.tgz",
++      "integrity": "sha512-dLJDGaLZ1D4HPQn62u1n8mBDkJREwMsAkCdkwd4Ieqw+x3TUyTsqY0YiBCtE6H6OzzgGk3iuZ3vFWRS+E8/d1g==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "sunos"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-win32-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-win32-arm64/-/typescript-win32-arm64-7.0.2.tgz",
++      "integrity": "sha512-Gyl1Vy6OsWesLzmq+EP0Fb7b4Nid5232AvcA2SFcdYreldpNtYFFofPjnt62y9hQy7VTaZp65ICJjuAQRaVcIQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "win32"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/pluginutils": {
+-      "version": "1.0.1",
+-      "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
+-      "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
++    "node_modules/@typescript/typescript-win32-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-win32-x64/-/typescript-win32-x64-7.0.2.tgz",
++      "integrity": "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g==",
++      "cpu": [
++        "x64"
++      ],
+       "dev": true,
+-      "license": "MIT"
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
+     },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+@@ -334,21 +1056,39 @@
+         }
+       }
+     },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+       "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
+-      "dev": true,
+       "license": "Apache-2.0",
+       "engines": {
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+       "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
+-      "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=12.0.0"
+@@ -366,7 +1106,6 @@
+       "version": "2.3.3",
+       "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+       "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+-      "dev": true,
+       "hasInstallScript": true,
+       "license": "MIT",
+       "optional": true,
+@@ -377,11 +1116,25 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+       "integrity": "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+-      "dev": true,
+       "license": "MPL-2.0",
+       "dependencies": {
+         "detect-libc": "^2.0.3"
+@@ -414,7 +1167,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -435,7 +1187,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -456,7 +1207,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -477,7 +1227,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -498,7 +1247,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -519,7 +1267,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -543,7 +1290,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -567,7 +1313,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -591,7 +1336,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -615,7 +1359,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -636,7 +1379,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -650,11 +1392,19 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+       "integrity": "sha512-uKdg2G3GNCKQn9byYOpxbGqrT2fGO5KRt5J/8b3pok8rT6qxGWF6hxMyJiEYtAf+FVyYuD9hRaDqX5uPFYJ4ZQ==",
+-      "dev": true,
+       "funding": [
+         {
+           "type": "github",
+@@ -673,14 +1423,12 @@
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
+       "integrity": "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==",
+-      "dev": true,
+       "license": "ISC"
+     },
+     "node_modules/picomatch": {
+       "version": "4.0.7",
+       "resolved": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz",
+       "integrity": "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==",
+-      "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=12"
+@@ -693,7 +1441,6 @@
+       "version": "8.5.32",
+       "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.32.tgz",
+       "integrity": "sha512-LJlKCCAUFKOuZxipUdYw1NzIITEsPcgyOG9LkvRJvuKj/bRzbuRY0ARXvL0pWGpsZvn8jku+LMep2eU0seHp8g==",
+-      "dev": true,
+       "funding": [
+         {
+           "type": "opencollective",
+@@ -743,7 +1490,6 @@
+       "version": "1.2.16",
+       "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz",
+       "integrity": "sha512-bWvlMpFKiTfDKfnK7FC2MPgPeWCf/Kpwsq49ApdW+FQaBZb6O6dZ4MAPbPUjp7hYQrw/RobqCzn64BRrQecGHw==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "@oxc-project/types": "=0.156.0",
+@@ -783,17 +1529,34 @@
+       "version": "1.2.2",
+       "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz",
+       "integrity": "sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==",
+-      "dev": true,
+       "license": "BSD-3-Clause",
+       "engines": {
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+       "integrity": "sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "fdir": "^6.5.0",
+@@ -806,11 +1569,45 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-7.0.2.tgz",
++      "integrity": "sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc"
++      },
++      "engines": {
++        "node": ">=16.20.0"
++      },
++      "optionalDependencies": {
++        "@typescript/typescript-aix-ppc64": "7.0.2",
++        "@typescript/typescript-darwin-arm64": "7.0.2",
++        "@typescript/typescript-darwin-x64": "7.0.2",
++        "@typescript/typescript-freebsd-arm64": "7.0.2",
++        "@typescript/typescript-freebsd-x64": "7.0.2",
++        "@typescript/typescript-linux-arm": "7.0.2",
++        "@typescript/typescript-linux-arm64": "7.0.2",
++        "@typescript/typescript-linux-loong64": "7.0.2",
++        "@typescript/typescript-linux-mips64el": "7.0.2",
++        "@typescript/typescript-linux-ppc64": "7.0.2",
++        "@typescript/typescript-linux-riscv64": "7.0.2",
++        "@typescript/typescript-linux-s390x": "7.0.2",
++        "@typescript/typescript-linux-x64": "7.0.2",
++        "@typescript/typescript-netbsd-arm64": "7.0.2",
++        "@typescript/typescript-netbsd-x64": "7.0.2",
++        "@typescript/typescript-openbsd-arm64": "7.0.2",
++        "@typescript/typescript-openbsd-x64": "7.0.2",
++        "@typescript/typescript-sunos-x64": "7.0.2",
++        "@typescript/typescript-win32-arm64": "7.0.2",
++        "@typescript/typescript-win32-x64": "7.0.2"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+       "integrity": "sha512-z1YpjieJ9g0ebTmQpLBv/oq9E3F9EIlOe+7LahW8SrE3LTiG3udBRUXQOlYXP9b+IC2q2phHeVxj9xGlw34OEQ==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "lightningcss": "^1.33.0",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..e82ce2a 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,20 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "vite build",
++    "typecheck": "tsc --noEmit"
+   },
+   "dependencies": {
++    "@tailwindcss/vite": "4.3.5",
+     "react": "19.3.1",
+-    "react-dom": "19.3.1"
++    "react-dom": "19.3.1",
++    "tailwindcss": "4.3.5"
+   },
+   "devDependencies": {
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "typescript": "7.0.2",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..604102a 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,296 @@
++import { useCallback, useEffect, useState } from "react";
++import { api, ApiError, formatDate, loadToken, saveToken, type Image, type ImagePage } from "./api";
++import AuthPanel from "./components/AuthPanel";
++import ConfirmDialog from "./components/ConfirmDialog";
++import ImageViewer from "./components/ImageViewer";
++import UploadForm from "./components/UploadForm";
++
++const PAGE_SIZE = 12;
++
++interface Session {
++  token: string;
++  username: string;
++}
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [session, setSession] = useState<Session | null>(null);
++  const [checkingSession, setCheckingSession] = useState(() => loadToken() !== null);
++  const [page, setPage] = useState(1);
++  const [data, setData] = useState<ImagePage | null>(null);
++  const [loading, setLoading] = useState(true);
++  const [loadError, setLoadError] = useState<string | null>(null);
++  const [reloadKey, setReloadKey] = useState(0);
++  const [viewing, setViewing] = useState<Image | null>(null);
++  const [deleting, setDeleting] = useState<Image | null>(null);
++  const [deleteBusy, setDeleteBusy] = useState(false);
++  const [deleteError, setDeleteError] = useState<string | null>(null);
++
++  useEffect(() => {
++    const token = loadToken();
++    if (!token) return;
++    let cancelled = false;
++    api
++      .me(token)
++      .then((me) => {
++        if (!cancelled) setSession({ token, username: me.username });
++      })
++      .catch((err) => {
++        if (err instanceof ApiError && err.status === 401) saveToken(null);
++      })
++      .finally(() => {
++        if (!cancelled) setCheckingSession(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, []);
++
++  useEffect(() => {
++    let cancelled = false;
++    setLoading(true);
++    setLoadError(null);
++    api
++      .listImages(page, PAGE_SIZE)
++      .then((res) => {
++        if (cancelled) return;
++        const lastPage = Math.max(1, Math.ceil(res.total / PAGE_SIZE));
++        if (page > lastPage) {
++          setPage(lastPage);
++          return;
++        }
++        setData(res);
++      })
++      .catch((err) => {
++        if (!cancelled) setLoadError(err instanceof Error ? err.message : "Could not load images");
++      })
++      .finally(() => {
++        if (!cancelled) setLoading(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [page, reloadKey]);
++
++  const reload = useCallback(() => setReloadKey((k) => k + 1), []);
++
++  function signIn(token: string, username: string) {
++    saveToken(token);
++    setSession({ token, username });
++  }
++
++  const signOut = useCallback(() => {
++    if (session) api.logout(session.token).catch(() => undefined);
++    saveToken(null);
++    setSession(null);
++  }, [session]);
++
++  const dropSession = useCallback(() => {
++    saveToken(null);
++    setSession(null);
++  }, []);
++
++  function onUploaded() {
++    if (page !== 1) setPage(1);
++    else reload();
++  }
++
++  const closeViewer = useCallback(() => setViewing(null), []);
++  const cancelDelete = useCallback(() => {
++    setDeleting(null);
++    setDeleteError(null);
++  }, []);
++
++  async function confirmDelete() {
++    if (!deleting || !session) return;
++    setDeleteBusy(true);
++    setDeleteError(null);
++    try {
++      await api.deleteImage(session.token, deleting.id);
++      if (viewing?.id === deleting.id) setViewing(null);
++      setDeleting(null);
++      reload();
++    } catch (err) {
++      if (err instanceof ApiError && err.status === 404) {
++        setDeleting(null);
++        setViewing(null);
++        reload();
++      } else {
++        if (err instanceof ApiError && err.status === 401) dropSession();
++        setDeleteError(err instanceof Error ? err.message : "Delete failed");
++      }
++    } finally {
++      setDeleteBusy(false);
++    }
++  }
++
++  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
++  const isOwner = (img: Image) => session !== null && img.uploader === session.username;
++
++  return (
++    <div className="min-h-screen bg-slate-50 text-slate-900">
++      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
++        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3">
++          <h1 className="text-xl font-bold tracking-tight">Image Gallery</h1>
++          {session ? (
++            <div className="flex items-center gap-3">
++              <span className="text-sm text-slate-600">
++                Signed in as <strong className="font-semibold text-slate-900">{session.username}</strong>
++              </span>
++              <button
++                type="button"
++                onClick={signOut}
++                className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100"
++              >
++                Sign out
++              </button>
++            </div>
++          ) : (
++            <span className="text-sm text-slate-500">Not signed in</span>
++          )}
++        </div>
++      </header>
++
++      <main className="mx-auto grid max-w-7xl gap-6 px-4 py-6 lg:grid-cols-[20rem_1fr]">
++        <aside className="space-y-6 lg:sticky lg:top-20 lg:self-start">
++          {checkingSession ? (
++            <div className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-500">Loading…</div>
++          ) : session ? (
++            <UploadForm token={session.token} onUploaded={onUploaded} onUnauthorized={dropSession} />
++          ) : (
++            <>
++              <AuthPanel onSignedIn={signIn} />
++              <p className="px-1 text-sm text-slate-500">Sign in or create an account to upload images.</p>
++            </>
++          )}
++        </aside>
++
++        <section aria-label="Gallery" className="min-w-0">
++          <div className="mb-4 flex items-baseline justify-between">
++            <h2 className="text-lg font-semibold">Latest images</h2>
++            {data && data.total > 0 && (
++              <span className="text-sm text-slate-500">
++                {data.total} image{data.total === 1 ? "" : "s"}
++              </span>
++            )}
++          </div>
++
++          {loadError ? (
++            <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-center text-sm text-red-700">
++              <p>{loadError}</p>
++              <button
++                type="button"
++                onClick={reload}
++                className="mt-3 rounded-md bg-red-600 px-3 py-1.5 font-medium text-white hover:bg-red-500"
++              >
++                Retry
++              </button>
++            </div>
++          ) : !data && loading ? (
++            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-4">
++              {Array.from({ length: 8 }).map((_, i) => (
++                <div key={i} className="aspect-square animate-pulse rounded-xl bg-slate-200" />
++              ))}
++            </div>
++          ) : data && data.items.length === 0 ? (
++            <div className="rounded-xl border-2 border-dashed border-slate-300 bg-white px-6 py-16 text-center">
++              <p className="text-base font-medium text-slate-700">No images yet</p>
++              <p className="mt-1 text-sm text-slate-500">
++                {session ? "Upload the first image using the form." : "Sign in to upload the first image."}
++              </p>
++            </div>
++          ) : data ? (
++            <>
++              <ul
++                className={`grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-4 ${loading ? "opacity-60" : ""}`}
++              >
++                {data.items.map((img) => (
++                  <li
++                    key={img.id}
++                    className="group overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:shadow-md"
++                  >
++                    <button
++                      type="button"
++                      onClick={() => setViewing(img)}
++                      className="block aspect-square w-full overflow-hidden bg-slate-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
++                      aria-label={`View ${img.title ?? img.filename}`}
++                    >
++                      <img
++                        src={img.url}
++                        alt={img.title ?? img.filename}
++                        loading="lazy"
++                        className="h-full w-full object-cover transition group-hover:scale-105"
++                      />
++                    </button>
++                    <div className="flex items-start justify-between gap-2 p-3">
++                      <div className="min-w-0">
++                        <p className="truncate text-sm font-medium text-slate-900" title={img.title ?? img.filename}>
++                          {img.title ?? img.filename}
++                        </p>
++                        <p className="truncate text-xs text-slate-500">
++                          {img.uploader} · {formatDate(img.uploaded_at)}
++                        </p>
++                      </div>
++                      {isOwner(img) && (
++                        <button
++                          type="button"
++                          onClick={() => setDeleting(img)}
++                          className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50"
++                          aria-label={`Delete ${img.title ?? img.filename}`}
++                        >
++                          Delete
++                        </button>
++                      )}
++                    </div>
++                  </li>
++                ))}
++              </ul>
++              {totalPages > 1 && (
++                <nav className="mt-6 flex items-center justify-center gap-3" aria-label="Pagination">
++                  <button
++                    type="button"
++                    disabled={page <= 1 || loading}
++                    onClick={() => setPage((p) => Math.max(1, p - 1))}
++                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
++                  >
++                    Previous
++                  </button>
++                  <span className="text-sm text-slate-600">
++                    Page {data.page} of {totalPages}
++                  </span>
++                  <button
++                    type="button"
++                    disabled={page >= totalPages || loading}
++                    onClick={() => setPage((p) => p + 1)}
++                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
++                  >
++                    Next
++                  </button>
++                </nav>
++              )}
++            </>
++          ) : null}
++        </section>
++      </main>
++
++      {viewing && (
++        <ImageViewer
++          image={viewing}
++          canDelete={isOwner(viewing)}
++          onDelete={() => setDeleting(viewing)}
++          onClose={closeViewer}
++        />
++      )}
++      {deleting && (
++        <ConfirmDialog
++          title="Delete image?"
++          message={`“${deleting.title ?? deleting.filename}” will be permanently deleted.`}
++          confirmLabel="Delete"
++          busy={deleteBusy}
++          error={deleteError}
++          onConfirm={confirmDelete}
++          onCancel={cancelDelete}
++        />
++      )}
++    </div>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..6646a7b
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,115 @@
++export interface Image {
++  id: number;
++  filename: string;
++  title: string | null;
++  content_type: string;
++  size_bytes: number;
++  uploaded_at: string;
++  url: string;
++  uploader: string;
++}
++
++export interface ImagePage {
++  items: Image[];
++  total: number;
++  page: number;
++  page_size: number;
++}
++
++export class ApiError extends Error {
++  status: number;
++  constructor(status: number, message: string) {
++    super(message);
++    this.status = status;
++  }
++}
++
++const TOKEN_KEY = "gallery.token";
++
++export function loadToken(): string | null {
++  try {
++    return localStorage.getItem(TOKEN_KEY);
++  } catch {
++    return null;
++  }
++}
++
++export function saveToken(token: string | null) {
++  try {
++    if (token) localStorage.setItem(TOKEN_KEY, token);
++    else localStorage.removeItem(TOKEN_KEY);
++  } catch {
++    /* storage unavailable */
++  }
++}
++
++async function request<T>(
++  method: string,
++  path: string,
++  options: { token?: string | null; body?: unknown } = {},
++): Promise<T> {
++  const headers: Record<string, string> = { Accept: "application/json" };
++  if (options.body !== undefined) headers["Content-Type"] = "application/json";
++  if (options.token) headers.Authorization = `Bearer ${options.token}`;
++  let res: Response;
++  try {
++    res = await fetch(path, {
++      method,
++      headers,
++      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
++    });
++  } catch {
++    throw new ApiError(0, "Could not reach the server. Check your connection.");
++  }
++  if (res.status === 204) return undefined as T;
++  let data: unknown = null;
++  const text = await res.text();
++  if (text) {
++    try {
++      data = JSON.parse(text);
++    } catch {
++      data = null;
++    }
++  }
++  if (!res.ok) {
++    const message =
++      data && typeof data === "object" && "error" in data && typeof data.error === "string"
++        ? data.error
++        : `Request failed (${res.status})`;
++    throw new ApiError(res.status, message);
++  }
++  return data as T;
++}
++
++export const api = {
++  register: (username: string, password: string) =>
++    request<{ id: number; username: string }>("POST", "/api/auth/register", {
++      body: { username, password },
++    }),
++  login: (username: string, password: string) =>
++    request<{ token: string; username: string }>("POST", "/api/auth/login", {
++      body: { username, password },
++    }),
++  me: (token: string) => request<{ id: number; username: string }>("GET", "/api/auth/me", { token }),
++  logout: (token: string) => request<void>("POST", "/api/auth/logout", { token }),
++  listImages: (page: number, pageSize: number) =>
++    request<ImagePage>("GET", `/api/images?page=${page}&page_size=${pageSize}`),
++  uploadImage: (token: string, filename: string, data: string, title?: string) =>
++    request<Image>("POST", "/api/images", {
++      token,
++      body: { filename, data, ...(title ? { title } : {}) },
++    }),
++  deleteImage: (token: string, id: number) => request<void>("DELETE", `/api/images/${id}`, { token }),
++};
++
++export function formatBytes(n: number): string {
++  if (n < 1024) return `${n} B`;
++  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
++  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
++}
++
++export function formatDate(iso: string): string {
++  const d = new Date(iso);
++  if (Number.isNaN(d.getTime())) return iso;
++  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
++}
+diff --git a/frontend/src/components/AuthPanel.tsx b/frontend/src/components/AuthPanel.tsx
+new file mode 100644
+index 0000000..d1fbff8
+--- /dev/null
++++ b/frontend/src/components/AuthPanel.tsx
+@@ -0,0 +1,109 @@
++import { useState, type FormEvent } from "react";
++import { api, ApiError } from "../api";
++
++interface Props {
++  onSignedIn: (token: string, username: string) => void;
++}
++
++export default function AuthPanel({ onSignedIn }: Props) {
++  const [mode, setMode] = useState<"login" | "register">("login");
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  async function submit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setBusy(true);
++    try {
++      if (mode === "register") {
++        await api.register(username, password);
++      }
++      const res = await api.login(username, password);
++      onSignedIn(res.token, res.username ?? username);
++    } catch (err) {
++      setError(err instanceof ApiError ? err.message : "Something went wrong");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  function switchMode(next: "login" | "register") {
++    setMode(next);
++    setError(null);
++  }
++
++  const tabClass = (active: boolean) =>
++    `flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition ${
++      active ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900"
++    }`;
++
++  return (
++    <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
++      <div className="mb-4 flex gap-1 rounded-lg bg-slate-100 p-1" role="tablist">
++        <button
++          type="button"
++          role="tab"
++          aria-selected={mode === "login"}
++          className={tabClass(mode === "login")}
++          onClick={() => switchMode("login")}
++        >
++          Sign in
++        </button>
++        <button
++          type="button"
++          role="tab"
++          aria-selected={mode === "register"}
++          className={tabClass(mode === "register")}
++          onClick={() => switchMode("register")}
++        >
++          Register
++        </button>
++      </div>
++      <form onSubmit={submit} className="space-y-3">
++        <div>
++          <label htmlFor="auth-username" className="mb-1 block text-sm font-medium text-slate-700">
++            Username
++          </label>
++          <input
++            id="auth-username"
++            name="username"
++            autoComplete="username"
++            required
++            value={username}
++            onChange={(e) => setUsername(e.target.value)}
++            className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:outline-none"
++          />
++        </div>
++        <div>
++          <label htmlFor="auth-password" className="mb-1 block text-sm font-medium text-slate-700">
++            Password
++          </label>
++          <input
++            id="auth-password"
++            name="password"
++            type="password"
++            autoComplete={mode === "login" ? "current-password" : "new-password"}
++            required
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:outline-none"
++          />
++        </div>
++        {error && (
++          <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++            {error}
++          </p>
++        )}
++        <button
++          type="submit"
++          disabled={busy}
++          className="w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
++        >
++          {busy ? "Please wait…" : mode === "login" ? "Sign in" : "Create account"}
++        </button>
++      </form>
++    </section>
++  );
++}
+diff --git a/frontend/src/components/ConfirmDialog.tsx b/frontend/src/components/ConfirmDialog.tsx
+new file mode 100644
+index 0000000..5a544f5
+--- /dev/null
++++ b/frontend/src/components/ConfirmDialog.tsx
+@@ -0,0 +1,67 @@
++import { useEffect, useRef } from "react";
++
++interface Props {
++  title: string;
++  message: string;
++  confirmLabel: string;
++  busy?: boolean;
++  error?: string | null;
++  onConfirm: () => void;
++  onCancel: () => void;
++}
++
++export default function ConfirmDialog({ title, message, confirmLabel, busy, error, onConfirm, onCancel }: Props) {
++  const cancelRef = useRef<HTMLButtonElement>(null);
++
++  useEffect(() => {
++    cancelRef.current?.focus();
++    const onKey = (e: KeyboardEvent) => {
++      if (e.key === "Escape") {
++        e.stopImmediatePropagation();
++        onCancel();
++      }
++    };
++    window.addEventListener("keydown", onKey, true);
++    return () => window.removeEventListener("keydown", onKey, true);
++  }, [onCancel]);
++
++  return (
++    <div
++      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4"
++      role="alertdialog"
++      aria-modal="true"
++      aria-labelledby="confirm-title"
++      onClick={onCancel}
++    >
++      <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
++        <h2 id="confirm-title" className="text-lg font-semibold text-slate-900">
++          {title}
++        </h2>
++        <p className="mt-2 text-sm text-slate-600">{message}</p>
++        {error && (
++          <p role="alert" className="mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++            {error}
++          </p>
++        )}
++        <div className="mt-5 flex justify-end gap-2">
++          <button
++            ref={cancelRef}
++            type="button"
++            onClick={onCancel}
++            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
++          >
++            Cancel
++          </button>
++          <button
++            type="button"
++            onClick={onConfirm}
++            disabled={busy}
++            className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-60"
++          >
++            {busy ? "Deleting…" : confirmLabel}
++          </button>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/ImageViewer.tsx b/frontend/src/components/ImageViewer.tsx
+new file mode 100644
+index 0000000..4419e55
+--- /dev/null
++++ b/frontend/src/components/ImageViewer.tsx
+@@ -0,0 +1,89 @@
++import { useEffect } from "react";
++import { formatBytes, formatDate, type Image } from "../api";
++
++interface Props {
++  image: Image;
++  canDelete: boolean;
++  onDelete: () => void;
++  onClose: () => void;
++}
++
++export default function ImageViewer({ image, canDelete, onDelete, onClose }: Props) {
++  useEffect(() => {
++    const onKey = (e: KeyboardEvent) => {
++      if (e.key === "Escape") onClose();
++    };
++    window.addEventListener("keydown", onKey);
++    const prev = document.body.style.overflow;
++    document.body.style.overflow = "hidden";
++    return () => {
++      window.removeEventListener("keydown", onKey);
++      document.body.style.overflow = prev;
++    };
++  }, [onClose]);
++
++  return (
++    <div
++      className="fixed inset-0 z-40 flex flex-col bg-slate-950/90"
++      role="dialog"
++      aria-modal="true"
++      aria-label={image.title ?? image.filename}
++      onClick={onClose}
++    >
++      <div
++        className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-slate-900 px-4 py-3 text-slate-100"
++        onClick={(e) => e.stopPropagation()}
++      >
++        <dl className="grid min-w-0 grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-sm">
++          <dt className="text-slate-400">Title</dt>
++          <dd className="truncate font-medium">{image.title ?? <span className="text-slate-500">—</span>}</dd>
++          <dt className="text-slate-400">Filename</dt>
++          <dd className="truncate">{image.filename}</dd>
++          <dt className="text-slate-400">Size</dt>
++          <dd>
++            {formatBytes(image.size_bytes)} · {image.content_type}
++          </dd>
++          <dt className="text-slate-400">Uploaded</dt>
++          <dd className="truncate">
++            {formatDate(image.uploaded_at)} by {image.uploader}
++          </dd>
++        </dl>
++        <div className="flex gap-2">
++          {canDelete && (
++            <button
++              type="button"
++              onClick={onDelete}
++              className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-500"
++            >
++              Delete
++            </button>
++          )}
++          <a
++            href={image.url}
++            target="_blank"
++            rel="noreferrer"
++            className="rounded-md bg-white/10 px-3 py-1.5 text-sm font-medium hover:bg-white/20"
++          >
++            Open original
++          </a>
++          <button
++            type="button"
++            onClick={onClose}
++            className="rounded-md bg-white/10 px-3 py-1.5 text-sm font-medium hover:bg-white/20"
++            aria-label="Close"
++          >
++            Close
++          </button>
++        </div>
++      </div>
++      <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
++        <img
++          src={image.url}
++          alt={image.title ?? image.filename}
++          className="max-h-full max-w-full object-contain"
++          onClick={(e) => e.stopPropagation()}
++        />
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/UploadForm.tsx b/frontend/src/components/UploadForm.tsx
+new file mode 100644
+index 0000000..c97d6f1
+--- /dev/null
++++ b/frontend/src/components/UploadForm.tsx
+@@ -0,0 +1,146 @@
++import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
++import { api, ApiError, formatBytes, type Image } from "../api";
++
++const ALLOWED = ["image/png", "image/jpeg"];
++const MAX_BYTES = 10 * 1024 * 1024;
++
++interface Props {
++  token: string;
++  onUploaded: (image: Image) => void;
++  onUnauthorized: () => void;
++}
++
++function readAsBase64(file: File): Promise<string> {
++  return new Promise((resolve, reject) => {
++    const reader = new FileReader();
++    reader.onload = () => {
++      const result = String(reader.result ?? "");
++      const comma = result.indexOf(",");
++      resolve(comma >= 0 ? result.slice(comma + 1) : result);
++    };
++    reader.onerror = () => reject(reader.error ?? new Error("Could not read file"));
++    reader.readAsDataURL(file);
++  });
++}
++
++export default function UploadForm({ token, onUploaded, onUnauthorized }: Props) {
++  const [file, setFile] = useState<File | null>(null);
++  const [title, setTitle] = useState("");
++  const [preview, setPreview] = useState<string | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [success, setSuccess] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++  const inputRef = useRef<HTMLInputElement>(null);
++
++  useEffect(() => {
++    if (!file) {
++      setPreview(null);
++      return;
++    }
++    const url = URL.createObjectURL(file);
++    setPreview(url);
++    return () => URL.revokeObjectURL(url);
++  }, [file]);
++
++  function onFileChange(e: ChangeEvent<HTMLInputElement>) {
++    setError(null);
++    setSuccess(null);
++    const f = e.target.files?.[0] ?? null;
++    if (f && !ALLOWED.includes(f.type)) {
++      setFile(null);
++      setError("Only PNG and JPEG images can be uploaded.");
++      e.target.value = "";
++      return;
++    }
++    if (f && f.size > MAX_BYTES) {
++      setFile(null);
++      setError(`The file is too large (${formatBytes(f.size)}); the maximum is 10 MB.`);
++      e.target.value = "";
++      return;
++    }
++    setFile(f);
++  }
++
++  function reset() {
++    setFile(null);
++    setTitle("");
++    if (inputRef.current) inputRef.current.value = "";
++  }
++
++  async function submit(e: FormEvent) {
++    e.preventDefault();
++    if (!file) {
++      setError("Choose an image first.");
++      return;
++    }
++    setBusy(true);
++    setError(null);
++    setSuccess(null);
++    try {
++      const data = await readAsBase64(file);
++      const image = await api.uploadImage(token, file.name, data, title.trim() || undefined);
++      reset();
++      setSuccess(`Uploaded “${image.title ?? image.filename}”.`);
++      onUploaded(image);
++    } catch (err) {
++      if (err instanceof ApiError && err.status === 401) onUnauthorized();
++      setError(err instanceof Error ? err.message : "Upload failed");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
++      <h2 className="mb-3 text-base font-semibold text-slate-900">Upload an image</h2>
++      <form onSubmit={submit} className="space-y-3">
++        <div>
++          <label htmlFor="upload-file" className="mb-1 block text-sm font-medium text-slate-700">
++            Image (PNG or JPEG)
++          </label>
++          <input
++            ref={inputRef}
++            id="upload-file"
++            type="file"
++            accept="image/png,image/jpeg,.png,.jpg,.jpeg"
++            onChange={onFileChange}
++            className="block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-indigo-700 hover:file:bg-indigo-100"
++          />
++        </div>
++        {preview && file && (
++          <div className="overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
++            <img src={preview} alt="Preview" className="mx-auto max-h-56 w-auto object-contain" />
++            <p className="truncate border-t border-slate-200 px-3 py-1.5 text-xs text-slate-500">
++              {file.name} · {formatBytes(file.size)}
++            </p>
++          </div>
++        )}
++        <div>
++          <label htmlFor="upload-title" className="mb-1 block text-sm font-medium text-slate-700">
++            Title <span className="font-normal text-slate-400">(optional)</span>
++          </label>
++          <input
++            id="upload-title"
++            value={title}
++            maxLength={200}
++            onChange={(e) => setTitle(e.target.value)}
++            className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:outline-none"
++          />
++        </div>
++        {error && (
++          <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++            {error}
++          </p>
++        )}
++        {success && <p className="rounded-md bg-green-50 px-3 py-2 text-sm text-green-700">{success}</p>}
++        <button
++          type="submit"
++          disabled={busy || !file}
++          className="w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
++        >
++          {busy ? "Uploading…" : "Upload"}
++        </button>
++      </form>
++    </section>
++  );
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..c2a145c 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
++import { StrictMode } from "react";
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <StrictMode>
++    <App />
++  </StrictMode>,
++);
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..5b97070
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,18 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "noEmit": true,
++    "skipLibCheck": true,
++    "isolatedModules": true,
++    "allowImportingTsExtensions": false,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "types": ["vite/client"]
++  },
++  "include": ["src", "vite.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

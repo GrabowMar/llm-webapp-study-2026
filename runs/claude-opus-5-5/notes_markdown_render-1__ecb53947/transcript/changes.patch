@@ -1,0 +1,2282 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..8e74f13
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,6 @@
++.venv/
++node_modules/
++frontend/dist/
++data/
++__pycache__/
++.pytest_cache/
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..b781bf1 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,283 @@
+-"""Flask entry point."""
++"""Flask entry point: Markdown notes API and frontend host."""
+ 
++from __future__ import annotations
++
++import hashlib
++import os
++import secrets
++import sqlite3
++from datetime import datetime, timedelta, timezone
++from functools import wraps
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++import nh3
++from flask import Flask, Response, g, jsonify, request, send_from_directory
++from markdown_it import MarkdownIt
++from werkzeug.exceptions import HTTPException
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", "data")).resolve()
++DB_PATH = DATA_DIR / "app.db"
++
++TOKEN_TTL = timedelta(days=30)
++MAX_USERNAME = 64
++MAX_PASSWORD = 1024
++MAX_TITLE = 200
++MAX_BODY = 200_000
+ 
+ app = Flask(__name__, static_folder=None)
++app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
++app.json.sort_keys = False
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
++    password_hash TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS tokens (
++    token_hash TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TEXT NOT NULL,
++    expires_at TEXT NOT NULL
++);
++CREATE INDEX IF NOT EXISTS tokens_user ON tokens(user_id);
++CREATE TABLE IF NOT EXISTS notes (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    title TEXT NOT NULL,
++    body TEXT NOT NULL,
++    published INTEGER NOT NULL DEFAULT 0,
++    created_at TEXT NOT NULL,
++    updated_at TEXT NOT NULL
++);
++CREATE INDEX IF NOT EXISTS notes_user_updated ON notes(user_id, updated_at DESC, id DESC);
++"""
++
++
++# ---------------------------------------------------------------- database
++
++
++def connect() -> sqlite3.Connection:
++    conn = sqlite3.connect(DB_PATH, timeout=10, isolation_level=None)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    conn.execute("PRAGMA busy_timeout = 10000")
++    return conn
++
++
++def init_db() -> None:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = connect()
++    try:
++        conn.execute("PRAGMA journal_mode = WAL")
++        conn.executescript(SCHEMA)
++    finally:
++        conn.close()
++
++
++def db() -> sqlite3.Connection:
++    if "db" not in g:
++        g.db = connect()
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc):
++    conn = g.pop("db", None)
++    if conn is not None:
++        conn.close()
++
++
++def now_iso() -> str:
++    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
++
++
++# ---------------------------------------------------------------- markdown
++
++_md = MarkdownIt("commonmark", {"html": False, "linkify": False, "typographer": False}).enable(
++    ["table", "strikethrough"]
++)
++
++_ALLOWED_TAGS = {
++    "a", "abbr", "b", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4", "h5",
++    "h6", "hr", "i", "img", "li", "ol", "p", "pre", "s", "strong", "sub", "sup", "table",
++    "tbody", "td", "th", "thead", "tr", "ul",
++}
++_ALLOWED_ATTRS = {
++    "a": {"href", "title"},
++    "img": {"src", "alt", "title"},
++    "code": {"class"},
++    "ol": {"start"},
++    "td": {"style"},
++    "th": {"style"},
++}
++
++
++def render_markdown(text: str) -> str:
++    html = _md.render(text or "")
++    return nh3.clean(
++        html,
++        tags=_ALLOWED_TAGS,
++        attributes=_ALLOWED_ATTRS,
++        url_schemes={"http", "https", "mailto"},
++        link_rel="noopener noreferrer nofollow",
++        filter_style_properties={"text-align"},
++    )
++
++
++def html_response(html: str) -> Response:
++    resp = Response(html, status=200, mimetype="text/html")
++    resp.headers["Content-Security-Policy"] = (
++        "default-src 'none'; img-src https: http: data:; style-src 'unsafe-inline'; sandbox"
++    )
++    resp.headers["Cache-Control"] = "no-store"
++    return resp
++
++
++# ---------------------------------------------------------------- helpers
++
++
++def error(status: int, message: str):
++    resp = jsonify({"error": message})
++    resp.status_code = status
++    if status == 401:
++        resp.headers["WWW-Authenticate"] = "Bearer"
++    return resp
++
++
++def json_body() -> dict | None:
++    data = request.get_json(silent=True)
++    return data if isinstance(data, dict) else None
++
++
++def hash_token(token: str) -> str:
++    return hashlib.sha256(token.encode()).hexdigest()
++
++
++def current_user():
++    header = request.headers.get("Authorization", "")
++    scheme, _, token = header.partition(" ")
++    token = token.strip()
++    if scheme.lower() != "bearer" or not token:
++        return None
++    row = db().execute(
++        "SELECT u.id, u.username, t.expires_at, t.token_hash FROM tokens t "
++        "JOIN users u ON u.id = t.user_id WHERE t.token_hash = ?",
++        (hash_token(token),),
++    ).fetchone()
++    if row is None:
++        return None
++    if row["expires_at"] <= now_iso():
++        db().execute("DELETE FROM tokens WHERE token_hash = ?", (row["token_hash"],))
++        return None
++    return row
++
++
++def login_required(view):
++    @wraps(view)
++    def wrapper(*args, **kwargs):
++        user = current_user()
++        if user is None:
++            return error(401, "authentication required")
++        g.user = user
++        return view(*args, **kwargs)
++
++    return wrapper
++
++
++def note_json(row) -> dict:
++    return {
++        "id": row["id"],
++        "title": row["title"],
++        "body": row["body"],
++        "published": bool(row["published"]),
++        "updated_at": row["updated_at"],
++        "author": row["author"],
++    }
++
++
++NOTE_SELECT = (
++    "SELECT n.id, n.title, n.body, n.published, n.updated_at, n.user_id, u.username AS author "
++    "FROM notes n JOIN users u ON u.id = n.user_id"
++)
++
++
++def own_note(note_id: int):
++    return db().execute(
++        f"{NOTE_SELECT} WHERE n.id = ? AND n.user_id = ?", (note_id, g.user["id"])
++    ).fetchone()
++
++
++def public_note(note_id: int):
++    return db().execute(
++        f"{NOTE_SELECT} WHERE n.id = ? AND n.published = 1", (note_id,)
++    ).fetchone()
++
++
++def validate_note_fields(data: dict, partial: bool):
++    """Return (fields, error_message)."""
++    fields = {}
++    if "title" in data:
++        title = data["title"]
++        if not isinstance(title, str):
++            return None, "title must be a string"
++        title = title.strip()
++        if len(title) > MAX_TITLE:
++            return None, f"title must be at most {MAX_TITLE} characters"
++        fields["title"] = title
++    elif not partial:
++        fields["title"] = ""
++    if "body" in data:
++        body = data["body"]
++        if not isinstance(body, str):
++            return None, "body must be a string"
++        if len(body) > MAX_BODY:
++            return None, f"body must be at most {MAX_BODY} characters"
++        fields["body"] = body
++    elif not partial:
++        fields["body"] = ""
++    if "published" in data:
++        published = data["published"]
++        if not isinstance(published, bool):
++            return None, "published must be a boolean"
++        fields["published"] = 1 if published else 0
++    elif not partial:
++        fields["published"] = 0
++    return fields, None
++
++
++# ---------------------------------------------------------------- errors & headers
++
++
++@app.errorhandler(HTTPException)
++def handle_http_error(exc: HTTPException):
++    if request.path.startswith("/api"):
++        return error(exc.code or 500, exc.description or exc.name)
++    return exc
++
++
++@app.errorhandler(Exception)
++def handle_unexpected(exc: Exception):
++    if isinstance(exc, HTTPException):
++        return handle_http_error(exc)
++    app.logger.exception("unhandled error")
++    return error(500, "internal server error")
++
++
++@app.after_request
++def security_headers(resp: Response):
++    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
++    resp.headers.setdefault("Referrer-Policy", "same-origin")
++    resp.headers.setdefault("X-Frame-Options", "DENY")
++    if request.path.startswith("/api"):
++        resp.headers.setdefault("Cache-Control", "no-store")
++    return resp
++
++
++# ---------------------------------------------------------------- routes: misc
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +285,218 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++# ---------------------------------------------------------------- routes: auth
++
++
++def read_credentials():
++    data = json_body()
++    if data is None:
++        return None, None, "expected a JSON object"
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not isinstance(password, str):
++        return None, None, "username and password are required"
++    return username.strip(), password, None
++
++
++@app.post("/api/auth/register")
++def register():
++    username, password, err = read_credentials()
++    if err:
++        return error(400, err)
++    if not username or len(username) > MAX_USERNAME:
++        return error(400, f"username must be 1-{MAX_USERNAME} characters")
++    if any(not ch.isprintable() for ch in username):
++        return error(400, "username contains invalid characters")
++    if not password or len(password) > MAX_PASSWORD:
++        return error(400, f"password must be 1-{MAX_PASSWORD} characters")
++    try:
++        cur = db().execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, generate_password_hash(password), now_iso()),
++        )
++    except sqlite3.IntegrityError:
++        return error(409, "username already taken")
++    return {"id": cur.lastrowid, "username": username}, 201
++
++
++_DUMMY_HASH = generate_password_hash(secrets.token_hex(16))
++
++
++@app.post("/api/auth/login")
++def login():
++    username, password, err = read_credentials()
++    if err:
++        return error(400, err)
++    row = db().execute(
++        "SELECT id, username, password_hash FROM users WHERE username = ?", (username,)
++    ).fetchone()
++    if row is None:
++        check_password_hash(_DUMMY_HASH, password)
++        return error(401, "invalid username or password")
++    if not check_password_hash(row["password_hash"], password):
++        return error(401, "invalid username or password")
++    token = secrets.token_urlsafe(32)
++    now = datetime.now(timezone.utc)
++    db().execute(
++        "INSERT INTO tokens (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
++        (
++            hash_token(token),
++            row["id"],
++            now_iso(),
++            (now + TOKEN_TTL).isoformat(timespec="microseconds").replace("+00:00", "Z"),
++        ),
++    )
++    return {"token": token, "username": row["username"]}
++
++
++@app.post("/api/auth/logout")
++@login_required
++def logout():
++    db().execute("DELETE FROM tokens WHERE token_hash = ?", (g.user["token_hash"],))
++    return "", 204
++
++
++@app.get("/api/auth/me")
++@login_required
++def me():
++    return {"id": g.user["id"], "username": g.user["username"]}
++
++
++# ---------------------------------------------------------------- routes: notes
++
++
++@app.get("/api/notes")
++@login_required
++def list_notes():
++    rows = db().execute(
++        "SELECT id, title, published, updated_at FROM notes WHERE user_id = ? "
++        "ORDER BY updated_at DESC, id DESC",
++        (g.user["id"],),
++    ).fetchall()
++    return {
++        "items": [
++            {
++                "id": r["id"],
++                "title": r["title"],
++                "published": bool(r["published"]),
++                "updated_at": r["updated_at"],
++            }
++            for r in rows
++        ]
++    }
++
++
++@app.post("/api/notes")
++@login_required
++def create_note():
++    data = json_body()
++    if data is None:
++        return error(400, "expected a JSON object")
++    fields, err = validate_note_fields(data, partial=False)
++    if err:
++        return error(400, err)
++    ts = now_iso()
++    cur = db().execute(
++        "INSERT INTO notes (user_id, title, body, published, created_at, updated_at) "
++        "VALUES (?, ?, ?, ?, ?, ?)",
++        (g.user["id"], fields["title"], fields["body"], fields["published"], ts, ts),
++    )
++    return note_json(own_note(cur.lastrowid)), 201
++
++
++@app.get("/api/notes/<int:note_id>")
++@login_required
++def get_note(note_id: int):
++    row = own_note(note_id)
++    if row is None:
++        return error(404, "note not found")
++    return note_json(row)
++
++
++@app.patch("/api/notes/<int:note_id>")
++@login_required
++def update_note(note_id: int):
++    data = json_body()
++    if data is None:
++        return error(400, "expected a JSON object")
++    if own_note(note_id) is None:
++        return error(404, "note not found")
++    fields, err = validate_note_fields(data, partial=True)
++    if err:
++        return error(400, err)
++    if fields:
++        fields["updated_at"] = now_iso()
++        assignments = ", ".join(f"{k} = ?" for k in fields)
++        db().execute(
++            f"UPDATE notes SET {assignments} WHERE id = ? AND user_id = ?",
++            (*fields.values(), note_id, g.user["id"]),
++        )
++    return note_json(own_note(note_id))
++
++
++@app.delete("/api/notes/<int:note_id>")
++@login_required
++def delete_note(note_id: int):
++    cur = db().execute(
++        "DELETE FROM notes WHERE id = ? AND user_id = ?", (note_id, g.user["id"])
++    )
++    if cur.rowcount == 0:
++        return error(404, "note not found")
++    return "", 204
++
++
++@app.get("/api/notes/<int:note_id>/html")
++@login_required
++def note_html(note_id: int):
++    row = own_note(note_id)
++    if row is None:
++        return error(404, "note not found")
++    return html_response(render_markdown(row["body"]))
++
++
++# ---------------------------------------------------------------- routes: public
++
++
++@app.get("/api/public/notes/<int:note_id>")
++def public_note_json(note_id: int):
++    row = public_note(note_id)
++    if row is None:
++        return error(404, "note not found")
++    return {
++        "id": row["id"],
++        "title": row["title"],
++        "author": row["author"],
++        "updated_at": row["updated_at"],
++        "html": render_markdown(row["body"]),
++    }
++
++
++@app.get("/api/public/notes/<int:note_id>/html")
++def public_note_html(note_id: int):
++    row = public_note(note_id)
++    if row is None:
++        return error(404, "note not found")
++    return html_response(render_markdown(row["body"]))
++
++
++# ---------------------------------------------------------------- frontend
++
++
++@app.route("/api", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
++@app.route("/api/<path:_path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
++def api_not_found(_path: str = ""):
++    return error(404, "not found")
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+-    return send_from_directory(DIST, "index.html")
++    resp = send_from_directory(DIST, "index.html")
++    resp.headers["Cache-Control"] = "no-cache"
++    return resp
++
++
++init_db()
+diff --git a/backend/requirements.lock b/backend/requirements.lock
+index fa779e0..afeff75 100644
+--- a/backend/requirements.lock
++++ b/backend/requirements.lock
+@@ -1,3 +1,9 @@
++#
++# This file is autogenerated by pip-compile with Python 3.13
++# by the following command:
++#
++#    pip-compile --allow-unsafe --generate-hashes --output-file=requirements.lock requirements.txt
++#
+ blinker==1.9.0 \
+     --hash=sha256:b4ce2265a7abece45e7cc896e98dbebe6cead56bcf805a3d23136d145f5445bf \
+     --hash=sha256:ba0efaa9080b619ff2f3459d1d500c57bddea4a6b424b60a91141db6fd2f08bc
+@@ -22,6 +28,10 @@ jinja2==3.1.6 \
+     --hash=sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d \
+     --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
+     # via flask
++markdown-it-py==4.2.0 \
++    --hash=sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49 \
++    --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
++    # via -r requirements.txt
+ markupsafe==3.0.4 \
+     --hash=sha256:007e1ffd9bf65bb6ee96df7b258fc632a4868dd5566037986c64781f35a36e98 \
+     --hash=sha256:02fa4acbc6a3fc5c693c34d4dd8c1130b7fe99cc915181b0ddd6f72aeb296002 \
+@@ -178,6 +188,39 @@ markupsafe==3.0.4 \
+     #   flask
+     #   jinja2
+     #   werkzeug
++mdurl==0.1.2 \
++    --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8 \
++    --hash=sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba
++    # via markdown-it-py
++nh3==0.3.7 \
++    --hash=sha256:157ec1eb7a62f3d9a7badb8d82d89aa810e3e24e097eedfa481a25d0c8a99877 \
++    --hash=sha256:15f5fbf090f5c88d61c820e1fc1fceecb6520cca9fe85649c06b57ef9dc9ff62 \
++    --hash=sha256:18f4278ecd157d43cb35acd5aae9f35cfa79f546b4922bd86536adc0f6312102 \
++    --hash=sha256:19f288c938ec6eef1f5d2c6cab47838e71fef8097e1c1233802be5a6230ba086 \
++    --hash=sha256:4968fe8d2db97c6f047659bf46a449fd8ec377f44ebf3e0a1b96c0d3a333ae32 \
++    --hash=sha256:5ffdfcb9a686ffb12765376bcfb6b5b55728516d3c0ee317d29982381ded3df8 \
++    --hash=sha256:614dac4a4c36ad084e78447d16fe898dedd762e354a7ab9cda2984e82f67883d \
++    --hash=sha256:618e3059caf41ccdf5dcccb3fa9df4cf6e4efe23d1382a8bbfca272a8a4f8bfc \
++    --hash=sha256:6698a822132beedab80f131c08d8d0ac5a178ddeb488d02ca4b67716ecfac7af \
++    --hash=sha256:6c3aa50eb26e9228238271db9f983cbc3b006dfbfeca2d4dc34c33ddc6ac5ea5 \
++    --hash=sha256:6e4280115d44c3b278eef712a86748c1a723105cd79feec46952383117ab4e59 \
++    --hash=sha256:70f5ac8626e899a4bab0ef74ca2f5bd602f49c7b739e6e5026b4afc6d63dac42 \
++    --hash=sha256:71860d01c16f4d8c72e334e0674beb2b0899dbd0bf760de18932ef4390303848 \
++    --hash=sha256:808def0c8c07843e6e50dc84f532457bfa2cfd17417b219a5d9e7c773709331a \
++    --hash=sha256:874b7d67a067bd29a59223f6270fc30da4edd8e6d87fd219fc93bcbaa662c946 \
++    --hash=sha256:91a4dab4e94d9fc54b9f67b1adfb23e81fab7ab43f33c3b8c97be9aa38f789ba \
++    --hash=sha256:94fd6e59553fbb9ffd8ba71bbd5a54e3126ba01799a097ae30d5341d750bc6ac \
++    --hash=sha256:9b7279d43323a25225df23576af6594a16693f61431170848b8b2ac21ad4f174 \
++    --hash=sha256:bc42bb1193c1e28a1e74c2cabaca178e118a7103e8832699fef8a2b3e2496493 \
++    --hash=sha256:be53a4825585f701955cb9baf49f478f56eb81e20294329fe4bc689dd5dd81fa \
++    --hash=sha256:d56e76bd3cadb09b6b0cef364850811663734b348a25f5f587a2819c495367bd \
++    --hash=sha256:de2b2aab32ea303405debefdcfc58043d3e635fa3f67b9eb140d2b0e0c0d2563 \
++    --hash=sha256:e8fd1ab205258b29254f72db377d99e2c96aa7653ef3b015ccab0420b094b506 \
++    --hash=sha256:eae64328e46a25785535afcb6885b6f182ecaf5ee8c88f8c075422db8aacc65b \
++    --hash=sha256:f04b7d333b27f13ca439da3cf1c75c2fba34f104969f6ce4ac8e7079699c2f4a \
++    --hash=sha256:f266d3f1b3647449923a8e406524632220dd5d8b647078dfe45b885d33d10479 \
++    --hash=sha256:fd4a70efb45d5372174f718878eb7a35c12677626a63b2f103b23b833457dcac
++    # via -r requirements.txt
+ werkzeug==3.1.9 \
+     --hash=sha256:55ca7c70a75689be937aa27f8ff4b018f06ff4838fc73045560bf0f5a1291060 \
+     --hash=sha256:6392e50c78460ba618e5b21f08a71f59c99ce99cdc6cf6e3dd7e6ccca8754fab
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index 267f336..8bfdef7 100644
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -1,2 +1,4 @@
+ flask==3.1.3
+ gunicorn==26.2.0
++markdown-it-py==4.2.0
++nh3==0.3.7
+diff --git a/backend/tests/test_api.py b/backend/tests/test_api.py
+new file mode 100644
+index 0000000..f26432b
+--- /dev/null
++++ b/backend/tests/test_api.py
+@@ -0,0 +1,82 @@
++import importlib
++import sys
++from pathlib import Path
++
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++
++
++@pytest.fixture()
++def client(tmp_path, monkeypatch):
++    monkeypatch.setenv("DATA_DIR", str(tmp_path))
++    import app as app_module
++
++    app_module = importlib.reload(app_module)
++    return app_module.app.test_client()
++
++
++def auth(client, name="alice", pw="secret"):
++    assert client.post("/api/auth/register", json={"username": name, "password": pw}).status_code == 201
++    r = client.post("/api/auth/login", json={"username": name, "password": pw})
++    assert r.status_code == 200
++    return {"Authorization": f"Bearer {r.get_json()['token']}"}
++
++
++def test_health(client):
++    assert client.get("/api/health").get_json() == {"status": "ok"}
++
++
++def test_auth(client):
++    h = auth(client)
++    assert client.post("/api/auth/register", json={"username": "alice", "password": "x"}).status_code == 409
++    assert client.post("/api/auth/login", json={"username": "alice", "password": "bad"}).status_code == 401
++    assert client.post("/api/auth/register", json={"username": "", "password": "x"}).status_code == 400
++    assert client.get("/api/notes").status_code == 401
++    assert client.get("/api/notes", headers={"Authorization": "Bearer nope"}).status_code == 401
++    assert client.get("/api/notes", headers=h).status_code == 200
++
++
++def test_notes_crud_and_isolation(client):
++    a = auth(client)
++    b = auth(client, "bob")
++    r = client.post("/api/notes", json={"title": "First", "body": "# Hello\n\n*x*"}, headers=a)
++    assert r.status_code == 201
++    n = r.get_json()
++    assert set(n) == {"id", "title", "body", "published", "updated_at", "author"}
++    assert n["author"] == "alice" and n["published"] is False
++    r2 = client.post("/api/notes", json={"title": "Second", "body": "b"}, headers=a).get_json()
++    items = client.get("/api/notes", headers=a).get_json()["items"]
++    assert [i["id"] for i in items] == [r2["id"], n["id"]]
++    assert set(items[0]) == {"id", "title", "published", "updated_at"}
++    client.patch(f"/api/notes/{n['id']}", json={"body": "changed"}, headers=a)
++    items = client.get("/api/notes", headers=a).get_json()["items"]
++    assert items[0]["id"] == n["id"]
++
++    html = client.get(f"/api/notes/{n['id']}/html", headers=a)
++    assert html.status_code == 200 and html.mimetype == "text/html"
++    assert "<p>changed</p>" in html.get_data(as_text=True)
++
++    for method in ("get", "patch", "delete"):
++        assert getattr(client, method)(f"/api/notes/{n['id']}", json={}, headers=b).status_code == 404
++    assert client.get(f"/api/notes/{n['id']}/html", headers=b).status_code == 404
++    assert client.get("/api/notes", headers=b).get_json() == {"items": []}
++
++    assert client.get(f"/api/public/notes/{n['id']}/html").status_code == 404
++    r = client.patch(f"/api/notes/{n['id']}", json={"published": True, "body": "# T"}, headers=a)
++    assert r.get_json()["published"] is True
++    pub = client.get(f"/api/public/notes/{n['id']}/html")
++    assert pub.status_code == 200 and "<h1>T</h1>" in pub.get_data(as_text=True)
++    client.patch(f"/api/notes/{n['id']}", json={"published": False}, headers=a)
++    assert client.get(f"/api/public/notes/{n['id']}/html").status_code == 404
++
++    assert client.patch(f"/api/notes/{n['id']}", json={"published": "yes"}, headers=a).status_code == 400
++    assert client.delete(f"/api/notes/{n['id']}", headers=a).status_code == 204
++    assert client.get(f"/api/notes/{n['id']}", headers=a).status_code == 404
++
++
++def test_sanitized(client):
++    a = auth(client)
++    n = client.post("/api/notes", json={"title": "x", "body": "<script>alert(1)</script>\n\n[x](javascript:alert(1))"}, headers=a).get_json()
++    out = client.get(f"/api/notes/{n['id']}/html", headers=a).get_data(as_text=True)
++    assert "<script>" not in out and "href=\"javascript" not in out
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..d795a12 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Markdown Notes</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..aabfdca 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,10 +10,66 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/typography": "0.5.20",
++        "@tailwindcss/vite": "4.3.5",
++        "@types/react": "19.3.0",
++        "@types/react-dom": "19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "4.3.5",
++        "typescript": "5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +360,389 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/typography": {
++      "version": "0.5.20",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/typography/-/typography-0.5.20.tgz",
++      "integrity": "sha512-hwbzQuNUfcPvbegQFatVPl/MY/tcM9KLl963hQ5laJKPh81TEZ1+dNG9PirGvcaDBkp+BCshExAyKVPW91dozw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "postcss-selector-parser": "6.0.10"
++      },
++      "peerDependencies": {
++        "tailwindcss": ">=3.0.0 || >=4.0.0 || insiders"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,6 +773,26 @@
+         }
+       }
+     },
++    "node_modules/cssesc": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/cssesc/-/cssesc-3.0.0.tgz",
++      "integrity": "sha512-/Tb/JcjK111nNScGob5MNtsntNM1aCNUDipB/TkwZFhyDrrE47SOx/18wF2bbjgc3ZzCSKW1T5nt5EbFoAz/Vg==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "cssesc": "bin/cssesc"
++      },
++      "engines": {
++        "node": ">=4"
++      }
++    },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +803,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +850,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1140,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -718,6 +1218,20 @@
+         "node": "^10 || ^12 || >=14"
+       }
+     },
++    "node_modules/postcss-selector-parser": {
++      "version": "6.0.10",
++      "resolved": "https://registry.npmjs.org/postcss-selector-parser/-/postcss-selector-parser-6.0.10.tgz",
++      "integrity": "sha512-IQ7TZdoaqbT+LCpShg46jnZVlhWD2w6iQYAcYXfHARZ7X1t/UGhhceQDs5X0cGqKvYlHNOuv7Oa1xmb0oQuA3w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "cssesc": "^3.0.0",
++        "util-deprecate": "^1.0.2"
++      },
++      "engines": {
++        "node": ">=4"
++      }
++    },
+     "node_modules/react": {
+       "version": "19.3.1",
+       "resolved": "https://registry.npmjs.org/react/-/react-19.3.1.tgz",
+@@ -789,6 +1303,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1341,27 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
++    "node_modules/util-deprecate": {
++      "version": "1.0.2",
++      "resolved": "https://registry.npmjs.org/util-deprecate/-/util-deprecate-1.0.2.tgz",
++      "integrity": "sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..c76b28e 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,21 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "typecheck": "tsc --noEmit",
++    "build": "tsc --noEmit && vite build"
+   },
+   "dependencies": {
+     "react": "19.3.1",
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/typography": "0.5.20",
++    "@tailwindcss/vite": "4.3.5",
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "4.3.5",
++    "typescript": "5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..f4cd0c1 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,58 @@
++import { useCallback, useEffect, useState } from "react";
++import { api, clearSession, getSession, onUnauthorized, saveSession } from "./api";
++import AuthForm from "./components/AuthForm";
++import NotesApp from "./components/NotesApp";
++import PublicNotePage from "./components/PublicNotePage";
++import { navigate, usePath } from "./router";
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const path = usePath();
++  const [session, setSession] = useState(getSession);
++
++  const signOut = useCallback((callServer = true) => {
++    if (callServer) void api.logout();
++    clearSession();
++    setSession(null);
++    navigate("/login", true);
++  }, []);
++
++  useEffect(() => {
++    onUnauthorized(() => signOut(false));
++    return () => onUnauthorized(null);
++  }, [signOut]);
++
++  const publicMatch = path.match(/^\/p\/(\d+)\/?$/);
++  const noteMatch = path.match(/^\/notes\/(\d+)\/?$/);
++  const isAuthPage = path === "/login" || path === "/register";
++  const isPublic = publicMatch !== null;
++
++  useEffect(() => {
++    if (isPublic) return;
++    document.title = "Markdown Notes";
++    if (!session && !isAuthPage) navigate("/login", true);
++    else if (session && isAuthPage) navigate("/", true);
++  }, [session, isAuthPage, isPublic]);
++
++  if (publicMatch) return <PublicNotePage id={Number(publicMatch[1])} />;
++
++  if (!session) {
++    return (
++      <AuthForm
++        mode={path === "/register" ? "register" : "login"}
++        onSignedIn={(token, username) => {
++          saveSession(token, username);
++          setSession({ token, username });
++          navigate("/", true);
++        }}
++      />
++    );
++  }
++
++  return (
++    <NotesApp
++      username={session.username}
++      selectedId={noteMatch ? Number(noteMatch[1]) : null}
++      onSignOut={() => signOut()}
++    />
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..91508d0
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,118 @@
++export type NoteSummary = {
++  id: number;
++  title: string;
++  published: boolean;
++  updated_at: string;
++};
++
++export type Note = NoteSummary & {
++  body: string;
++  author: string;
++};
++
++export type PublicNote = {
++  id: number;
++  title: string;
++  author: string;
++  updated_at: string;
++};
++
++export class ApiError extends Error {
++  status: number;
++  constructor(status: number, message: string) {
++    super(message);
++    this.status = status;
++  }
++}
++
++const TOKEN_KEY = "notes.token";
++const USER_KEY = "notes.username";
++
++export function getSession(): { token: string; username: string } | null {
++  const token = localStorage.getItem(TOKEN_KEY);
++  const username = localStorage.getItem(USER_KEY);
++  return token && username ? { token, username } : null;
++}
++
++export function saveSession(token: string, username: string) {
++  localStorage.setItem(TOKEN_KEY, token);
++  localStorage.setItem(USER_KEY, username);
++}
++
++export function clearSession() {
++  localStorage.removeItem(TOKEN_KEY);
++  localStorage.removeItem(USER_KEY);
++}
++
++let unauthorizedHandler: (() => void) | null = null;
++export function onUnauthorized(handler: (() => void) | null) {
++  unauthorizedHandler = handler;
++}
++
++async function request(
++  method: string,
++  path: string,
++  body?: unknown,
++  opts: { auth?: boolean; signal?: AbortSignal } = {},
++): Promise<Response> {
++  const headers: Record<string, string> = {};
++  const auth = opts.auth ?? true;
++  if (body !== undefined) headers["Content-Type"] = "application/json";
++  const session = getSession();
++  if (auth && session) headers["Authorization"] = `Bearer ${session.token}`;
++  const res = await fetch(`/api${path}`, {
++    method,
++    headers,
++    body: body === undefined ? undefined : JSON.stringify(body),
++    signal: opts.signal,
++  });
++  if (!res.ok) {
++    let message = res.statusText || `Request failed (${res.status})`;
++    try {
++      const data = await res.json();
++      if (data && typeof data.error === "string") message = data.error;
++    } catch {
++      /* ignore */
++    }
++    if (res.status === 401 && auth && session && unauthorizedHandler) unauthorizedHandler();
++    throw new ApiError(res.status, message);
++  }
++  return res;
++}
++
++async function json<T>(p: Promise<Response>): Promise<T> {
++  return (await p).json() as Promise<T>;
++}
++
++export const api = {
++  register: (username: string, password: string) =>
++    request("POST", "/auth/register", { username, password }, { auth: false }),
++  login: (username: string, password: string) =>
++    json<{ token: string; username?: string }>(
++      request("POST", "/auth/login", { username, password }, { auth: false }),
++    ),
++  logout: () => request("POST", "/auth/logout").catch(() => undefined),
++  listNotes: () => json<{ items: NoteSummary[] }>(request("GET", "/notes")),
++  createNote: (data: Partial<Pick<Note, "title" | "body" | "published">>) =>
++    json<Note>(request("POST", "/notes", data)),
++  getNote: (id: number) => json<Note>(request("GET", `/notes/${id}`)),
++  updateNote: (id: number, data: Partial<Pick<Note, "title" | "body" | "published">>) =>
++    json<Note>(request("PATCH", `/notes/${id}`, data)),
++  deleteNote: (id: number) => request("DELETE", `/notes/${id}`),
++  noteHtml: async (id: number, signal?: AbortSignal) =>
++    (await request("GET", `/notes/${id}/html`, undefined, { signal })).text(),
++  publicNote: (id: number) =>
++    json<PublicNote>(request("GET", `/public/notes/${id}`, undefined, { auth: false })),
++  publicNoteHtml: async (id: number) =>
++    (await request("GET", `/public/notes/${id}/html`, undefined, { auth: false })).text(),
++};
++
++export function publicUrl(id: number) {
++  return `${window.location.origin}/p/${id}`;
++}
++
++export function formatDate(iso: string) {
++  const d = new Date(iso);
++  if (Number.isNaN(d.getTime())) return iso;
++  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
++}
+diff --git a/frontend/src/components/AuthForm.tsx b/frontend/src/components/AuthForm.tsx
+new file mode 100644
+index 0000000..d45e67b
+--- /dev/null
++++ b/frontend/src/components/AuthForm.tsx
+@@ -0,0 +1,104 @@
++import { useState, type FormEvent } from "react";
++import { api, ApiError } from "../api";
++import { navigate } from "../router";
++
++type Props = {
++  mode: "login" | "register";
++  onSignedIn: (token: string, username: string) => void;
++};
++
++export default function AuthForm({ mode, onSignedIn }: Props) {
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++  const isRegister = mode === "register";
++
++  async function submit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    if (!username.trim() || !password) {
++      setError("Username and password are required.");
++      return;
++    }
++    setBusy(true);
++    try {
++      if (isRegister) await api.register(username.trim(), password);
++      const res = await api.login(username.trim(), password);
++      onSignedIn(res.token, res.username ?? username.trim());
++    } catch (err) {
++      if (err instanceof ApiError) {
++        if (err.status === 409) setError("That username is already taken.");
++        else if (err.status === 401) setError("Invalid username or password.");
++        else setError(err.message);
++      } else setError("Could not reach the server.");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
++      <div className="w-full max-w-sm">
++        <h1 className="mb-6 text-center text-2xl font-semibold text-slate-800">Markdown Notes</h1>
++        <form
++          onSubmit={submit}
++          className="space-y-4 rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
++          aria-label={isRegister ? "Registration form" : "Sign-in form"}
++        >
++          <h2 className="text-lg font-medium text-slate-700">
++            {isRegister ? "Create an account" : "Sign in"}
++          </h2>
++          <label className="block">
++            <span className="mb-1 block text-sm font-medium text-slate-600">Username</span>
++            <input
++              name="username"
++              autoComplete="username"
++              autoFocus
++              value={username}
++              onChange={(e) => setUsername(e.target.value)}
++              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:outline-none"
++            />
++          </label>
++          <label className="block">
++            <span className="mb-1 block text-sm font-medium text-slate-600">Password</span>
++            <input
++              name="password"
++              type="password"
++              autoComplete={isRegister ? "new-password" : "current-password"}
++              value={password}
++              onChange={(e) => setPassword(e.target.value)}
++              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:outline-none"
++            />
++          </label>
++          {error && (
++            <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++              {error}
++            </p>
++          )}
++          <button
++            type="submit"
++            disabled={busy}
++            className="w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
++          >
++            {busy ? "Please wait…" : isRegister ? "Register" : "Sign in"}
++          </button>
++          <p className="text-center text-sm text-slate-500">
++            {isRegister ? "Already have an account? " : "No account yet? "}
++            <a
++              href={isRegister ? "/login" : "/register"}
++              onClick={(e) => {
++                e.preventDefault();
++                setError(null);
++                navigate(isRegister ? "/login" : "/register");
++              }}
++              className="font-medium text-indigo-600 hover:underline"
++            >
++              {isRegister ? "Sign in" : "Register"}
++            </a>
++          </p>
++        </form>
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/NoteEditor.tsx b/frontend/src/components/NoteEditor.tsx
+new file mode 100644
+index 0000000..9496c0b
+--- /dev/null
++++ b/frontend/src/components/NoteEditor.tsx
+@@ -0,0 +1,291 @@
++import { useCallback, useEffect, useRef, useState } from "react";
++import { api, ApiError, formatDate, publicUrl, type Note } from "../api";
++
++type SaveState = "saved" | "dirty" | "saving" | "error";
++
++type Props = {
++  id: number;
++  onChanged: (note: Note) => void;
++  onDeleted: (id: number) => void;
++  onMissing: () => void;
++};
++
++export default function NoteEditor({ id, onChanged, onDeleted, onMissing }: Props) {
++  const [note, setNote] = useState<Note | null>(null);
++  const [title, setTitle] = useState("");
++  const [body, setBody] = useState("");
++  const [html, setHtml] = useState("");
++  const [saveState, setSaveState] = useState<SaveState>("saved");
++  const [error, setError] = useState<string | null>(null);
++  const [copied, setCopied] = useState(false);
++  const [tab, setTab] = useState<"write" | "preview">("write");
++
++  const pending = useRef<{ title?: string; body?: string }>({});
++  const timer = useRef<number | undefined>(undefined);
++  const saving = useRef<Promise<void>>(Promise.resolve());
++  const previewAbort = useRef<AbortController | null>(null);
++  const callbacks = useRef({ onChanged, onDeleted, onMissing });
++  callbacks.current = { onChanged, onDeleted, onMissing };
++
++  const refreshPreview = useCallback(async () => {
++    previewAbort.current?.abort();
++    const ctrl = new AbortController();
++    previewAbort.current = ctrl;
++    try {
++      const h = await api.noteHtml(id, ctrl.signal);
++      if (!ctrl.signal.aborted) setHtml(h);
++    } catch (err) {
++      if ((err as Error).name !== "AbortError") setError("Could not render preview.");
++    }
++  }, [id]);
++
++  const flush = useCallback(async () => {
++    window.clearTimeout(timer.current);
++    timer.current = undefined;
++    const run = async () => {
++      const changes = pending.current;
++      if (Object.keys(changes).length === 0) return;
++      pending.current = {};
++      setSaveState("saving");
++      try {
++        const updated = await api.updateNote(id, changes);
++        setNote(updated);
++        callbacks.current.onChanged(updated);
++        setSaveState(Object.keys(pending.current).length ? "dirty" : "saved");
++        setError(null);
++        if ("body" in changes) await refreshPreview();
++      } catch (err) {
++        pending.current = { ...changes, ...pending.current };
++        setSaveState("error");
++        if (err instanceof ApiError && err.status === 404) callbacks.current.onMissing();
++        else setError(err instanceof ApiError ? err.message : "Could not save changes.");
++      }
++    };
++    saving.current = saving.current.then(run);
++    return saving.current;
++  }, [id, refreshPreview]);
++
++  useEffect(() => {
++    let cancelled = false;
++    setNote(null);
++    setHtml("");
++    setError(null);
++    setSaveState("saved");
++    pending.current = {};
++    api
++      .getNote(id)
++      .then((n) => {
++        if (cancelled) return;
++        setNote(n);
++        setTitle(n.title);
++        setBody(n.body);
++        refreshPreview();
++      })
++      .catch((err) => {
++        if (cancelled) return;
++        if (err instanceof ApiError && err.status === 404) callbacks.current.onMissing();
++        else setError("Could not load note.");
++      });
++    return () => {
++      cancelled = true;
++      previewAbort.current?.abort();
++      if (Object.keys(pending.current).length) void flush();
++    };
++  }, [id, refreshPreview, flush]);
++
++  useEffect(() => {
++    const beforeUnload = (e: BeforeUnloadEvent) => {
++      if (Object.keys(pending.current).length) {
++        void flush();
++        e.preventDefault();
++      }
++    };
++    window.addEventListener("beforeunload", beforeUnload);
++    return () => window.removeEventListener("beforeunload", beforeUnload);
++  }, [flush]);
++
++  function schedule(changes: { title?: string; body?: string }) {
++    pending.current = { ...pending.current, ...changes };
++    setSaveState("dirty");
++    window.clearTimeout(timer.current);
++    timer.current = window.setTimeout(() => void flush(), 500);
++  }
++
++  async function togglePublished() {
++    if (!note) return;
++    await flush();
++    try {
++      const updated = await api.updateNote(id, { published: !note.published });
++      setNote(updated);
++      onChanged(updated);
++      setError(null);
++    } catch (err) {
++      setError(err instanceof ApiError ? err.message : "Could not update note.");
++    }
++  }
++
++  async function remove() {
++    if (!window.confirm("Delete this note? This cannot be undone.")) return;
++    window.clearTimeout(timer.current);
++    pending.current = {};
++    try {
++      await api.deleteNote(id);
++      onDeleted(id);
++    } catch (err) {
++      if (err instanceof ApiError && err.status === 404) onDeleted(id);
++      else setError("Could not delete note.");
++    }
++  }
++
++  async function copyLink() {
++    const url = publicUrl(id);
++    try {
++      await navigator.clipboard.writeText(url);
++    } catch {
++      const input = document.getElementById("public-link") as HTMLInputElement | null;
++      input?.select();
++      document.execCommand?.("copy");
++    }
++    setCopied(true);
++    window.setTimeout(() => setCopied(false), 1500);
++  }
++
++  if (!note) {
++    return (
++      <div className="flex flex-1 items-center justify-center text-slate-500">
++        {error ?? "Loading…"}
++      </div>
++    );
++  }
++
++  const statusText = {
++    saved: `Saved · ${formatDate(note.updated_at)}`,
++    dirty: "Unsaved changes…",
++    saving: "Saving…",
++    error: "Save failed",
++  }[saveState];
++
++  return (
++    <div className="flex min-h-0 flex-1 flex-col">
++      <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-3">
++        <input
++          aria-label="Title"
++          placeholder="Untitled"
++          value={title}
++          onChange={(e) => {
++            setTitle(e.target.value);
++            schedule({ title: e.target.value });
++          }}
++          onBlur={() => void flush()}
++          className="min-w-0 flex-1 rounded-md border border-transparent px-2 py-1 text-xl font-semibold text-slate-800 hover:border-slate-200 focus:border-indigo-400 focus:outline-none"
++        />
++        <span
++          className={`text-xs ${saveState === "error" ? "text-red-600" : "text-slate-400"}`}
++          aria-live="polite"
++        >
++          {statusText}
++        </span>
++        <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700">
++          <button
++            type="button"
++            role="switch"
++            aria-checked={note.published}
++            aria-label="Published"
++            onClick={togglePublished}
++            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
++              note.published ? "bg-emerald-500" : "bg-slate-300"
++            }`}
++          >
++            <span
++              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
++                note.published ? "translate-x-5" : "translate-x-0.5"
++              }`}
++            />
++          </button>
++          Published
++        </label>
++        <button
++          type="button"
++          onClick={remove}
++          className="rounded-md border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50"
++        >
++          Delete
++        </button>
++      </div>
++
++      {note.published && (
++        <div className="flex flex-wrap items-center gap-2 border-b border-emerald-100 bg-emerald-50 px-4 py-2 text-sm">
++          <span className="text-emerald-800">Public link:</span>
++          <input
++            id="public-link"
++            readOnly
++            value={publicUrl(id)}
++            onFocus={(e) => e.target.select()}
++            className="min-w-0 flex-1 rounded border border-emerald-200 bg-white px-2 py-1 font-mono text-xs text-slate-700"
++          />
++          <button
++            type="button"
++            onClick={copyLink}
++            className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
++          >
++            {copied ? "Copied!" : "Copy link"}
++          </button>
++          <a
++            href={publicUrl(id)}
++            target="_blank"
++            rel="noreferrer"
++            className="text-xs font-medium text-emerald-700 hover:underline"
++          >
++            Open
++          </a>
++        </div>
++      )}
++
++      {error && (
++        <p role="alert" className="bg-red-50 px-4 py-2 text-sm text-red-700">
++          {error}
++        </p>
++      )}
++
++      <div className="flex border-b border-slate-200 bg-white md:hidden">
++        {(["write", "preview"] as const).map((t) => (
++          <button
++            key={t}
++            type="button"
++            onClick={() => setTab(t)}
++            className={`flex-1 py-2 text-sm capitalize ${
++              tab === t ? "border-b-2 border-indigo-600 font-medium text-indigo-700" : "text-slate-500"
++            }`}
++          >
++            {t}
++          </button>
++        ))}
++      </div>
++
++      <div className="grid min-h-0 flex-1 md:grid-cols-2">
++        <textarea
++          aria-label="Markdown"
++          placeholder="Write Markdown here…"
++          value={body}
++          onChange={(e) => {
++            setBody(e.target.value);
++            schedule({ body: e.target.value });
++          }}
++          onBlur={() => void flush()}
++          spellCheck
++          className={`${tab === "write" ? "block" : "hidden"} min-h-[50vh] w-full resize-none border-0 bg-white p-4 font-mono text-sm leading-relaxed text-slate-800 focus:outline-none md:block md:min-h-0 md:border-r md:border-slate-200`}
++        />
++        <div
++          className={`${tab === "preview" ? "block" : "hidden"} min-h-0 overflow-y-auto bg-slate-50 p-6 md:block`}
++          aria-label="Preview"
++        >
++          {html.trim() ? (
++            <div className="prose prose-slate max-w-none" dangerouslySetInnerHTML={{ __html: html }} />
++          ) : (
++            <p className="text-sm text-slate-400 italic">Nothing to preview yet.</p>
++          )}
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/NotesApp.tsx b/frontend/src/components/NotesApp.tsx
+new file mode 100644
+index 0000000..afe0b66
+--- /dev/null
++++ b/frontend/src/components/NotesApp.tsx
+@@ -0,0 +1,171 @@
++import { useCallback, useEffect, useState } from "react";
++import { api, formatDate, type Note, type NoteSummary } from "../api";
++import { navigate } from "../router";
++import NoteEditor from "./NoteEditor";
++
++type Props = {
++  username: string;
++  selectedId: number | null;
++  onSignOut: () => void;
++};
++
++export default function NotesApp({ username, selectedId, onSignOut }: Props) {
++  const [notes, setNotes] = useState<NoteSummary[] | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [creating, setCreating] = useState(false);
++
++  const load = useCallback(async () => {
++    try {
++      const { items } = await api.listNotes();
++      setNotes(items);
++      setError(null);
++    } catch {
++      setError("Could not load notes.");
++    }
++  }, []);
++
++  useEffect(() => {
++    void load();
++  }, [load]);
++
++  async function createNote() {
++    setCreating(true);
++    try {
++      const note = await api.createNote({ title: "Untitled", body: "" });
++      setNotes((prev) => [toSummary(note), ...(prev ?? [])]);
++      navigate(`/notes/${note.id}`);
++    } catch {
++      setError("Could not create note.");
++    } finally {
++      setCreating(false);
++    }
++  }
++
++  const onChanged = useCallback((note: Note) => {
++    setNotes((prev) => {
++      const rest = (prev ?? []).filter((n) => n.id !== note.id);
++      return [toSummary(note), ...rest].sort((a, b) =>
++        a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : b.id - a.id,
++      );
++    });
++  }, []);
++
++  const onDeleted = useCallback((id: number) => {
++    setNotes((prev) => (prev ?? []).filter((n) => n.id !== id));
++    navigate("/", true);
++  }, []);
++
++  const onMissing = useCallback(() => {
++    void load();
++    navigate("/", true);
++  }, [load]);
++
++  return (
++    <div className="flex h-screen flex-col bg-slate-50">
++      <header className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-2.5">
++        <a
++          href="/"
++          onClick={(e) => {
++            e.preventDefault();
++            navigate("/");
++          }}
++          className="font-semibold text-slate-800 hover:text-indigo-600"
++        >
++          Markdown Notes
++        </a>
++        <div className="flex items-center gap-3 text-sm">
++          <span className="text-slate-600">
++            Signed in as <strong className="font-medium text-slate-900" data-testid="current-user">{username}</strong>
++          </span>
++          <button
++            type="button"
++            onClick={onSignOut}
++            className="rounded-md border border-slate-300 px-3 py-1.5 text-slate-700 hover:bg-slate-100"
++          >
++            Sign out
++          </button>
++        </div>
++      </header>
++
++      <div className="flex min-h-0 flex-1">
++        <aside
++          className={`${selectedId ? "hidden md:flex" : "flex"} w-full flex-col border-r border-slate-200 bg-white md:w-72`}
++        >
++          <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
++            <h2 className="text-sm font-semibold tracking-wide text-slate-500 uppercase">My notes</h2>
++            <button
++              type="button"
++              onClick={createNote}
++              disabled={creating}
++              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
++            >
++              New note
++            </button>
++          </div>
++          {error && <p className="px-4 py-2 text-sm text-red-600">{error}</p>}
++          <ul className="flex-1 overflow-y-auto" aria-label="Notes">
++            {notes === null && !error && <li className="px-4 py-3 text-sm text-slate-400">Loading…</li>}
++            {notes?.length === 0 && (
++              <li className="px-4 py-6 text-center text-sm text-slate-400">
++                No notes yet. Create your first one!
++              </li>
++            )}
++            {notes?.map((n) => (
++              <li key={n.id}>
++                <a
++                  href={`/notes/${n.id}`}
++                  onClick={(e) => {
++                    e.preventDefault();
++                    navigate(`/notes/${n.id}`);
++                  }}
++                  className={`block border-b border-slate-100 px-4 py-3 hover:bg-slate-50 ${
++                    n.id === selectedId ? "border-l-4 border-l-indigo-500 bg-indigo-50" : ""
++                  }`}
++                >
++                  <div className="flex items-center gap-2">
++                    <span className="flex-1 truncate font-medium text-slate-800">{n.title || "Untitled"}</span>
++                    {n.published && (
++                      <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
++                        Published
++                      </span>
++                    )}
++                  </div>
++                  <div className="mt-0.5 text-xs text-slate-400">{formatDate(n.updated_at)}</div>
++                </a>
++              </li>
++            ))}
++          </ul>
++        </aside>
++
++        <main className={`${selectedId ? "flex" : "hidden md:flex"} min-w-0 flex-1 flex-col`}>
++          {selectedId ? (
++            <>
++              <button
++                type="button"
++                onClick={() => navigate("/")}
++                className="border-b border-slate-200 bg-white px-4 py-2 text-left text-sm text-indigo-600 md:hidden"
++              >
++                ← All notes
++              </button>
++              <NoteEditor
++                key={selectedId}
++                id={selectedId}
++                onChanged={onChanged}
++                onDeleted={onDeleted}
++                onMissing={onMissing}
++              />
++            </>
++          ) : (
++            <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-400">
++              <p>Select a note or create a new one.</p>
++            </div>
++          )}
++        </main>
++      </div>
++    </div>
++  );
++}
++
++function toSummary(n: Note): NoteSummary {
++  return { id: n.id, title: n.title, published: n.published, updated_at: n.updated_at };
++}
+diff --git a/frontend/src/components/PublicNotePage.tsx b/frontend/src/components/PublicNotePage.tsx
+new file mode 100644
+index 0000000..a2dbb2c
+--- /dev/null
++++ b/frontend/src/components/PublicNotePage.tsx
+@@ -0,0 +1,66 @@
++import { useEffect, useState } from "react";
++import { api, ApiError, formatDate, type PublicNote } from "../api";
++
++export default function PublicNotePage({ id }: { id: number }) {
++  const [note, setNote] = useState<PublicNote | null>(null);
++  const [html, setHtml] = useState("");
++  const [error, setError] = useState<string | null>(null);
++
++  useEffect(() => {
++    let cancelled = false;
++    setNote(null);
++    setError(null);
++    Promise.all([api.publicNote(id), api.publicNoteHtml(id)])
++      .then(([n, h]) => {
++        if (cancelled) return;
++        setNote(n);
++        setHtml(h);
++        document.title = `${n.title || "Untitled"} · Markdown Notes`;
++      })
++      .catch((err) => {
++        if (cancelled) return;
++        setError(
++          err instanceof ApiError && err.status === 404
++            ? "This note does not exist or is not published."
++            : "Could not load this note.",
++        );
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [id]);
++
++  return (
++    <div className="min-h-screen bg-slate-50">
++      <header className="border-b border-slate-200 bg-white">
++        <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
++          <a href="/" className="font-semibold text-slate-800 hover:text-indigo-600">
++            Markdown Notes
++          </a>
++        </div>
++      </header>
++      <main className="mx-auto max-w-3xl px-4 py-10">
++        {error ? (
++          <p role="alert" className="rounded-md bg-red-50 px-4 py-3 text-red-700">
++            {error}
++          </p>
++        ) : !note ? (
++          <p className="text-slate-500">Loading…</p>
++        ) : (
++          <article className="rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
++            <h1 className="mb-2 text-3xl font-bold text-slate-900">{note.title || "Untitled"}</h1>
++            <p className="mb-8 text-sm text-slate-500">
++              by <span className="font-medium text-slate-700">{note.author}</span>
++              {" · "}
++              <time dateTime={note.updated_at}>{formatDate(note.updated_at)}</time>
++            </p>
++            <div
++              className="prose prose-slate max-w-none"
++              dangerouslySetInnerHTML={{ __html: html }}
++            />
++          </article>
++        )}
++      </main>
++    </div>
++  );
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..3571db7
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1,2 @@
++@import "tailwindcss";
++@plugin "@tailwindcss/typography";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..c2a145c 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
++import { StrictMode } from "react";
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <StrictMode>
++    <App />
++  </StrictMode>,
++);
+diff --git a/frontend/src/router.ts b/frontend/src/router.ts
+new file mode 100644
+index 0000000..af05c31
+--- /dev/null
++++ b/frontend/src/router.ts
+@@ -0,0 +1,18 @@
++import { useEffect, useState } from "react";
++
++export function navigate(path: string, replace = false) {
++  if (path === window.location.pathname) return;
++  if (replace) window.history.replaceState(null, "", path);
++  else window.history.pushState(null, "", path);
++  window.dispatchEvent(new PopStateEvent("popstate"));
++}
++
++export function usePath() {
++  const [path, setPath] = useState(window.location.pathname);
++  useEffect(() => {
++    const onPop = () => setPath(window.location.pathname);
++    window.addEventListener("popstate", onPop);
++    return () => window.removeEventListener("popstate", onPop);
++  }, []);
++  return path;
++}
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..b0f5411
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,18 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "noFallthroughCasesInSwitch": true,
++    "isolatedModules": true,
++    "skipLibCheck": true,
++    "noEmit": true,
++    "types": ["vite/client"]
++  },
++  "include": ["src", "vite.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

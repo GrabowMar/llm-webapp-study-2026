@@ -1,0 +1,446 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 510,
+  "completed_at": "2026-11-09T19:20:10.485915+00:00",
+  "condition_id": 80,
+  "condition_label": "local-anthropic/claude-opus-5-5",
+  "config_fingerprint": "2745f8848fcf4862ad8f25df62f19d6e783f148f0120e481769a9175d9a0b1a3",
+  "cost_usd": 0.0,
+  "duration": 391.948322,
+  "fingerprints": {
+    "config_fingerprint": "2745f8848fcf4862ad8f25df62f19d6e783f148f0120e481769a9175d9a0b1a3",
+    "prompt_hash": "ce52fc12a7042caa09641b6267712f43dbf819b3cf7f6b0bbe25c8c8bf2f75ec",
+    "run_fingerprint": "725353ecd2dcc3e0facb45559fdde219b64ab0ce684aee04764175386eecdb8b",
+    "task_hash": "8da2cbfcebe21e1efe8c1296d88b3a8fc19c7bbb26f3806793b855095890f870",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "3bc6c2d0-146f-4ed4-80bf-051ee5ea7fa3",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-anthropic/claude-opus-5-5",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-09T19:19:45.963162+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 606,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 60,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 104,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 113,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "books.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "books.create.ok",
+          "ms": 2,
+          "note": "status 400",
+          "observed": {
+            "body": "{\"error\":\"Validation failed.\",\"errors\":{\"isbn\":\"ISBN must have 10 or 13 digits (ISBN-10 may end in X).\"}}\n",
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "books.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "books.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "books.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "books.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "books.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "books.create.invalid.too_long",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.get",
+          "expected": null,
+          "id": "books.get.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.replace",
+          "expected": null,
+          "id": "books.replace.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "books.replace",
+          "expected": null,
+          "id": "books.replace.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "books.replace",
+          "expected": null,
+          "id": "books.replace.invalid.missing",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "books.replace",
+          "expected": null,
+          "id": "books.replace.invalid.too_long",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.delete",
+          "expected": null,
+          "id": "books.delete.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "books.delete",
+          "expected": null,
+          "id": "books.delete.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "reviews.list",
+          "expected": null,
+          "id": "reviews.list.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "reviews.create",
+          "expected": null,
+          "id": "reviews.create.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "reviews.create",
+          "expected": null,
+          "id": "reviews.create.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "reviews.create",
+          "expected": null,
+          "id": "reviews.create.invalid.missing",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "reviews.create",
+          "expected": null,
+          "id": "reviews.create.invalid.too_long",
+          "ms": null,
+          "note": "setup 0: POST /api/books answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "books.average_rating",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 20,
+        "agent_pass_rate": 0.35,
+        "agent_passed": 7,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 4,
+            "passed": 1
+          },
+          "functional": {
+            "n": 10,
+            "passed": 4
+          },
+          "validation": {
+            "n": 6,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.35,
+        "probes_exploited": 0,
+        "probes_skipped": 2,
+        "probes_tested": 0,
+        "regression_pass_rate": null,
+        "sec_pass": null,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.35
+      },
+      "not_measured_reason": null,
+      "probes": [
+        {
+          "cwe": "cwe-89",
+          "endpoint": "books.list",
+          "evidence": "setup 0: POST /api/books answered 400, expected 201",
+          "id": "probe.books.sqli",
+          "kind": "sqli_boolean",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        },
+        {
+          "cwe": "cwe-79",
+          "endpoint": "reviews.create",
+          "evidence": "precondition checks did not pass: reviews.create.ok",
+          "id": "probe.reviews.xss",
+          "kind": "xss_stored",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        }
+      ],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1205,
+  "loc_model": 1205,
+  "model": "claude-opus-5-5",
+  "model_id": "local-anthropic/claude-opus-5-5",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "725353ecd2dcc3e0facb45559fdde219b64ab0ce684aee04764175386eecdb8b",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-09T19:13:38.537593+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "afed1882-2d75-41ad-982c-1d1ddfd043ff",
+  "task": "crud_book_library@1",
+  "tokens_used": 684291,
+  "tree_hash": "16d68bf85944367899097fb8a465dbb858b9dff61cb3dc270498fb874a5c081a",
+  "truncated": false,
+  "unit": "task:crud_book_library@1",
+  "usable": true
+}

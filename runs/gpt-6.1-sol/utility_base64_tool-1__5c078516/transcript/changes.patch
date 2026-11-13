@@ -1,0 +1,4214 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..7dc2909
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,7 @@
++frontend/node_modules/
++frontend/dist/
++**/__pycache__/
++**/.venv/
++data/
++.ruff_cache/
++.pytest_cache/
+diff --git a/Dockerfile b/Dockerfile
+index 214952b..ca03806 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -14,7 +14,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
+ WORKDIR /app
+ COPY backend/requirements.txt backend/requirements.lock* backend/
+ RUN if [ -f backend/requirements.lock ]; then \
+-      pip install --no-cache-dir -r backend/requirements.txt -c backend/requirements.lock; \
++      pip install --no-cache-dir -r backend/requirements.lock; \
+     else \
+       pip install --no-cache-dir -r backend/requirements.txt; \
+     fi
+diff --git a/README.md b/README.md
+index 24967b9..93801ec 100644
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,4 @@
+-# App
++# Base64
+ 
+ ## Run contract
+ 
+@@ -12,4 +12,71 @@
+ - `backend/`: the Flask app (`backend/app.py`, served by gunicorn as `app:app`); dependencies in `backend/requirements.txt`.
+ - `frontend/`: a Vite project (React + TypeScript). `npm run build` writes `frontend/dist`, which the image copies next to the backend.
+ 
+-Dependencies are pinned: `backend/requirements.lock` holds the resolved versions and is installed as a pip constraints file. The frontend uses `frontend/package-lock.json` (`npm ci`). When you change dependencies, update the lock file as well (or remove it).
++Dependencies are pinned: `backend/requirements.lock` holds the resolved versions and hashes and is installed directly with pip. The frontend uses `frontend/package-lock.json` (`npm ci`). When you change dependencies, update the lock file as well.
++
++## Development
++
++Use Python 3.13 and Node 24. From the workspace root:
++
++```sh
++python3 -m venv backend/.venv
++backend/.venv/bin/pip install -r backend/requirements.lock
++backend/.venv/bin/gunicorn --bind 0.0.0.0:8000 --pythonpath backend app:app
++```
++
++In a separate terminal, from `frontend/`:
++
++```sh
++npm ci
++npm run dev
++```
++
++Vite proxies `/api` to port 8000. Run `npm run build` in `frontend/` to build the frontend; Flask then serves that build on port 8000.
++
++## Checks
++
++From `frontend/`:
++
++```sh
++npm run lint
++npm run typecheck
++npm run build
++```
++
++From the workspace root:
++
++```sh
++backend/.venv/bin/python -m unittest discover -s backend -v
++backend/.venv/bin/pip install ruff
++backend/.venv/bin/ruff check backend
++```
++
++## API
++
++All request bodies are JSON objects. Errors return `{"error": "message"}` with an appropriate HTTP status.
++
++| Method | Endpoint | Body / behavior |
++| --- | --- | --- |
++| GET | `/api/health` | Returns `{"status": "ok"}` |
++| POST | `/api/auth/register` | `{"username": "you", "password": "your-password"}`; creates an account (201) |
++| POST | `/api/auth/login` | Same body; returns `{"token": "..."}` |
++| GET | `/api/auth/me` | Returns the authenticated username |
++| POST | `/api/auth/logout` | Invalidates the current token (204) |
++| POST | `/api/base64/encode` | `{"text": "Hello"}`; returns `{"encoded": "SGVsbG8="}`; never saves |
++| POST | `/api/base64/decode` | `{"encoded": "SGVsbG8="}`; returns `{"text": "Hello"}`; never saves |
++| POST | `/api/conversions` | `{"direction": "encode", "input": "Hello"}`; converts, saves, and returns the conversion including full `output` (201) |
++| GET | `/api/conversions?page=1&page_size=10` | Returns `items`, `total`, `page`, and `page_size`; newest first |
++| DELETE | `/api/conversions/{id}` | Deletes an owned conversion (204), otherwise 404 |
++
++Account and history requests require `Authorization: Bearer <token>`. Tokens expire after 30 days, are stored only as SHA-256 hashes on the server, and remain valid across restarts. Passwords use Werkzeug's scrypt hashing. Usernames are unique without regard to case.
++
++Conversions contain `id`, `direction`, `input_preview`, `output_preview`, and UTC `created_at`. Previews are limited to 160 characters; only creation responses include the full output. Pagination defaults to page 1 with 10 items; `page_size` must be between 1 and 100.
++
++Encoding accepts empty text and all valid UTF-8. Decoding requires canonical standard Base64 with padding, no whitespace, and valid UTF-8 decoded bytes. Base64 is not encryption. Request bodies are limited to 2 MiB.
++
++SQLite data is stored in `./data/base64.sqlite3`. Mount `/app/data` as a persistent volume when running the image. Set `DATA_DIR` to override the data directory during local development or tests.
++
++```sh
++docker build -t base64 .
++docker run --rm -p 8000:8000 -v base64-data:/app/data base64
++```
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..5be6eff 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,23 +1,291 @@
+-"""Flask entry point."""
+-
++import base64
++import binascii
++import hashlib
++import os
++import secrets
++import sqlite3
++from datetime import UTC, datetime, timedelta
++from functools import wraps
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, abort, current_app, g, request, send_from_directory
++from werkzeug.exceptions import HTTPException
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+ 
+-app = Flask(__name__, static_folder=None)
+ 
++def database():
++    if "database" not in g:
++        g.database = sqlite3.connect(current_app.config["DATABASE"], timeout=10)
++        g.database.row_factory = sqlite3.Row
++        g.database.execute("PRAGMA foreign_keys = ON")
++    return g.database
++
++
++def json_body():
++    if not request.is_json:
++        abort(400, description="Send a JSON object in the request body.")
++    body = request.get_json(silent=True)
++    if not isinstance(body, dict):
++        abort(400, description="Send a valid JSON object in the request body.")
++    return body
++
++
++def string_field(body, name):
++    value = body.get(name)
++    if not isinstance(value, str):
++        abort(400, description=f"'{name}' must be a string.")
++    return value
++
++
++def credentials(body):
++    username = string_field(body, "username").strip()
++    password = string_field(body, "password")
++    if not username or len(username) > 80:
++        abort(400, description="Username must contain between 1 and 80 characters.")
++    if not password or len(password) > 1024:
++        abort(400, description="Password must contain between 1 and 1024 characters.")
++    try:
++        username.encode("utf-8")
++        password.encode("utf-8")
++    except UnicodeEncodeError:
++        abort(400, description="Username and password must be valid UTF-8 text.")
++    return username, password
++
++
++def convert(direction, value):
++    if direction == "encode":
++        try:
++            return base64.b64encode(value.encode("utf-8")).decode("ascii")
++        except UnicodeEncodeError:
++            abort(400, description="The input must be valid UTF-8 text.")
++    if direction != "decode":
++        abort(400, description="'direction' must be 'encode' or 'decode'.")
++    try:
++        decoded = base64.b64decode(value, validate=True)
++        if base64.b64encode(decoded).decode("ascii") != value:
++            raise ValueError
++    except (binascii.Error, ValueError):
++        abort(400, description="Invalid Base64. Use standard Base64 with correct padding and no whitespace.")
++    try:
++        return decoded.decode("utf-8")
++    except UnicodeDecodeError:
++        abort(400, description="The decoded data is not valid UTF-8 text.")
++
++
++def authenticated(view):
++    @wraps(view)
++    def wrapped(*args, **kwargs):
++        authorization = request.headers.get("Authorization", "").split()
++        if len(authorization) != 2 or authorization[0].lower() != "bearer":
++            abort(401, description="Please sign in to access your history.")
++        digest = hashlib.sha256(authorization[1].encode()).hexdigest()
++        user = database().execute(
++            "SELECT users.id, users.username FROM tokens JOIN users ON users.id = tokens.user_id "
++            "WHERE token_hash = ? AND expires_at > ?",
++            (digest, datetime.now(UTC).isoformat()),
++        ).fetchone()
++        if user is None:
++            abort(401, description="Your session has expired. Please sign in again.")
++        g.user = user
++        g.token_hash = digest
++        return view(*args, **kwargs)
++
++    return wrapped
++
++
++def conversion_object(row, include_output=False):
++    def preview(value):
++        return value if len(value) <= 160 else value[:159] + "…"
++
++    result = {
++        "id": row["id"],
++        "direction": row["direction"],
++        "input_preview": preview(row["input"]),
++        "output_preview": preview(row["output"]),
++        "created_at": row["created_at"],
++    }
++    if include_output:
++        result["output"] = row["output"]
++    return result
++
++
++def create_app(data_dir=None):
++    app = Flask(__name__, static_folder=None)
++    directory = Path(data_dir or os.environ.get("DATA_DIR", "./data"))
++    directory.mkdir(parents=True, exist_ok=True)
++    app.config.update(DATABASE=str(directory / "base64.sqlite3"), MAX_CONTENT_LENGTH=2 * 1024 * 1024)
++    with app.app_context():
++        db = database()
++        db.execute("PRAGMA journal_mode = WAL")
++        db.executescript(
++            """
++            CREATE TABLE IF NOT EXISTS users (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
++                password_hash TEXT NOT NULL
++            );
++            CREATE TABLE IF NOT EXISTS tokens (
++                token_hash TEXT PRIMARY KEY,
++                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++                expires_at TEXT NOT NULL
++            );
++            CREATE TABLE IF NOT EXISTS conversions (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++                direction TEXT NOT NULL CHECK (direction IN ('encode', 'decode')),
++                input TEXT NOT NULL,
++                output TEXT NOT NULL,
++                created_at TEXT NOT NULL
++            );
++            CREATE INDEX IF NOT EXISTS conversions_user_id ON conversions(user_id, id DESC);
++            """
++        )
++        db.close()
++        g.pop("database", None)
++
++    @app.teardown_appcontext
++    def close_database(exception=None):
++        db = g.pop("database", None)
++        if db is not None:
++            db.close()
++
++    @app.errorhandler(HTTPException)
++    def http_error(error):
++        if request.path == "/api" or request.path.startswith("/api/"):
++            return {"error": error.description}, error.code
++        return error
++
++    @app.after_request
++    def security_headers(response):
++        response.headers["X-Content-Type-Options"] = "nosniff"
++        response.headers["X-Frame-Options"] = "DENY"
++        response.headers["Referrer-Policy"] = "same-origin"
++        response.headers["Content-Security-Policy"] = (
++            "default-src 'self'; script-src 'self'; style-src 'self'; "
++            "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'"
++        )
++        if request.path.startswith("/api/"):
++            response.headers["Cache-Control"] = "no-store"
++        return response
++
++    @app.get("/api/health")
++    def health():
++        return {"status": "ok"}
++
++    @app.post("/api/auth/register")
++    def register():
++        username, password = credentials(json_body())
++        db = database()
++        try:
++            cursor = db.execute(
++                "INSERT INTO users (username, password_hash) VALUES (?, ?)",
++                (username, generate_password_hash(password)),
++            )
++            db.commit()
++        except sqlite3.IntegrityError:
++            db.rollback()
++            abort(409, description="That username is already taken. Try another one.")
++        return {"id": cursor.lastrowid, "username": username}, 201
++
++    @app.post("/api/auth/login")
++    def login():
++        username, password = credentials(json_body())
++        db = database()
++        user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
++        if user is None or not check_password_hash(user["password_hash"], password):
++            abort(401, description="Incorrect username or password.")
++        token = secrets.token_urlsafe(32)
++        now = datetime.now(UTC)
++        db.execute("DELETE FROM tokens WHERE expires_at <= ?", (now.isoformat(),))
++        db.execute(
++            "INSERT INTO tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
++            (hashlib.sha256(token.encode()).hexdigest(), user["id"], (now + timedelta(days=30)).isoformat()),
++        )
++        db.commit()
++        return {"token": token}
++
++    @app.get("/api/auth/me")
++    @authenticated
++    def me():
++        return {"username": g.user["username"]}
++
++    @app.post("/api/auth/logout")
++    @authenticated
++    def logout():
++        db = database()
++        db.execute("DELETE FROM tokens WHERE token_hash = ?", (g.token_hash,))
++        db.commit()
++        return "", 204
++
++    @app.post("/api/base64/encode")
++    def encode():
++        return {"encoded": convert("encode", string_field(json_body(), "text"))}
++
++    @app.post("/api/base64/decode")
++    def decode():
++        return {"text": convert("decode", string_field(json_body(), "encoded"))}
++
++    @app.post("/api/conversions")
++    @authenticated
++    def save_conversion():
++        body = json_body()
++        direction = string_field(body, "direction")
++        value = string_field(body, "input")
++        output = convert(direction, value)
++        db = database()
++        cursor = db.execute(
++            "INSERT INTO conversions (user_id, direction, input, output, created_at) VALUES (?, ?, ?, ?, ?)",
++            (g.user["id"], direction, value, output, datetime.now(UTC).isoformat()),
++        )
++        db.commit()
++        row = db.execute("SELECT * FROM conversions WHERE id = ?", (cursor.lastrowid,)).fetchone()
++        return conversion_object(row, include_output=True), 201
++
++    @app.get("/api/conversions")
++    @authenticated
++    def history():
++        def positive_integer(name, default, maximum):
++            raw = request.args.get(name, str(default))
++            if not raw.isascii() or not raw.isdecimal() or len(raw) > 10:
++                abort(400, description=f"'{name}' must be a positive integer up to {maximum}.")
++            value = int(raw)
++            if not 1 <= value <= maximum:
++                abort(400, description=f"'{name}' must be a positive integer up to {maximum}.")
++            return value
++
++        page = positive_integer("page", 1, 1_000_000_000)
++        page_size = positive_integer("page_size", 10, 100)
++        db = database()
++        total = db.execute("SELECT COUNT(*) FROM conversions WHERE user_id = ?", (g.user["id"],)).fetchone()[0]
++        rows = db.execute(
++            "SELECT * FROM conversions WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
++            (g.user["id"], page_size, (page - 1) * page_size),
++        ).fetchall()
++        return {"items": [conversion_object(row) for row in rows], "total": total, "page": page, "page_size": page_size}
++
++    @app.delete("/api/conversions/<int:conversion_id>")
++    @authenticated
++    def delete_conversion(conversion_id):
++        db = database()
++        cursor = db.execute("DELETE FROM conversions WHERE id = ? AND user_id = ?", (conversion_id, g.user["id"]))
++        db.commit()
++        if cursor.rowcount == 0:
++            abort(404, description="Conversion not found.")
++        return "", 204
++
++    @app.get("/")
++    @app.get("/<path:path>")
++    def frontend(path="index.html"):
++        if path == "api" or path.startswith("api/"):
++            abort(404, description="API endpoint not found.")
++        candidate = (DIST / path).resolve()
++        if candidate.is_relative_to(DIST) and candidate.is_file():
++            return send_from_directory(DIST, path)
++        return send_from_directory(DIST, "index.html")
+ 
+-@app.get("/api/health")
+-def health():
+-    return {"status": "ok"}
++    return app
+ 
+ 
+-@app.get("/")
+-@app.get("/<path:path>")
+-def frontend(path: str = "index.html"):
+-    if (DIST / path).is_file():
+-        return send_from_directory(DIST, path)
+-    return send_from_directory(DIST, "index.html")
++app = create_app()
+diff --git a/backend/test_app.py b/backend/test_app.py
+new file mode 100644
+index 0000000..d12cb4f
+--- /dev/null
++++ b/backend/test_app.py
+@@ -0,0 +1,122 @@
++import base64
++import tempfile
++import unittest
++from pathlib import Path
++
++from app import create_app
++
++
++class ApiTest(unittest.TestCase):
++    def setUp(self):
++        self.directory = tempfile.TemporaryDirectory()
++        self.app = create_app(self.directory.name)
++        self.app.config["TESTING"] = True
++        self.client = self.app.test_client()
++
++    def tearDown(self):
++        self.directory.cleanup()
++
++    def account(self, username="alice"):
++        response = self.client.post("/api/auth/register", json={"username": username, "password": "test-password"})
++        self.assertEqual(response.status_code, 201)
++        response = self.client.post("/api/auth/login", json={"username": username, "password": "test-password"})
++        self.assertEqual(response.status_code, 200)
++        return {"Authorization": f"Bearer {response.json['token']}"}
++
++    def save(self, headers, value="Hello, world!", direction="encode"):
++        return self.client.post("/api/conversions", headers=headers, json={"direction": direction, "input": value})
++
++    def test_health_and_unknown_api(self):
++        self.assertEqual(self.client.get("/api/health").json, {"status": "ok"})
++        response = self.client.get("/api/missing")
++        self.assertEqual(response.status_code, 404)
++        self.assertIn("error", response.json)
++
++    def test_utf8_and_empty_roundtrip(self):
++        for text in ["", "Hello, world!", "你好 🌍 café\n\t", "\x00"]:
++            with self.subTest(text=text):
++                encoded = self.client.post("/api/base64/encode", json={"text": text})
++                self.assertEqual(encoded.status_code, 200)
++                self.assertEqual(encoded.json["encoded"], base64.b64encode(text.encode()).decode())
++                decoded = self.client.post("/api/base64/decode", json=encoded.json)
++                self.assertEqual(decoded.status_code, 200)
++                self.assertEqual(decoded.json, {"text": text})
++
++    def test_invalid_base64(self):
++        for encoded in ["not base64!", "a", "Zg", "Zg===", "Zh==", "SGVsbG8=\n", "_-==", "你好", "/w=="]:
++            with self.subTest(encoded=encoded):
++                response = self.client.post("/api/base64/decode", json={"encoded": encoded})
++                self.assertEqual(response.status_code, 400)
++                self.assertIn("error", response.json)
++
++    def test_invalid_bodies(self):
++        for body in [None, [], {}, {"text": 1}, {"text": None}]:
++            response = self.client.post("/api/base64/encode", json=body)
++            self.assertEqual(response.status_code, 400)
++        response = self.client.post("/api/base64/encode", data="{", content_type="application/json")
++        self.assertEqual(response.status_code, 400)
++        response = self.client.post("/api/base64/encode", json={"text": "\ud800"})
++        self.assertEqual(response.status_code, 400)
++
++    def test_accounts_and_logout(self):
++        headers = self.account()
++        self.assertEqual(self.client.get("/api/auth/me", headers=headers).json, {"username": "alice"})
++        duplicate = self.client.post("/api/auth/register", json={"username": "ALICE", "password": "another"})
++        self.assertEqual(duplicate.status_code, 409)
++        incorrect = self.client.post("/api/auth/login", json={"username": "alice", "password": "wrong"})
++        self.assertEqual(incorrect.status_code, 401)
++        self.assertEqual(self.client.post("/api/auth/logout", headers=headers).status_code, 204)
++        self.assertEqual(self.client.get("/api/conversions", headers=headers).status_code, 401)
++
++    def test_authentication_required(self):
++        for headers in [{}, {"Authorization": "Bearer invalid"}, {"Authorization": "Basic invalid"}]:
++            self.assertEqual(self.client.get("/api/conversions", headers=headers).status_code, 401)
++            self.assertEqual(self.save(headers).status_code, 401)
++            self.assertEqual(self.client.delete("/api/conversions/1", headers=headers).status_code, 401)
++
++    def test_private_history_and_delete(self):
++        alice = self.account()
++        bob = self.account("bob")
++        response = self.save(alice)
++        self.assertEqual(response.status_code, 201)
++        saved = response.json
++        self.assertEqual(saved["output"], "SGVsbG8sIHdvcmxkIQ==")
++        self.assertEqual(set(saved), {"id", "direction", "input_preview", "output_preview", "created_at", "output"})
++        self.assertEqual(self.client.get("/api/conversions", headers=bob).json["total"], 0)
++        self.assertEqual(self.client.delete(f"/api/conversions/{saved['id']}", headers=bob).status_code, 404)
++        listing = self.client.get("/api/conversions", headers=alice).json
++        self.assertEqual(listing["total"], 1)
++        self.assertNotIn("output", listing["items"][0])
++        self.assertEqual(self.client.delete(f"/api/conversions/{saved['id']}", headers=alice).status_code, 204)
++        self.assertEqual(self.client.get("/api/conversions", headers=alice).json["total"], 0)
++
++    def test_pagination_previews_and_persistence(self):
++        headers = self.account()
++        ids = [self.save(headers, str(index) * 200).json["id"] for index in range(5)]
++        listing = self.client.get("/api/conversions?page=2&page_size=2", headers=headers).json
++        self.assertEqual(listing["total"], 5)
++        self.assertEqual([item["id"] for item in listing["items"]], [ids[2], ids[1]])
++        self.assertLessEqual(len(listing["items"][0]["input_preview"]), 160)
++        self.assertEqual(listing["page"], 2)
++        self.assertEqual(listing["page_size"], 2)
++        restarted = create_app(Path(self.directory.name)).test_client()
++        self.assertEqual(restarted.get("/api/conversions", headers=headers).json["total"], 5)
++
++    def test_pagination_validation(self):
++        headers = self.account()
++        for query in ["page=0", "page=-1", "page=abc", "page=1.5", "page_size=0", "page_size=101", "page="]:
++            self.assertEqual(self.client.get(f"/api/conversions?{query}", headers=headers).status_code, 400)
++
++    def test_public_conversion_does_not_save(self):
++        headers = self.account()
++        self.client.post("/api/base64/encode", headers=headers, json={"text": "not saved"})
++        self.assertEqual(self.client.get("/api/conversions", headers=headers).json["total"], 0)
++        self.assertEqual(self.save(headers, "", "encode").json["output"], "")
++        self.assertEqual(self.save(headers, "", "decode").json["output"], "")
++        self.assertEqual(self.save(headers, "!", "decode").status_code, 400)
++        self.assertEqual(self.save(headers, "test", "other").status_code, 400)
++        self.assertEqual(self.client.get("/api/conversions", headers=headers).json["total"], 2)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/frontend/eslint.config.js b/frontend/eslint.config.js
+new file mode 100644
+index 0000000..62611a8
+--- /dev/null
++++ b/frontend/eslint.config.js
+@@ -0,0 +1,22 @@
++import js from "@eslint/js";
++import globals from "globals";
++import tseslint from "typescript-eslint";
++import reactHooks from "eslint-plugin-react-hooks";
++
++export default tseslint.config(
++  { ignores: ["dist", "node_modules"] },
++  js.configs.recommended,
++  ...tseslint.configs.recommended,
++  {
++    files: ["**/*.{ts,tsx,js}"],
++    languageOptions: { globals: { ...globals.browser, ...globals.node } },
++  },
++  {
++    files: ["src/**/*.{ts,tsx}"],
++    plugins: { "react-hooks": reactHooks },
++    rules: {
++      "react-hooks/rules-of-hooks": "error",
++      "react-hooks/exhaustive-deps": "warn",
++    },
++  },
++);
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..d261208 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,10 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <meta name="theme-color" content="#f7f8f5" />
++    <meta name="description" content="A little less friction. Encode and decode UTF-8 text with a simple Base64 converter, and keep a private conversion history." />
++    <title>Base64 — Your text, transformed.</title>
++    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..30c3e50 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,314 +10,1501 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@eslint/js": "^10.0.1",
++        "@tailwindcss/vite": "^4.3.5",
++        "@types/node": "^26.6.6",
++        "@types/react": "^19.3.0",
++        "@types/react-dom": "^19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "eslint": "^10.14.0",
++        "eslint-plugin-react-hooks": "^7.1.1",
++        "globals": "^17.14.0",
++        "tailwindcss": "^4.3.5",
++        "typescript": "^6.0.3",
++        "typescript-eslint": "^8.72.2",
+         "vite": "8.3.5"
+       }
+     },
+-    "node_modules/@oxc-project/types": {
+-      "version": "0.156.0",
+-      "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+-      "integrity": "sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==",
++    "node_modules/@babel/code-frame": {
++      "version": "7.29.7",
++      "resolved": "https://registry.npmjs.org/@babel/code-frame/-/code-frame-7.29.7.tgz",
++      "integrity": "sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw==",
+       "dev": true,
+       "license": "MIT",
+-      "funding": {
+-        "url": "https://github.com/sponsors/oxc-project"
++      "dependencies": {
++        "@babel/helper-validator-identifier": "^7.29.7",
++        "js-tokens": "^4.0.0",
++        "picocolors": "^1.1.1"
++      },
++      "engines": {
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-android-arm-eabi": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.16.tgz",
+-      "integrity": "sha512-ia3DwAs0OsMGS7+IConptSiyk9pEXkOx/AbJ2n/lAGxH3QkWQus1t8d7gnAT38FCU2sQu8lUbeR6AiZFv4JxaA==",
+-      "cpu": [
+-        "arm"
+-      ],
++    "node_modules/@babel/compat-data": {
++      "version": "7.29.7",
++      "resolved": "https://registry.npmjs.org/@babel/compat-data/-/compat-data-7.29.7.tgz",
++      "integrity": "sha512-locTkQyKvwIEgBzVrn8693ebc97F2U8ZHjbXwDXJ5Fn2TCpNwTlKcaKLkdHop5c/icOFE7qt7Q9JC5hnKNa6Gg==",
+       "dev": true,
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "android"
+-      ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-android-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.16.tgz",
+-      "integrity": "sha512-kx5wBiMB6E7TEvpl2B9gjLU004BkvEm2Dr941BFjx/SontPwSzNuQUIoVKxHHoSjpFIfHMmcguyLOtyn0hObRg==",
+-      "cpu": [
+-        "arm64"
+-      ],
++    "node_modules/@babel/core": {
++      "version": "7.29.13",
++      "resolved": "https://registry.npmjs.org/@babel/core/-/core-7.29.13.tgz",
++      "integrity": "sha512-j1nvOQCZYSgp7HLmisnCXFTpVvFODiijQ9QHkORfGKWH6YDtskTEeCJS7eV545GZ9UBzrq0e2xsOd5QQ5PjIqw==",
+       "dev": true,
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "android"
+-      ],
++      "dependencies": {
++        "@babel/code-frame": "^7.29.7",
++        "@babel/generator": "^7.29.13",
++        "@babel/helper-compilation-targets": "^7.29.13",
++        "@babel/helper-module-transforms": "^7.29.13",
++        "@babel/helpers": "^7.29.13",
++        "@babel/parser": "^7.29.13",
++        "@babel/template": "^7.29.7",
++        "@babel/traverse": "^7.29.13",
++        "@babel/types": "^7.29.11",
++        "@jridgewell/remapping": "^2.3.5",
++        "convert-source-map": "^2.0.0",
++        "debug": "^4.1.0",
++        "gensync": "^1.0.0-beta.2",
++        "json5": "^2.2.3",
++        "semver": "^6.3.1"
++      },
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/babel"
+       }
+     },
+-    "node_modules/@rolldown/binding-darwin-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.16.tgz",
+-      "integrity": "sha512-qslZrXnKJU4cUpjoAmtAo/KQM9e2IRMlmpig6Zpwj+8KWxW8v+nkAf9216Bsek9lOC1jvg2yCjygCFo2f83msQ==",
+-      "cpu": [
+-        "arm64"
+-      ],
++    "node_modules/@babel/generator": {
++      "version": "7.29.13",
++      "resolved": "https://registry.npmjs.org/@babel/generator/-/generator-7.29.13.tgz",
++      "integrity": "sha512-T5FRo+RzVHvGjWOuF1Ljc44b+NXAOazodHkGUHp4I3zCkQ4/sNVJm56h1S278LMR0bY5xBhztGziSbli8zObIw==",
+       "dev": true,
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "darwin"
+-      ],
++      "dependencies": {
++        "@babel/parser": "^7.29.13",
++        "@babel/types": "^7.29.11",
++        "@jridgewell/gen-mapping": "^0.3.12",
++        "@jridgewell/trace-mapping": "^0.3.28",
++        "jsesc": "^3.0.2"
++      },
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-darwin-x64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.16.tgz",
+-      "integrity": "sha512-FdF+y48ND13eAyM2mQn+85kvAqNlvRWROy2rhgA463X/0Gv4vGtazZtfaF1mRBLscYvtOlh4QnLjOWiFzX69OQ==",
+-      "cpu": [
+-        "x64"
+-      ],
++    "node_modules/@babel/helper-compilation-targets": {
++      "version": "7.29.13",
++      "resolved": "https://registry.npmjs.org/@babel/helper-compilation-targets/-/helper-compilation-targets-7.29.13.tgz",
++      "integrity": "sha512-8WxJ4/Vmes3ghacj8VOJy3NW8eyHiFY/4thU/LSBuBE470+igjR/j1ZTNn8fV5VdNrLx6iXUwig526UdOvfP0w==",
+       "dev": true,
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "darwin"
+-      ],
++      "dependencies": {
++        "@babel/compat-data": "^7.29.7",
++        "@babel/helper-validator-option": "^7.29.7",
++        "browserslist": "^4.24.0",
++        "lru-cache": "^5.1.1",
++        "semver": "^6.3.1"
++      },
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-freebsd-x64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.16.tgz",
+-      "integrity": "sha512-ddjqFM5e95AgLbUPtKIS7V1KTVlA0RUgCVr5mn+/IEhsdy3pr+Vuj/HZ7nlMN2FyxIwUktOH1LEPIQXO1v9y1Q==",
+-      "cpu": [
+-        "x64"
+-      ],
++    "node_modules/@babel/helper-globals": {
++      "version": "7.29.7",
++      "resolved": "https://registry.npmjs.org/@babel/helper-globals/-/helper-globals-7.29.7.tgz",
++      "integrity": "sha512-3nQVUAtvkKH9zahfWgw96Jc/uFOmjACE1kQz82E2lqWmHBgjzbNlsC22nuQTfahmWeQtTq5nQ/4Nnd2A1wj4zA==",
+       "dev": true,
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "freebsd"
+-      ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm-gnueabihf": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.16.tgz",
+-      "integrity": "sha512-tHdKWbFkFBI687iim3LIyIvyL7j66VvQYkDPss5Stn/qyE2tWkR1YD0dXmXPFKKqT/o5ZEJVsaRsWS2meQwGOA==",
+-      "cpu": [
+-        "arm"
+-      ],
++    "node_modules/@babel/helper-module-imports": {
++      "version": "7.29.7",
++      "resolved": "https://registry.npmjs.org/@babel/helper-module-imports/-/helper-module-imports-7.29.7.tgz",
++      "integrity": "sha512-ejHwrQQYcm9xnTivShn2IDOlIzInN34AXskvq9QicvCtEzq1Vzclu/tKF8Jq1Cg8JG2GL6/EmjgsCT7lXepE3g==",
+       "dev": true,
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
++      "dependencies": {
++        "@babel/traverse": "^7.29.7",
++        "@babel/types": "^7.29.7"
++      },
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-FJiLGAblPBMlBEdbOqw6kW6QcXDWAf/oJu7gYs9ZJZwmg+K+/zjFLxPTIY9izJUzxzc24FHvmseyA0IvJSl17w==",
+-      "cpu": [
+-        "arm64"
+-      ],
++    "node_modules/@babel/helper-module-transforms": {
++      "version": "7.29.13",
++      "resolved": "https://registry.npmjs.org/@babel/helper-module-transforms/-/helper-module-transforms-7.29.13.tgz",
++      "integrity": "sha512-/U96wOz+SCoZ7Da/8kjDGltcNY280JPQcRNPK0Hk3PTbdpaiBDQImtC6JsbVwb1HGMr3usZQU2WsWVjhYNmRzw==",
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
++      "dependencies": {
++        "@babel/helper-module-imports": "^7.29.7",
++        "@babel/helper-validator-identifier": "^7.29.7",
++        "@babel/traverse": "^7.29.13"
++      },
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
++      },
++      "peerDependencies": {
++        "@babel/core": "^7.0.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm64-musl": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.16.tgz",
+-      "integrity": "sha512-hrJpblMsrQ58U9veWpbXzkhV5zStunds6HWLprqq1qauvgBr1E6P+24kLj6lSLI9vjRn/RYpjprhkHQPKGWpNg==",
+-      "cpu": [
+-        "arm64"
+-      ],
++    "node_modules/@babel/helper-string-parser": {
++      "version": "7.29.13",
++      "resolved": "https://registry.npmjs.org/@babel/helper-string-parser/-/helper-string-parser-7.29.13.tgz",
++      "integrity": "sha512-fWegr+WsEsiMVW4KUNdIIzzMTZSzNiqhy0//6+2MRi2d5NFNsL/AYwBQW8eBnRbTBVRnDVzjaJEUqKaCWjMMdQ==",
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-ppc64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-qJd/dC6j6CwLG9/s/RP2nb1RZ0GIgj7Ioj7x/SYa3RzjVrlzrmH0fhIOpfvqQDeIsdP0loi+kHaMhJzY1PBIaA==",
+-      "cpu": [
+-        "ppc64"
+-      ],
++    "node_modules/@babel/helper-validator-identifier": {
++      "version": "7.29.7",
++      "resolved": "https://registry.npmjs.org/@babel/helper-validator-identifier/-/helper-validator-identifier-7.29.7.tgz",
++      "integrity": "sha512-qehxGkRj55h/ff8EMaJ+cYhyaKlHIxqYDn682wQD7RNp9UujOQsHog2uS0r2vzr4pW+sXf90NeeayjcNaX3fFg==",
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-s390x-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.16.tgz",
+-      "integrity": "sha512-Vx7Xg5uUJuNcujJjI70OICaH0EYj80BtOLZTSN7uOYg8QOLlyKnaG0IW7Fn/J0IpJsaKzmDKMhOQv1JBM9m9vg==",
+-      "cpu": [
+-        "s390x"
+-      ],
++    "node_modules/@babel/helper-validator-option": {
++      "version": "7.29.7",
++      "resolved": "https://registry.npmjs.org/@babel/helper-validator-option/-/helper-validator-option-7.29.7.tgz",
++      "integrity": "sha512-N9ZErrD+yW5geCDtBqnOoxmR8+tNKiGuxKlDpuJxfsqpa2dFcexaziGAE/qoHLiDDreVNMupxGmSoNlyvsA3gw==",
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-x64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-TNKhgE3uJTsTzatUSSYt0Kgo+Oa2uSlSjz4r1aEIea7HX6ULBym4fAlYUhG1i6pjNf2njfCUAfKwr6C3E9Xg1w==",
+-      "cpu": [
+-        "x64"
+-      ],
++    "node_modules/@babel/helpers": {
++      "version": "7.29.13",
++      "resolved": "https://registry.npmjs.org/@babel/helpers/-/helpers-7.29.13.tgz",
++      "integrity": "sha512-laoRpD/kO/iA4CDlgJbixHekg7oPvWALK0PQyK3Ob2I2njZRvVAD77RfWCIImtqWCq6KijoBoZK7bp/HlTWASQ==",
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
++      "dependencies": {
++        "@babel/template": "^7.29.7",
++        "@babel/types": "^7.29.11"
++      },
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-x64-musl": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.16.tgz",
+-      "integrity": "sha512-7chXdpjXZ8qG0+mIxECN3cT9kvhZ3/oZhMX6Pp876P7CDrIy8nJswva6Mq357JR7eYXfuskwZxMeV1SzoZdHrA==",
+-      "cpu": [
+-        "x64"
+-      ],
++    "node_modules/@babel/parser": {
++      "version": "7.29.13",
++      "resolved": "https://registry.npmjs.org/@babel/parser/-/parser-7.29.13.tgz",
++      "integrity": "sha512-fJM50YYjlTiBhgdkGmC1tBpv+FMAyo4annf2X6Aks+0yRlaiVkYW/3f07xAfVVkYIoZ9fFZp+mEThUFnuybhkQ==",
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
++      "dependencies": {
++        "@babel/types": "^7.29.11"
++      },
++      "bin": {
++        "parser": "bin/babel-parser.js"
++      },
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.0.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-openharmony-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.16.tgz",
+-      "integrity": "sha512-Kwjt+7uNTJK5/MDkGWGVO2KQPnj8yAV75dMpfwyHZrJSXWHrniOB0aUEWlVYf3H1hOqFLIStLdM5QXq6bnKmOQ==",
+-      "cpu": [
+-        "arm64"
+-      ],
++    "node_modules/@babel/template": {
++      "version": "7.29.7",
++      "resolved": "https://registry.npmjs.org/@babel/template/-/template-7.29.7.tgz",
++      "integrity": "sha512-puq+Gf35oI24FeN11LkoUQFqv9uwNeWpxXZi/Ji3rRIoKAzKnxRaZ+Gkj0vKS9ZCiTESfng1N9LyOyXvo+m+Gg==",
+       "dev": true,
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "openharmony"
+-      ],
++      "dependencies": {
++        "@babel/code-frame": "^7.29.7",
++        "@babel/parser": "^7.29.7",
++        "@babel/types": "^7.29.7"
++      },
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-win32-arm64-msvc": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.16.tgz",
+-      "integrity": "sha512-/LH6WfjDRXXJz/p5xl4TmU+jpcnwcxbKEQBW/GZE0JHfN0lGIyTtsUEGaQ/q/GikkGJ2yLKe6pwm7AnEWO8pdw==",
+-      "cpu": [
+-        "arm64"
+-      ],
++    "node_modules/@babel/traverse": {
++      "version": "7.29.13",
++      "resolved": "https://registry.npmjs.org/@babel/traverse/-/traverse-7.29.13.tgz",
++      "integrity": "sha512-0ve0xMlFA73dgY1oyJRY6RoW+/bncdcOQqg6jjYcVfXBK90OdLXjm9R6lmRetdZVrPjXkKIoMVBqYFPjcAlZ4Q==",
+       "dev": true,
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "win32"
+-      ],
++      "dependencies": {
++        "@babel/code-frame": "^7.29.7",
++        "@babel/generator": "^7.29.13",
++        "@babel/helper-globals": "^7.29.7",
++        "@babel/parser": "^7.29.13",
++        "@babel/template": "^7.29.7",
++        "@babel/types": "^7.29.11",
++        "debug": "^4.3.1"
++      },
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-win32-x64-msvc": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.16.tgz",
+-      "integrity": "sha512-1lv1KvX0Z871zfk7vw+dnXMMnHNyDwMzWG8Kv3HxDXMOhzCX4SHc7HK319fInP0i+0p9D8brkfzL7pJOaGl+tw==",
+-      "cpu": [
+-        "x64"
+-      ],
++    "node_modules/@babel/types": {
++      "version": "7.29.11",
++      "resolved": "https://registry.npmjs.org/@babel/types/-/types-7.29.11.tgz",
++      "integrity": "sha512-WCsemW40Cpc6gouC1SrY6PBaZ+oLRlEVY9XBvZBI7il/HyUrb2nJ505wE1MHEFyDZNnrWDEuy4jL50WVHfTTSQ==",
+       "dev": true,
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "win32"
+-      ],
++      "dependencies": {
++        "@babel/helper-string-parser": "^7.29.11",
++        "@babel/helper-validator-identifier": "^7.29.7"
++      },
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=6.9.0"
+       }
+     },
+-    "node_modules/@rolldown/pluginutils": {
+-      "version": "1.0.1",
+-      "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
+-      "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
++    "node_modules/@cacheable/memory": {
++      "version": "2.2.0",
++      "resolved": "https://registry.npmjs.org/@cacheable/memory/-/memory-2.2.0.tgz",
++      "integrity": "sha512-CTLKqLItRCEixEAewD3/j9DB3/o96gpTPD4eJ1v+DGOlxZRZncRQkGYqqnAGCscYd6RNeXfGeiuCphsPtqyIfQ==",
+       "dev": true,
+-      "license": "MIT"
++      "license": "MIT",
++      "dependencies": {
++        "@cacheable/utils": "^2.5.0",
++        "@keyv/bigmap": "^1.3.1",
++        "hookified": "^1.15.1",
++        "keyv": "^5.6.0"
++      }
+     },
+-    "node_modules/@vitejs/plugin-react": {
+-      "version": "6.2.1",
+-      "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+-      "integrity": "sha512-9KyWCij3r0+qLG3Q62vBmv0VyevmYibAtxaCIVK9o0k6CXgaajZRIe8tpfchQcdZArJ5b/7OrIz4W3b2uxVRDA==",
++    "node_modules/@cacheable/utils": {
++      "version": "2.5.0",
++      "resolved": "https://registry.npmjs.org/@cacheable/utils/-/utils-2.5.0.tgz",
++      "integrity": "sha512-buipgOVDkkPXNR5+xBpDw7Zk2n1EvU7qBJCNUcL7rhQ//kfpOXPAvQ511Os0vpLYJ1pZnvudNytkQt2hst3wqA==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+-        "@rolldown/pluginutils": "^1.0.1"
++        "hashery": "^1.5.1",
++        "keyv": "^5.6.0"
++      }
++    },
++    "node_modules/@eslint-community/eslint-utils": {
++      "version": "4.10.1",
++      "resolved": "https://registry.npmjs.org/@eslint-community/eslint-utils/-/eslint-utils-4.10.1.tgz",
++      "integrity": "sha512-cuadcxVFE8sDK6iWJbs8Sn0av2Nrh2QSGQhVlBW9AaAHqHwjWsZHT8LJ4hFGPh7ASBV2deFdM7H/DPjulmh8rg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "eslint-visitor-keys": "^3.4.3"
+       },
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": "^12.22.0 || ^14.17.0 || >=16.0.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/eslint"
+       },
+       "peerDependencies": {
+-        "@rolldown/plugin-babel": "^0.1.7 || ^0.2.0 || ^0.3.0",
++        "eslint": "^6.0.0 || ^7.0.0 || >=8.0.0"
++      }
++    },
++    "node_modules/@eslint-community/eslint-utils/node_modules/eslint-visitor-keys": {
++      "version": "3.4.3",
++      "resolved": "https://registry.npmjs.org/eslint-visitor-keys/-/eslint-visitor-keys-3.4.3.tgz",
++      "integrity": "sha512-wpc+LXeiyiisxPlEkUzU6svyS1frIO3Mgxj1fdy7Pm8Ygzguax2N3Fa/D/ag1WqbOprdI+uY6wMUl8/a2G+iag==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": "^12.22.0 || ^14.17.0 || >=16.0.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/eslint"
++      }
++    },
++    "node_modules/@eslint-community/regexpp": {
++      "version": "4.12.3",
++      "resolved": "https://registry.npmjs.org/@eslint-community/regexpp/-/regexpp-4.12.3.tgz",
++      "integrity": "sha512-R76UKbvsqI68DJJVTVyqFKqU98CN4+B+acxNfEA2IFarSzP0SjtKf/3+fFiXzTyv5Fj3PxLkGHe2wnVWWMxobQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": "^12.0.0 || ^14.0.0 || >=16.0.0"
++      }
++    },
++    "node_modules/@eslint/config-array": {
++      "version": "0.23.5",
++      "resolved": "https://registry.npmjs.org/@eslint/config-array/-/config-array-0.23.5.tgz",
++      "integrity": "sha512-Y3kKLvC1dvTOT+oGlqNQ1XLqK6D1HU2YXPc52NmAlJZbMMWDzGYXMiPRJ8TYD39muD/OTjlZmNJ4ib7dvSrMBA==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@eslint/object-schema": "^3.0.5",
++        "debug": "^4.3.1",
++        "minimatch": "^10.2.4"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=24"
++      }
++    },
++    "node_modules/@eslint/config-helpers": {
++      "version": "0.7.0",
++      "resolved": "https://registry.npmjs.org/@eslint/config-helpers/-/config-helpers-0.7.0.tgz",
++      "integrity": "sha512-DObd/KKUsU+FaFv4PLxSRenpXfQWmPXXP3pPZ6/K1PCrMu2vQpMDMuQe/BqYeoLcz8ro0bVDF1RxOJgfVEdhUw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@eslint/core": "^1.2.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=24"
++      }
++    },
++    "node_modules/@eslint/core": {
++      "version": "1.2.1",
++      "resolved": "https://registry.npmjs.org/@eslint/core/-/core-1.2.1.tgz",
++      "integrity": "sha512-MwcE1P+AZ4C6DWlpin/OmOA54mmIZ/+xZuJiQd4SyB29oAJjN30UW9wkKNptW2ctp4cEsvhlLY/CsQ1uoHDloQ==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@types/json-schema": "^7.0.15"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=24"
++      }
++    },
++    "node_modules/@eslint/js": {
++      "version": "10.0.1",
++      "resolved": "https://registry.npmjs.org/@eslint/js/-/js-10.0.1.tgz",
++      "integrity": "sha512-zeR9k5pd4gxjZ0abRoIaxdc7I3nDktoXZk2qOv9gCNWx3mVwEn32VRhyLaRsDiJjTs0xq/T8mfPtyuXu7GWBcA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=24"
++      },
++      "funding": {
++        "url": "https://eslint.org/donate"
++      },
++      "peerDependencies": {
++        "eslint": "^10.0.0"
++      },
++      "peerDependenciesMeta": {
++        "eslint": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@eslint/object-schema": {
++      "version": "3.0.5",
++      "resolved": "https://registry.npmjs.org/@eslint/object-schema/-/object-schema-3.0.5.tgz",
++      "integrity": "sha512-vqTaUEgxzm+YDSdElad6PiRoX4t8VGDjCtt05zn4nU810UIx/uNEV7/lZJ6KwFThKZOzOxzXy48da+No7HZaMw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=24"
++      }
++    },
++    "node_modules/@eslint/plugin-kit": {
++      "version": "0.7.3",
++      "resolved": "https://registry.npmjs.org/@eslint/plugin-kit/-/plugin-kit-0.7.3.tgz",
++      "integrity": "sha512-IkO+/KEUvwbVpiURZg+P7zF74z5Jxe0UgJxVni+RtoHQ6IZieXaO02kmadomap/q+l6bc/jdPGGqTjhuZnuz1Q==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@eslint/core": "^1.2.1",
++        "levn": "^0.4.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=24"
++      }
++    },
++    "node_modules/@humanfs/core": {
++      "version": "0.19.2",
++      "resolved": "https://registry.npmjs.org/@humanfs/core/-/core-0.19.2.tgz",
++      "integrity": "sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@humanfs/types": "^0.15.0"
++      },
++      "engines": {
++        "node": ">=18.18.0"
++      }
++    },
++    "node_modules/@humanfs/node": {
++      "version": "0.16.8",
++      "resolved": "https://registry.npmjs.org/@humanfs/node/-/node-0.16.8.tgz",
++      "integrity": "sha512-gE1eQNZ3R++kTzFUpdGlpmy8kDZD/MLyHqDwqjkVQI0JMdI1D51sy1H958PNXYkM2rAac7e5/CnIKZrHtPh3BQ==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@humanfs/core": "^0.19.2",
++        "@humanfs/types": "^0.15.0",
++        "@humanwhocodes/retry": "^0.4.0"
++      },
++      "engines": {
++        "node": ">=18.18.0"
++      }
++    },
++    "node_modules/@humanfs/types": {
++      "version": "0.15.0",
++      "resolved": "https://registry.npmjs.org/@humanfs/types/-/types-0.15.0.tgz",
++      "integrity": "sha512-ZZ1w0aoQkwuUuC7Yf+7sdeaNfqQiiLcSRbfI08oAxqLtpXQr9AIVX7Ay7HLDuiLYAaFPu8oBYNq/QIi9URHJ3Q==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=18.18.0"
++      }
++    },
++    "node_modules/@humanwhocodes/module-importer": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/@humanwhocodes/module-importer/-/module-importer-1.0.1.tgz",
++      "integrity": "sha512-bxveV4V8v5Yb4ncFTT3rPSgZBOpCkjfK0y4oVVVJwIuDVBRMDXrPyXRL988i5ap9m9bnyEEjWfm5WkBmtffLfA==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=12.22"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/nzakas"
++      }
++    },
++    "node_modules/@humanwhocodes/retry": {
++      "version": "0.4.3",
++      "resolved": "https://registry.npmjs.org/@humanwhocodes/retry/-/retry-0.4.3.tgz",
++      "integrity": "sha512-bV0Tgo9K4hfPCek+aMAn81RppFKv2ySDQeMoSZuvTASywNTnVJCArCZE2FWqpvIatKu7VMRLWlR1EazvVhDyhQ==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=18.18"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/nzakas"
++      }
++    },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
++    "node_modules/@keyv/bigmap": {
++      "version": "1.3.1",
++      "resolved": "https://registry.npmjs.org/@keyv/bigmap/-/bigmap-1.3.1.tgz",
++      "integrity": "sha512-WbzE9sdmQtKy8vrNPa9BRnwZh5UF4s1KTmSK0KUVLo3eff5BlQNNWDnFOouNpKfPKDnms9xynJjsMYjMaT/aFQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "hashery": "^1.4.0",
++        "hookified": "^1.15.0"
++      },
++      "engines": {
++        "node": ">= 18"
++      },
++      "peerDependencies": {
++        "keyv": "^5.6.0"
++      }
++    },
++    "node_modules/@keyv/serialize": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/@keyv/serialize/-/serialize-1.1.1.tgz",
++      "integrity": "sha512-dXn3FZhPv0US+7dtJsIi2R+c7qWYiReoEh5zUntWCf4oSpMNib8FDhSoed6m3QyZdx5hK7iLFkYk3rNxwt8vTA==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@oxc-project/types": {
++      "version": "0.156.0",
++      "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
++      "integrity": "sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "url": "https://github.com/sponsors/oxc-project"
++      }
++    },
++    "node_modules/@rolldown/binding-android-arm-eabi": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.16.tgz",
++      "integrity": "sha512-ia3DwAs0OsMGS7+IConptSiyk9pEXkOx/AbJ2n/lAGxH3QkWQus1t8d7gnAT38FCU2sQu8lUbeR6AiZFv4JxaA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-android-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.16.tgz",
++      "integrity": "sha512-kx5wBiMB6E7TEvpl2B9gjLU004BkvEm2Dr941BFjx/SontPwSzNuQUIoVKxHHoSjpFIfHMmcguyLOtyn0hObRg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-darwin-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.16.tgz",
++      "integrity": "sha512-qslZrXnKJU4cUpjoAmtAo/KQM9e2IRMlmpig6Zpwj+8KWxW8v+nkAf9216Bsek9lOC1jvg2yCjygCFo2f83msQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-darwin-x64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.16.tgz",
++      "integrity": "sha512-FdF+y48ND13eAyM2mQn+85kvAqNlvRWROy2rhgA463X/0Gv4vGtazZtfaF1mRBLscYvtOlh4QnLjOWiFzX69OQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-freebsd-x64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.16.tgz",
++      "integrity": "sha512-ddjqFM5e95AgLbUPtKIS7V1KTVlA0RUgCVr5mn+/IEhsdy3pr+Vuj/HZ7nlMN2FyxIwUktOH1LEPIQXO1v9y1Q==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm-gnueabihf": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.16.tgz",
++      "integrity": "sha512-tHdKWbFkFBI687iim3LIyIvyL7j66VvQYkDPss5Stn/qyE2tWkR1YD0dXmXPFKKqT/o5ZEJVsaRsWS2meQwGOA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.16.tgz",
++      "integrity": "sha512-FJiLGAblPBMlBEdbOqw6kW6QcXDWAf/oJu7gYs9ZJZwmg+K+/zjFLxPTIY9izJUzxzc24FHvmseyA0IvJSl17w==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm64-musl": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.16.tgz",
++      "integrity": "sha512-hrJpblMsrQ58U9veWpbXzkhV5zStunds6HWLprqq1qauvgBr1E6P+24kLj6lSLI9vjRn/RYpjprhkHQPKGWpNg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-ppc64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.16.tgz",
++      "integrity": "sha512-qJd/dC6j6CwLG9/s/RP2nb1RZ0GIgj7Ioj7x/SYa3RzjVrlzrmH0fhIOpfvqQDeIsdP0loi+kHaMhJzY1PBIaA==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-s390x-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.16.tgz",
++      "integrity": "sha512-Vx7Xg5uUJuNcujJjI70OICaH0EYj80BtOLZTSN7uOYg8QOLlyKnaG0IW7Fn/J0IpJsaKzmDKMhOQv1JBM9m9vg==",
++      "cpu": [
++        "s390x"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-x64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.16.tgz",
++      "integrity": "sha512-TNKhgE3uJTsTzatUSSYt0Kgo+Oa2uSlSjz4r1aEIea7HX6ULBym4fAlYUhG1i6pjNf2njfCUAfKwr6C3E9Xg1w==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-x64-musl": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.16.tgz",
++      "integrity": "sha512-7chXdpjXZ8qG0+mIxECN3cT9kvhZ3/oZhMX6Pp876P7CDrIy8nJswva6Mq357JR7eYXfuskwZxMeV1SzoZdHrA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-openharmony-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.16.tgz",
++      "integrity": "sha512-Kwjt+7uNTJK5/MDkGWGVO2KQPnj8yAV75dMpfwyHZrJSXWHrniOB0aUEWlVYf3H1hOqFLIStLdM5QXq6bnKmOQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "openharmony"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-win32-arm64-msvc": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.16.tgz",
++      "integrity": "sha512-/LH6WfjDRXXJz/p5xl4TmU+jpcnwcxbKEQBW/GZE0JHfN0lGIyTtsUEGaQ/q/GikkGJ2yLKe6pwm7AnEWO8pdw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-win32-x64-msvc": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.16.tgz",
++      "integrity": "sha512-1lv1KvX0Z871zfk7vw+dnXMMnHNyDwMzWG8Kv3HxDXMOhzCX4SHc7HK319fInP0i+0p9D8brkfzL7pJOaGl+tw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/pluginutils": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
++      "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/esrecurse": {
++      "version": "4.3.1",
++      "resolved": "https://registry.npmjs.org/@types/esrecurse/-/esrecurse-4.3.1.tgz",
++      "integrity": "sha512-xJBAbDifo5hpffDBuHl0Y8ywswbiAp/Wi7Y/GtAgSlZyIABppyurxVueOPE8LUQOxdlgi6Zqce7uoEpqNTeiUw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/estree": {
++      "version": "1.0.10",
++      "resolved": "https://registry.npmjs.org/@types/estree/-/estree-1.0.10.tgz",
++      "integrity": "sha512-lTyOMnOcmRBzdCv6/4zUZCrEhV0xrqQiUZBZtVcbmLHBXKLnN8q89v/wKRF/Q0HbwVsqbIG3o5HDoFl9sduM+g==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/json-schema": {
++      "version": "7.0.15",
++      "resolved": "https://registry.npmjs.org/@types/json-schema/-/json-schema-7.0.15.tgz",
++      "integrity": "sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/node": {
++      "version": "26.6.6",
++      "resolved": "https://registry.npmjs.org/@types/node/-/node-26.6.6.tgz",
++      "integrity": "sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "undici-types": "~8.9.0"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
++    "node_modules/@typescript-eslint/eslint-plugin": {
++      "version": "8.72.2",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/eslint-plugin/-/eslint-plugin-8.72.2.tgz",
++      "integrity": "sha512-222PKFXKihmFpi/pS5njoBgdAqsPhj2/GBmFbrNw8Tq8gEG9Sv+kSlKFy4u2q+mJv9ZzJgM2Gkv/bUzRZwZw5g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@eslint-community/regexpp": "^4.12.2",
++        "@typescript-eslint/scope-manager": "8.72.2",
++        "@typescript-eslint/type-utils": "8.72.2",
++        "@typescript-eslint/utils": "8.72.2",
++        "@typescript-eslint/visitor-keys": "8.72.2",
++        "ignore": "^7.0.5",
++        "natural-compare": "^1.4.0",
++        "ts-api-utils": "^2.5.0"
++      },
++      "engines": {
++        "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/typescript-eslint"
++      },
++      "peerDependencies": {
++        "@typescript-eslint/parser": "^8.72.2",
++        "eslint": "^8.57.0 || ^9.0.0 || ^10.0.0",
++        "typescript": ">=4.8.4 <6.1.0"
++      }
++    },
++    "node_modules/@typescript-eslint/eslint-plugin/node_modules/ignore": {
++      "version": "7.0.14",
++      "resolved": "https://registry.npmjs.org/ignore/-/ignore-7.0.14.tgz",
++      "integrity": "sha512-wCBiZ77u1tuWde6G/nfOtLaCTYcFDU5yCzARzK10y+rLhzYoL7a7yEemcopcc2Mzow7gZOIjnV2ym1NYmdiJOQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 4"
++      }
++    },
++    "node_modules/@typescript-eslint/parser": {
++      "version": "8.72.2",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/parser/-/parser-8.72.2.tgz",
++      "integrity": "sha512-llP+T1YuJOLlxEciP6OyQGtz5SMxyn+9LA2BvZw5RmToGVa1y4beEDVQL6Gje7T5WFYh19WREjDCN9Ev4gm5AA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@typescript-eslint/scope-manager": "8.72.2",
++        "@typescript-eslint/types": "8.72.2",
++        "@typescript-eslint/typescript-estree": "8.72.2",
++        "@typescript-eslint/visitor-keys": "8.72.2",
++        "debug": "^4.4.3"
++      },
++      "engines": {
++        "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/typescript-eslint"
++      },
++      "peerDependencies": {
++        "eslint": "^8.57.0 || ^9.0.0 || ^10.0.0",
++        "typescript": ">=4.8.4 <6.1.0"
++      }
++    },
++    "node_modules/@typescript-eslint/project-service": {
++      "version": "8.72.2",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/project-service/-/project-service-8.72.2.tgz",
++      "integrity": "sha512-6y5dLTZdHhI8Eh3yIQ/bfQhRKwn5e+TpJj64o18Cngc0iW/BCrVvrr6zGYqXPnYH31u6YXAYiFh0+qxX5mybJw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@typescript-eslint/tsconfig-utils": "^8.72.2",
++        "@typescript-eslint/types": "^8.72.2",
++        "debug": "^4.4.3"
++      },
++      "engines": {
++        "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/typescript-eslint"
++      },
++      "peerDependencies": {
++        "typescript": ">=4.8.4 <6.1.0"
++      }
++    },
++    "node_modules/@typescript-eslint/scope-manager": {
++      "version": "8.72.2",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/scope-manager/-/scope-manager-8.72.2.tgz",
++      "integrity": "sha512-iIoMJ6/8c1/QpFNyFjU0d1YzPco4MsZjQw0k3V+vfzNWAFmUmvhlyMoYEoYYDQZXc+J6Gi1X5XcxlzW2taIIGQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@typescript-eslint/types": "8.72.2",
++        "@typescript-eslint/visitor-keys": "8.72.2"
++      },
++      "engines": {
++        "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/typescript-eslint"
++      }
++    },
++    "node_modules/@typescript-eslint/tsconfig-utils": {
++      "version": "8.72.2",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/tsconfig-utils/-/tsconfig-utils-8.72.2.tgz",
++      "integrity": "sha512-+h3iCgZXuTNtoLXcnnjP12ZUHLMqoUcIHPfQrFEXTUqvb9dF8QK9b5nv5VtSo5fLkdHuks8ehbTzZj3rImAm9w==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/typescript-eslint"
++      },
++      "peerDependencies": {
++        "typescript": ">=4.8.4 <6.1.0"
++      }
++    },
++    "node_modules/@typescript-eslint/type-utils": {
++      "version": "8.72.2",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/type-utils/-/type-utils-8.72.2.tgz",
++      "integrity": "sha512-STfkR38qIdhfkLpgtXnUjAzsNy4xouqiBO0lrVc/Wpk9Kem5/aHXUx1J8dGC16zpdYN1+yc2ILQ28er1kXX7ag==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@typescript-eslint/types": "8.72.2",
++        "@typescript-eslint/typescript-estree": "8.72.2",
++        "@typescript-eslint/utils": "8.72.2",
++        "debug": "^4.4.3",
++        "ts-api-utils": "^2.5.0"
++      },
++      "engines": {
++        "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/typescript-eslint"
++      },
++      "peerDependencies": {
++        "eslint": "^8.57.0 || ^9.0.0 || ^10.0.0",
++        "typescript": ">=4.8.4 <6.1.0"
++      }
++    },
++    "node_modules/@typescript-eslint/types": {
++      "version": "8.72.2",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/types/-/types-8.72.2.tgz",
++      "integrity": "sha512-Xfn37OLZx03+PCU7qWx9DTv2FCRh1E6fk2+wONeNY15HXIwtcwuveaSwVpGAUptkNmPQegRxW5JyRel9T7wrog==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/typescript-eslint"
++      }
++    },
++    "node_modules/@typescript-eslint/typescript-estree": {
++      "version": "8.72.2",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/typescript-estree/-/typescript-estree-8.72.2.tgz",
++      "integrity": "sha512-pQEGqIK/cqEvKivVWaFLYpe7XYejFxfuAOi4mu1oAWFvIo36aRHI9esRFTUxcIy/z8N482RJyH+LpZB0ZIU7Ow==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@typescript-eslint/project-service": "8.72.2",
++        "@typescript-eslint/tsconfig-utils": "8.72.2",
++        "@typescript-eslint/types": "8.72.2",
++        "@typescript-eslint/visitor-keys": "8.72.2",
++        "debug": "^4.4.3",
++        "minimatch": "^10.2.2",
++        "semver": "^7.7.3",
++        "tinyglobby": "^0.2.15",
++        "ts-api-utils": "^2.5.0"
++      },
++      "engines": {
++        "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/typescript-eslint"
++      },
++      "peerDependencies": {
++        "typescript": ">=4.8.4 <6.1.0"
++      }
++    },
++    "node_modules/@typescript-eslint/typescript-estree/node_modules/semver": {
++      "version": "7.8.6",
++      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.6.tgz",
++      "integrity": "sha512-9lpSSU4Mly3mrtruwLs1eLK6+gzbzqeBFwRNjIjE+9LuDpWdYctrQlQ3ej1Ilgi7gknpsTRnPoLP8DpCHqHIJw==",
++      "dev": true,
++      "license": "ISC",
++      "bin": {
++        "semver": "bin/semver.js"
++      },
++      "engines": {
++        "node": ">=10"
++      }
++    },
++    "node_modules/@typescript-eslint/utils": {
++      "version": "8.72.2",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/utils/-/utils-8.72.2.tgz",
++      "integrity": "sha512-hv3eRYbpPbbpezuax1EfGrzpa3C4ySgNZkPUkLOWOAjU8HsOKowEDAr8C7nsNl1C+SBSKDpvno6VKHnlhvp9iA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@eslint-community/eslint-utils": "^4.9.1",
++        "@typescript-eslint/scope-manager": "8.72.2",
++        "@typescript-eslint/types": "8.72.2",
++        "@typescript-eslint/typescript-estree": "8.72.2"
++      },
++      "engines": {
++        "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/typescript-eslint"
++      },
++      "peerDependencies": {
++        "eslint": "^8.57.0 || ^9.0.0 || ^10.0.0",
++        "typescript": ">=4.8.4 <6.1.0"
++      }
++    },
++    "node_modules/@typescript-eslint/visitor-keys": {
++      "version": "8.72.2",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/visitor-keys/-/visitor-keys-8.72.2.tgz",
++      "integrity": "sha512-NAGrjn0Pitjqzq/GkgMC4kBYm233PQ8GffyQ9+kTA3AlNQYEzOf25EIM02BAHZv5FRJSpHpJk+OGUxVkOB93GQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@typescript-eslint/types": "8.72.2",
++        "eslint-visitor-keys": "^5.0.0"
++      },
++      "engines": {
++        "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/typescript-eslint"
++      }
++    },
++    "node_modules/@vitejs/plugin-react": {
++      "version": "6.2.1",
++      "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
++      "integrity": "sha512-9KyWCij3r0+qLG3Q62vBmv0VyevmYibAtxaCIVK9o0k6CXgaajZRIe8tpfchQcdZArJ5b/7OrIz4W3b2uxVRDA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@rolldown/pluginutils": "^1.0.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      },
++      "peerDependencies": {
++        "@rolldown/plugin-babel": "^0.1.7 || ^0.2.0 || ^0.3.0",
+         "babel-plugin-react-compiler": "^1.0.0",
+         "oxc-transform-react": ">=0.152.0 <0.157.0",
+         "vite": "^8.0.0"
+@@ -334,47 +1521,743 @@
+         }
+       }
+     },
++    "node_modules/acorn": {
++      "version": "8.19.0",
++      "resolved": "https://registry.npmjs.org/acorn/-/acorn-8.19.0.tgz",
++      "integrity": "sha512-oJlA3XiRm7Cyk6qFD2Jn8ak9B7jSy0qy00ADO3+8dpT0LSjFihQYv4C02LFCSYJV3Q37xYwwRy5m+IpIiUzqWw==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "acorn": "bin/acorn"
++      },
++      "engines": {
++        "node": ">=0.4.0"
++      }
++    },
++    "node_modules/acorn-jsx": {
++      "version": "5.3.2",
++      "resolved": "https://registry.npmjs.org/acorn-jsx/-/acorn-jsx-5.3.2.tgz",
++      "integrity": "sha512-rq9s+JNhf0IChjtDXxllJ7g41oZk5SlXtp0LHwyA5cejwn7vKmKp4pPri6YEePv2PU65sAsegbXtIinmDFDXgQ==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "acorn": "^6.0.0 || ^7.0.0 || ^8.0.0"
++      }
++    },
++    "node_modules/ajv": {
++      "version": "6.15.0",
++      "resolved": "https://registry.npmjs.org/ajv/-/ajv-6.15.0.tgz",
++      "integrity": "sha512-fgFx7Hfoq60ytK2c7DhnF8jIvzYgOMxfugjLOSMHjLIPgenqa7S7oaagATUq99mV6IYvN2tRmC0wnTYX6iPbMw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "fast-deep-equal": "^3.1.1",
++        "fast-json-stable-stringify": "^2.0.0",
++        "json-schema-traverse": "^0.4.1",
++        "uri-js": "^4.2.2"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/epoberezkin"
++      }
++    },
++    "node_modules/balanced-match": {
++      "version": "4.0.4",
++      "resolved": "https://registry.npmjs.org/balanced-match/-/balanced-match-4.0.4.tgz",
++      "integrity": "sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": "18 || 20 || >=22"
++      }
++    },
++    "node_modules/baseline-browser-mapping": {
++      "version": "2.11.35",
++      "resolved": "https://registry.npmjs.org/baseline-browser-mapping/-/baseline-browser-mapping-2.11.35.tgz",
++      "integrity": "sha512-GNk8KX52CHqeNKGk8+7tZnQab/2k1t/BgrUHPKNdijzpEhF1saPQZHVKb6m5loSAxB39gyrTYw34Qf9CQ3u1qQ==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "baseline-browser-mapping": "dist/cli.cjs"
++      },
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/brace-expansion": {
++      "version": "5.0.12",
++      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.12.tgz",
++      "integrity": "sha512-YovQ3rzhaLMIrDjNDMkNS01tea93qhEhG5xy8f6+R0l+dw3Ki+5sCoIoI942iuLZTHWogWktgwVDhU09iNEimQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "balanced-match": "^4.0.2"
++      },
++      "engines": {
++        "node": "20 || >=22"
++      }
++    },
++    "node_modules/browserslist": {
++      "version": "4.29.5",
++      "resolved": "https://registry.npmjs.org/browserslist/-/browserslist-4.29.5.tgz",
++      "integrity": "sha512-khTmKu5NGYTotqcYo8Bew2k4RAE9PuXRSFRXG2lQBrCEQHyeQ/vX6gKMxfokwywBsLiXZMnHsmWMG1pnO8J7uQ==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/browserslist"
++        },
++        {
++          "type": "tidelift",
++          "url": "https://tidelift.com/funding/github/npm/browserslist"
++        },
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/ai"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "baseline-browser-mapping": "^2.11.33",
++        "caniuse-lite": "^1.0.30001819",
++        "electron-to-chromium": "^1.5.464",
++        "node-releases": "^2.0.60",
++        "update-browserslist-db": "^1.3.4"
++      },
++      "bin": {
++        "browserslist": "cli.js"
++      },
++      "engines": {
++        "node": "^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7"
++      }
++    },
++    "node_modules/cacheable": {
++      "version": "2.5.0",
++      "resolved": "https://registry.npmjs.org/cacheable/-/cacheable-2.5.0.tgz",
++      "integrity": "sha512-60cyAOytib/OzBw1JNSoSV/boK1AtHryDIjvVBk7XbN4ugfkM3+Sry7fEjNgPMGgOjuaZPAp8ruZ0Cxafwyq9g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@cacheable/memory": "^2.2.0",
++        "@cacheable/utils": "^2.5.0",
++        "hookified": "^1.15.0",
++        "keyv": "^5.6.0",
++        "qified": "^0.10.1"
++      }
++    },
++    "node_modules/caniuse-lite": {
++      "version": "1.0.30001823",
++      "resolved": "https://registry.npmjs.org/caniuse-lite/-/caniuse-lite-1.0.30001823.tgz",
++      "integrity": "sha512-TQ5s/djDjNk1axreUW+4rULH+BmdCMLiJkhaXnO5wqivG7tITkSUj4ItIdzqdZHKaXcHAV8dhH3JxOM7/7bwqw==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/browserslist"
++        },
++        {
++          "type": "tidelift",
++          "url": "https://tidelift.com/funding/github/npm/caniuse-lite"
++        },
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/ai"
++        }
++      ],
++      "license": "CC-BY-4.0"
++    },
++    "node_modules/convert-source-map": {
++      "version": "2.0.0",
++      "resolved": "https://registry.npmjs.org/convert-source-map/-/convert-source-map-2.0.0.tgz",
++      "integrity": "sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/cross-spawn": {
++      "version": "7.0.6",
++      "resolved": "https://registry.npmjs.org/cross-spawn/-/cross-spawn-7.0.6.tgz",
++      "integrity": "sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "path-key": "^3.1.0",
++        "shebang-command": "^2.0.0",
++        "which": "^2.0.1"
++      },
++      "engines": {
++        "node": ">= 8"
++      }
++    },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/debug": {
++      "version": "4.4.3",
++      "resolved": "https://registry.npmjs.org/debug/-/debug-4.4.3.tgz",
++      "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "ms": "^2.1.3"
++      },
++      "engines": {
++        "node": ">=6.0"
++      },
++      "peerDependenciesMeta": {
++        "supports-color": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/deep-is": {
++      "version": "0.1.4",
++      "resolved": "https://registry.npmjs.org/deep-is/-/deep-is-0.1.4.tgz",
++      "integrity": "sha512-oIPzksmTg4/MriiaYGO+okXDT7ztn/w3Eptv/+gSIdMdKsJo0u4CfYNFJPy+4SKMuCqGw2wxnA+URMg3t8a/bQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+       "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
+       "dev": true,
+-      "license": "Apache-2.0",
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/electron-to-chromium": {
++      "version": "1.5.479",
++      "resolved": "https://registry.npmjs.org/electron-to-chromium/-/electron-to-chromium-1.5.479.tgz",
++      "integrity": "sha512-uAJdJQ7vHa4TvPfzt1TOqoRgHmav5gwmqHMPLxBH6m8Cbj5R9/z/rygTOQiZ8pe5g0ZAEogga1bP6HoKcOzx/Q==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
++    "node_modules/escalade": {
++      "version": "3.2.0",
++      "resolved": "https://registry.npmjs.org/escalade/-/escalade-3.2.0.tgz",
++      "integrity": "sha512-WUj2qlxaQtO4g6Pq5c29GTcWGDyd8itL8zTlipgECz3JesAiiOKotd8JU6otB3PACgG6xkJUyVhboMS+bje/jA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      }
++    },
++    "node_modules/escape-string-regexp": {
++      "version": "4.0.0",
++      "resolved": "https://registry.npmjs.org/escape-string-regexp/-/escape-string-regexp-4.0.0.tgz",
++      "integrity": "sha512-TtpcNJ3XAzx3Gq8sWRzJaVajRs0uVxA2YAkdb1jm2YkPz4G6egUFAyA3n5vtEIZefPk5Wa4UXbKuS5fKkJWdgA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=10"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
++    "node_modules/eslint": {
++      "version": "10.14.0",
++      "resolved": "https://registry.npmjs.org/eslint/-/eslint-10.14.0.tgz",
++      "integrity": "sha512-T0pNsxkb9IKmtQjhpK3d7nWOpFv+YHuMbTJnSVMoQblF0onvXfErrtp4V1jHtsQPan7dKaGVD0q1WCXnzMF31A==",
++      "dev": true,
++      "license": "MIT",
++      "workspaces": [
++        "packages/*"
++      ],
++      "dependencies": {
++        "@eslint-community/eslint-utils": "^4.8.0",
++        "@eslint-community/regexpp": "^4.12.2",
++        "@eslint/config-array": "^0.23.5",
++        "@eslint/config-helpers": "^0.7.0",
++        "@eslint/core": "^1.2.1",
++        "@eslint/plugin-kit": "^0.7.3",
++        "@humanfs/node": "^0.16.8",
++        "@humanwhocodes/module-importer": "^1.0.1",
++        "@humanwhocodes/retry": "^0.4.2",
++        "@types/estree": "^1.0.6",
++        "ajv": "^6.14.0",
++        "cross-spawn": "^7.0.6",
++        "debug": "^4.3.2",
++        "escape-string-regexp": "^4.0.0",
++        "eslint-scope": "^9.1.2",
++        "eslint-visitor-keys": "^5.0.1",
++        "espree": "^11.2.0",
++        "esquery": "^1.7.0",
++        "esutils": "^2.0.2",
++        "fast-deep-equal": "^3.1.3",
++        "file-entry-cache": "11.1.5 || >11.1.6 <12",
++        "find-up": "^5.0.0",
++        "glob-parent": "^6.0.2",
++        "ignore": "^5.2.0",
++        "imurmurhash": "^0.1.4",
++        "is-glob": "^4.0.0",
++        "json-stable-stringify-without-jsonify": "^1.0.1",
++        "minimatch": "^10.2.6",
++        "natural-compare": "^1.4.0",
++        "optionator": "^0.9.3"
++      },
++      "bin": {
++        "eslint": "bin/eslint.js"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=24"
++      },
++      "funding": {
++        "url": "https://eslint.org/donate"
++      },
++      "peerDependencies": {
++        "jiti": "*"
++      },
++      "peerDependenciesMeta": {
++        "jiti": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/eslint-plugin-react-hooks": {
++      "version": "7.1.1",
++      "resolved": "https://registry.npmjs.org/eslint-plugin-react-hooks/-/eslint-plugin-react-hooks-7.1.1.tgz",
++      "integrity": "sha512-f2I7Gw6JbvCexzIInuSbZpfdQ44D7iqdWX01FKLvrPgqxoE7oMj8clOfto8U6vYiz4yd5oKu39rRSVOe1zRu0g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@babel/core": "^7.24.4",
++        "@babel/parser": "^7.24.4",
++        "hermes-parser": "^0.25.1",
++        "zod": "^3.25.0 || ^4.0.0",
++        "zod-validation-error": "^3.5.0 || ^4.0.0"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "eslint": "^3.0.0 || ^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0 || ^8.0.0-0 || ^9.0.0 || ^10.0.0"
++      }
++    },
++    "node_modules/eslint-scope": {
++      "version": "9.1.2",
++      "resolved": "https://registry.npmjs.org/eslint-scope/-/eslint-scope-9.1.2.tgz",
++      "integrity": "sha512-xS90H51cKw0jltxmvmHy2Iai1LIqrfbw57b79w/J7MfvDfkIkFZ+kj6zC3BjtUwh150HsSSdxXZcsuv72miDFQ==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "dependencies": {
++        "@types/esrecurse": "^4.3.1",
++        "@types/estree": "^1.0.8",
++        "esrecurse": "^4.3.0",
++        "estraverse": "^5.2.0"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=24"
++      },
++      "funding": {
++        "url": "https://opencollective.com/eslint"
++      }
++    },
++    "node_modules/eslint-visitor-keys": {
++      "version": "5.0.1",
++      "resolved": "https://registry.npmjs.org/eslint-visitor-keys/-/eslint-visitor-keys-5.0.1.tgz",
++      "integrity": "sha512-tD40eHxA35h0PEIZNeIjkHoDR4YjjJp34biM0mDvplBe//mB+IHCqHDGV7pxF+7MklTvighcCPPZC7ynWyjdTA==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=24"
++      },
++      "funding": {
++        "url": "https://opencollective.com/eslint"
++      }
++    },
++    "node_modules/espree": {
++      "version": "11.2.0",
++      "resolved": "https://registry.npmjs.org/espree/-/espree-11.2.0.tgz",
++      "integrity": "sha512-7p3DrVEIopW1B1avAGLuCSh1jubc01H2JHc8B4qqGblmg5gI9yumBgACjWo4JlIc04ufug4xJ3SQI8HkS/Rgzw==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "dependencies": {
++        "acorn": "^8.16.0",
++        "acorn-jsx": "^5.3.2",
++        "eslint-visitor-keys": "^5.0.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=24"
++      },
++      "funding": {
++        "url": "https://opencollective.com/eslint"
++      }
++    },
++    "node_modules/esquery": {
++      "version": "1.7.0",
++      "resolved": "https://registry.npmjs.org/esquery/-/esquery-1.7.0.tgz",
++      "integrity": "sha512-Ap6G0WQwcU/LHsvLwON1fAQX9Zp0A2Y6Y/cJBl9r/JbW90Zyg4/zbG6zzKa2OTALELarYHmKu0GhpM5EO+7T0g==",
++      "dev": true,
++      "license": "BSD-3-Clause",
++      "dependencies": {
++        "estraverse": "^5.1.0"
++      },
++      "engines": {
++        "node": ">=0.10"
++      }
++    },
++    "node_modules/esrecurse": {
++      "version": "4.3.0",
++      "resolved": "https://registry.npmjs.org/esrecurse/-/esrecurse-4.3.0.tgz",
++      "integrity": "sha512-KmfKL3b6G+RXvP8N1vr3Tq1kL/oCFgn2NYXEtqP8/L3pKapUA4G8cFVaoF3SU323CD4XypR/ffioHmkti6/Tag==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "dependencies": {
++        "estraverse": "^5.2.0"
++      },
++      "engines": {
++        "node": ">=4.0"
++      }
++    },
++    "node_modules/estraverse": {
++      "version": "5.3.0",
++      "resolved": "https://registry.npmjs.org/estraverse/-/estraverse-5.3.0.tgz",
++      "integrity": "sha512-MMdARuVEQziNTeJD8DgMqmhwR11BRQ/cBP+pLtYdSTnf3MIO8fFeiINEbX36ZdNlfU/7A9f3gUw49B3oQsvwBA==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=4.0"
++      }
++    },
++    "node_modules/esutils": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/esutils/-/esutils-2.0.3.tgz",
++      "integrity": "sha512-kVscqXk4OCp68SZ0dkgEKVi6/8ij300KBWTJq32P/dYeWTSwK41WyTxalN1eRmA5Z9UU/LX9D7FWSmV9SAYx6g==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/fast-deep-equal": {
++      "version": "3.1.3",
++      "resolved": "https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz",
++      "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/fast-json-stable-stringify": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/fast-json-stable-stringify/-/fast-json-stable-stringify-2.1.0.tgz",
++      "integrity": "sha512-lhd/wF+Lk98HZoTCtlVraHtfh5XYijIjalXck7saUtuanSDyLMxnHhSXEDJqHxD7msR8D0uCmqlkwjCV8xvwHw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/fast-levenshtein": {
++      "version": "2.0.6",
++      "resolved": "https://registry.npmjs.org/fast-levenshtein/-/fast-levenshtein-2.0.6.tgz",
++      "integrity": "sha512-DCXu6Ifhqcks7TZKY3Hxp3y6qphY5SJZmrWMDrKcERSOXWQdMhU9Ig/PYrzyw/ul9jOIyh0N4M0tbC5hodg8dw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/fdir": {
++      "version": "6.5.0",
++      "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
++      "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=12.0.0"
++      },
++      "peerDependencies": {
++        "picomatch": "^3 || ^4"
++      },
++      "peerDependenciesMeta": {
++        "picomatch": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/file-entry-cache": {
++      "version": "11.1.5",
++      "resolved": "https://registry.npmjs.org/file-entry-cache/-/file-entry-cache-11.1.5.tgz",
++      "integrity": "sha512-+PFTHITI08JIGhnNpGNI8T8inUpgZfk3GNEqfT9R2zZV2iFXg3CvqzSl/uEhs7TSGujYRELEANyDvS8Fj7+S7Q==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "flat-cache": "^6.1.23"
++      }
++    },
++    "node_modules/find-up": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/find-up/-/find-up-5.0.0.tgz",
++      "integrity": "sha512-78/PXT1wlLLDgTzDs7sjq9hzz0vXD+zn+7wypEe4fXQxCmdmqfGsEPQxmiCSQI3ajFV91bVSsvNtrJRiW6nGng==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "locate-path": "^6.0.0",
++        "path-exists": "^4.0.0"
++      },
++      "engines": {
++        "node": ">=10"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
++    "node_modules/flat-cache": {
++      "version": "6.1.23",
++      "resolved": "https://registry.npmjs.org/flat-cache/-/flat-cache-6.1.23.tgz",
++      "integrity": "sha512-f++BY9pTk+983xK1FLzlLpmM0i0z+jHmx3QESGkURMXujQZz1k5wzwX6hjnQ8goaD0B+sYnDK1yZ6MTyZfUaqA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "cacheable": "^2.5.0",
++        "flatted": "^3.4.2",
++        "hookified": "^1.15.0"
++      }
++    },
++    "node_modules/flatted": {
++      "version": "3.4.4",
++      "resolved": "https://registry.npmjs.org/flatted/-/flatted-3.4.4.tgz",
++      "integrity": "sha512-5+ybhBZANEJxaH3X5evAFatUxLfEHSr7n6kYJ+1Qd0mUqr4eu9gIf6GDbWHf8RJijHrjjO8G+la14SlL2SeS1Q==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/fsevents": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
++      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
++      "dev": true,
++      "hasInstallScript": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
++      }
++    },
++    "node_modules/gensync": {
++      "version": "1.0.0-beta.2",
++      "resolved": "https://registry.npmjs.org/gensync/-/gensync-1.0.0-beta.2.tgz",
++      "integrity": "sha512-3hN7NaskYvMDLQY55gnW3NQ+mesEAepTqlg+VEbj7zzqEMBVNhzcGYYeqFo/TlYz6eQiFcp1HcsCZO+nGgS8zg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.9.0"
++      }
++    },
++    "node_modules/glob-parent": {
++      "version": "6.0.2",
++      "resolved": "https://registry.npmjs.org/glob-parent/-/glob-parent-6.0.2.tgz",
++      "integrity": "sha512-XxwI8EOhVQgWp6iDL+3b0r86f4d6AX6zSU55HfB4ydCEuXLXc5FcYeOu+nnGftS4TEju/11rt4KJPTMgbfmv4A==",
++      "dev": true,
++      "license": "ISC",
++      "dependencies": {
++        "is-glob": "^4.0.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
++    "node_modules/globals": {
++      "version": "17.14.0",
++      "resolved": "https://registry.npmjs.org/globals/-/globals-17.14.0.tgz",
++      "integrity": "sha512-UtdkTVyAJePQv0J2M9Xe4L0ruNSDV314XiIJsADI2Zf40bcdAonE/D/OhAU8AT99oij9mhLByb+NvA3QWZYgCg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/hashery": {
++      "version": "1.5.1",
++      "resolved": "https://registry.npmjs.org/hashery/-/hashery-1.5.1.tgz",
++      "integrity": "sha512-iZyKG96/JwPz1N55vj2Ie2vXbhu440zfUfJvSwEqEbeLluk7NnapfGqa7LH0mOsnDxTF85Mx8/dyR6HfqcbmbQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "hookified": "^1.15.0"
++      },
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/hermes-estree": {
++      "version": "0.25.1",
++      "resolved": "https://registry.npmjs.org/hermes-estree/-/hermes-estree-0.25.1.tgz",
++      "integrity": "sha512-0wUoCcLp+5Ev5pDW2OriHC2MJCbwLwuRx+gAqMTOkGKJJiBCLjtrvy4PWUGn6MIVefecRpzoOZ/UV6iGdOr+Cw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/hermes-parser": {
++      "version": "0.25.1",
++      "resolved": "https://registry.npmjs.org/hermes-parser/-/hermes-parser-0.25.1.tgz",
++      "integrity": "sha512-6pEjquH3rqaI6cYAXYPcz9MS4rY6R4ngRgrgfDshRptUZIc3lw0MCIJIGDj9++mfySOuPTHB4nrSW99BCvOPIA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "hermes-estree": "0.25.1"
++      }
++    },
++    "node_modules/hookified": {
++      "version": "1.15.1",
++      "resolved": "https://registry.npmjs.org/hookified/-/hookified-1.15.1.tgz",
++      "integrity": "sha512-MvG/clsADq1GPM2KGo2nyfaWVyn9naPiXrqIe4jYjXNZQt238kWyOGrsyc/DmRAQ+Re6yeo6yX/yoNCG5KAEVg==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/ignore": {
++      "version": "5.3.2",
++      "resolved": "https://registry.npmjs.org/ignore/-/ignore-5.3.2.tgz",
++      "integrity": "sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 4"
++      }
++    },
++    "node_modules/imurmurhash": {
++      "version": "0.1.4",
++      "resolved": "https://registry.npmjs.org/imurmurhash/-/imurmurhash-0.1.4.tgz",
++      "integrity": "sha512-JmXMZ6wuvDmLiHEml9ykzqO6lwFbof0GG4IkcGaENdCRDDmMVnny7s5HsIgHCbaq0w2MyPhDqkhTUgS2LU2PHA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.8.19"
++      }
++    },
++    "node_modules/is-extglob": {
++      "version": "2.1.1",
++      "resolved": "https://registry.npmjs.org/is-extglob/-/is-extglob-2.1.1.tgz",
++      "integrity": "sha512-SbKbANkN603Vi4jEZv49LeVJMn4yGwsbzZworEoyEiutsN3nJYdbO36zfhGJ6QEDpOZIFkDtnq5JRxmvl3jsoQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/is-glob": {
++      "version": "4.0.3",
++      "resolved": "https://registry.npmjs.org/is-glob/-/is-glob-4.0.3.tgz",
++      "integrity": "sha512-xelSayHH36ZgE7ZWhli7pW34hNbNl8Ojv5KVmkJD4hBdD3th8Tfk9vYasLM+mXWOZhFkgZfxhLSnrwRr4elSSg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "is-extglob": "^2.1.1"
++      },
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/isexe": {
++      "version": "2.0.0",
++      "resolved": "https://registry.npmjs.org/isexe/-/isexe-2.0.0.tgz",
++      "integrity": "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
++    "node_modules/js-tokens": {
++      "version": "4.0.0",
++      "resolved": "https://registry.npmjs.org/js-tokens/-/js-tokens-4.0.0.tgz",
++      "integrity": "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/jsesc": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/jsesc/-/jsesc-3.1.0.tgz",
++      "integrity": "sha512-/sM3dO2FOzXjKQhJuo0Q173wf2KOo8t4I8vHy6lF9poUp7bKT0/NHE8fPX23PwfhnykfqnC2xRxOnVw5XuGIaA==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jsesc": "bin/jsesc"
++      },
++      "engines": {
++        "node": ">=6"
++      }
++    },
++    "node_modules/json-schema-traverse": {
++      "version": "0.4.1",
++      "resolved": "https://registry.npmjs.org/json-schema-traverse/-/json-schema-traverse-0.4.1.tgz",
++      "integrity": "sha512-xbbCH5dCYU5T8LcEhhuh7HJ88HXuW3qsI3Y0zOZFKfZEHcpWiHU/Jxzk629Brsab/mMiHQti9wMP+845RPe3Vg==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/json-stable-stringify-without-jsonify": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/json-stable-stringify-without-jsonify/-/json-stable-stringify-without-jsonify-1.0.1.tgz",
++      "integrity": "sha512-Bdboy+l7tA3OGW6FjyFHWkP5LuByj1Tk33Ljyq0axyzdk9//JSi2u3fP1QSmd1KNwq6VOKYGlAu87CisVir6Pw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/json5": {
++      "version": "2.2.3",
++      "resolved": "https://registry.npmjs.org/json5/-/json5-2.2.3.tgz",
++      "integrity": "sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "json5": "lib/cli.js"
++      },
+       "engines": {
+-        "node": ">=8"
++        "node": ">=6"
+       }
+     },
+-    "node_modules/fdir": {
+-      "version": "6.5.0",
+-      "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+-      "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
++    "node_modules/keyv": {
++      "version": "5.6.0",
++      "resolved": "https://registry.npmjs.org/keyv/-/keyv-5.6.0.tgz",
++      "integrity": "sha512-CYDD3SOtsHtyXeEORYRx2qBtpDJFjRTGXUtmNEMGyzYOKj1TE3tycdlho7kA1Ufx9OYWZzg52QFBGALTirzDSw==",
+       "dev": true,
+       "license": "MIT",
+-      "engines": {
+-        "node": ">=12.0.0"
+-      },
+-      "peerDependencies": {
+-        "picomatch": "^3 || ^4"
+-      },
+-      "peerDependenciesMeta": {
+-        "picomatch": {
+-          "optional": true
+-        }
++      "dependencies": {
++        "@keyv/serialize": "^1.1.1"
+       }
+     },
+-    "node_modules/fsevents": {
+-      "version": "2.3.3",
+-      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+-      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
++    "node_modules/levn": {
++      "version": "0.4.1",
++      "resolved": "https://registry.npmjs.org/levn/-/levn-0.4.1.tgz",
++      "integrity": "sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ==",
+       "dev": true,
+-      "hasInstallScript": true,
+       "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "darwin"
+-      ],
++      "dependencies": {
++        "prelude-ls": "^1.2.1",
++        "type-check": "~0.4.0"
++      },
+       "engines": {
+-        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
++        "node": ">= 0.8.0"
+       }
+     },
+     "node_modules/lightningcss": {
+@@ -650,6 +2533,65 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/locate-path": {
++      "version": "6.0.0",
++      "resolved": "https://registry.npmjs.org/locate-path/-/locate-path-6.0.0.tgz",
++      "integrity": "sha512-iPZK6eYjbxRu3uB4/WZ3EsEIMJFMqAoopl3R+zuq0UjcAm/MO6KCweDgPfP3elTztoKP3KtnVHxTn2NHBSDVUw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "p-locate": "^5.0.0"
++      },
++      "engines": {
++        "node": ">=10"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
++    "node_modules/lru-cache": {
++      "version": "5.1.1",
++      "resolved": "https://registry.npmjs.org/lru-cache/-/lru-cache-5.1.1.tgz",
++      "integrity": "sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==",
++      "dev": true,
++      "license": "ISC",
++      "dependencies": {
++        "yallist": "^3.0.2"
++      }
++    },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
++    "node_modules/minimatch": {
++      "version": "10.2.6",
++      "resolved": "https://registry.npmjs.org/minimatch/-/minimatch-10.2.6.tgz",
++      "integrity": "sha512-vpLQEs+VLCr1nU0BXS07maYoFwlDAH0gngQuuttxIwutDFEMHq2blX+8vpgxDdK3J1PwjCJiep77OitTZ4Ll1A==",
++      "dev": true,
++      "license": "BlueOak-1.0.0",
++      "dependencies": {
++        "brace-expansion": "^5.0.8"
++      },
++      "engines": {
++        "node": "18 || 20 || >=22"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/isaacs"
++      }
++    },
++    "node_modules/ms": {
++      "version": "2.1.3",
++      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
++      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -669,6 +2611,93 @@
+         "node": "^10 || ^12 || ^13.7 || ^14 || >=15.0.1"
+       }
+     },
++    "node_modules/natural-compare": {
++      "version": "1.4.0",
++      "resolved": "https://registry.npmjs.org/natural-compare/-/natural-compare-1.4.0.tgz",
++      "integrity": "sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/node-releases": {
++      "version": "2.0.63",
++      "resolved": "https://registry.npmjs.org/node-releases/-/node-releases-2.0.63.tgz",
++      "integrity": "sha512-6li2QanLsAXpIH2R6j77MzRyvOyrvdTqlKtO4CgBdHGNvN99ZZfyxszHc5o5+IZBWD5u6Hzwg83JoGXmqZNG9Q==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/optionator": {
++      "version": "0.9.4",
++      "resolved": "https://registry.npmjs.org/optionator/-/optionator-0.9.4.tgz",
++      "integrity": "sha512-6IpQ7mKUxRcZNLIObR0hz7lxsapSSIYNZJwXPGeF0mTVqGKFIXj1DQcMoT22S3ROcLyY/rz0PWaWZ9ayWmad9g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "deep-is": "^0.1.3",
++        "fast-levenshtein": "^2.0.6",
++        "levn": "^0.4.1",
++        "prelude-ls": "^1.2.1",
++        "type-check": "^0.4.0",
++        "word-wrap": "^1.2.5"
++      },
++      "engines": {
++        "node": ">= 0.8.0"
++      }
++    },
++    "node_modules/p-limit": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/p-limit/-/p-limit-3.1.0.tgz",
++      "integrity": "sha512-TYOanM3wGwNGsZN2cVTYPArw454xnXj5qmWF1bEoAc4+cU/ol7GVh7odevjp1FNHduHc3KZMcFduxU5Xc6uJRQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "yocto-queue": "^0.1.0"
++      },
++      "engines": {
++        "node": ">=10"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
++    "node_modules/p-locate": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/p-locate/-/p-locate-5.0.0.tgz",
++      "integrity": "sha512-LaNjtRWUBY++zB5nE/NwcaoMylSPk+S+ZHNB1TzdbMJMny6dynpAGt7X/tl/QYq3TIeE6nxHppbo2LGymrG5Pw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "p-limit": "^3.0.2"
++      },
++      "engines": {
++        "node": ">=10"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
++    "node_modules/path-exists": {
++      "version": "4.0.0",
++      "resolved": "https://registry.npmjs.org/path-exists/-/path-exists-4.0.0.tgz",
++      "integrity": "sha512-ak9Qy5Q7jYb2Wwcey5Fpvg2KoAc/ZIhLSLOSBmRmygPsGwkVVt0fZa0qrtMz+m6tJTAHfZQ8FnmB4MG4LWy7/w==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/path-key": {
++      "version": "3.1.1",
++      "resolved": "https://registry.npmjs.org/path-key/-/path-key-3.1.1.tgz",
++      "integrity": "sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/picocolors": {
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
+@@ -718,6 +2747,46 @@
+         "node": "^10 || ^12 || >=14"
+       }
+     },
++    "node_modules/prelude-ls": {
++      "version": "1.2.1",
++      "resolved": "https://registry.npmjs.org/prelude-ls/-/prelude-ls-1.2.1.tgz",
++      "integrity": "sha512-vkcDPrRZo1QZLbn5RLGPpg/WmIQ65qoWWhcGKf/b5eplkkarX0m9z8ppCat4mlOqUsWpyNuYgO3VRyrYHSzX5g==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.8.0"
++      }
++    },
++    "node_modules/punycode": {
++      "version": "2.3.1",
++      "resolved": "https://registry.npmjs.org/punycode/-/punycode-2.3.1.tgz",
++      "integrity": "sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      }
++    },
++    "node_modules/qified": {
++      "version": "0.10.1",
++      "resolved": "https://registry.npmjs.org/qified/-/qified-0.10.1.tgz",
++      "integrity": "sha512-+Owyggi9IxT1ePKGafcI87ubSmxol6smwJ+RAHDQlx9+9cPwFWDiKFFCPuWhr9ignlGpZ9vDQLw67N4dcTVFEA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "hookified": "^2.1.1"
++      },
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/qified/node_modules/hookified": {
++      "version": "2.2.0",
++      "resolved": "https://registry.npmjs.org/hookified/-/hookified-2.2.0.tgz",
++      "integrity": "sha512-p/LgFzRN5FeoD3DLS6bkUapeye6E4SI6yJs6KetENd18S+FBthqYq2amJUWpt5z0EQwwHemidjY5OqJGEKm5uA==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/react": {
+       "version": "19.3.1",
+       "resolved": "https://registry.npmjs.org/react/-/react-19.3.1.tgz",
+@@ -779,6 +2848,39 @@
+       "integrity": "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==",
+       "license": "MIT"
+     },
++    "node_modules/semver": {
++      "version": "6.3.2",
++      "resolved": "https://registry.npmjs.org/semver/-/semver-6.3.2.tgz",
++      "integrity": "sha512-GYrCADwpu6yV5OAvchkQ27Z5wwMxWAEMg5NNWjyHh/5DboFFqbdbvYNIvZouQpxXyeMPoTOh0vdPYKlf0ZswdQ==",
++      "dev": true,
++      "license": "ISC",
++      "bin": {
++        "semver": "bin/semver.js"
++      }
++    },
++    "node_modules/shebang-command": {
++      "version": "2.0.0",
++      "resolved": "https://registry.npmjs.org/shebang-command/-/shebang-command-2.0.0.tgz",
++      "integrity": "sha512-kHxr2zZpYtdmrN1qDjrrX/Z1rR1kG8Dx+gkpK1G4eXmvXswmcE1hTWBWYUzlraYw1/yZp6YuDY77YtvbN0dmDA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "shebang-regex": "^3.0.0"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/shebang-regex": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/shebang-regex/-/shebang-regex-3.0.0.tgz",
++      "integrity": "sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/source-map-js": {
+       "version": "1.2.2",
+       "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz",
+@@ -789,6 +2891,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +2929,118 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/ts-api-utils": {
++      "version": "2.5.0",
++      "resolved": "https://registry.npmjs.org/ts-api-utils/-/ts-api-utils-2.5.0.tgz",
++      "integrity": "sha512-OJ/ibxhPlqrMM0UiNHJ/0CKQkoKF243/AEmplt3qpRgkW8VG7IfOS41h7V8TjITqdByHzrjcS/2si+y4lIh8NA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18.12"
++      },
++      "peerDependencies": {
++        "typescript": ">=4.8.4"
++      }
++    },
++    "node_modules/type-check": {
++      "version": "0.4.0",
++      "resolved": "https://registry.npmjs.org/type-check/-/type-check-0.4.0.tgz",
++      "integrity": "sha512-XleUoc9uwGXqjWwXaUTZAmzMcFZ5858QA2vvx1Ur5xIcixXIP+8LnFDgRplU30us6teqdlskFfu+ae4K79Ooew==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "prelude-ls": "^1.2.1"
++      },
++      "engines": {
++        "node": ">= 0.8.0"
++      }
++    },
++    "node_modules/typescript": {
++      "version": "6.0.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
++      "integrity": "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
++    "node_modules/typescript-eslint": {
++      "version": "8.72.2",
++      "resolved": "https://registry.npmjs.org/typescript-eslint/-/typescript-eslint-8.72.2.tgz",
++      "integrity": "sha512-c/+AKMW1KB81r28Sp0AAdcyXj5dzNmAsZFcsrxKbZTKmcBK2xIwBR31dcSYSDu3bKmzXe8GKrSxO+eDQ401Uzg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@typescript-eslint/eslint-plugin": "8.72.2",
++        "@typescript-eslint/parser": "8.72.2",
++        "@typescript-eslint/typescript-estree": "8.72.2",
++        "@typescript-eslint/utils": "8.72.2"
++      },
++      "engines": {
++        "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/typescript-eslint"
++      },
++      "peerDependencies": {
++        "eslint": "^8.57.0 || ^9.0.0 || ^10.0.0",
++        "typescript": ">=4.8.4 <6.1.0"
++      }
++    },
++    "node_modules/undici-types": {
++      "version": "8.9.0",
++      "resolved": "https://registry.npmjs.org/undici-types/-/undici-types-8.9.0.tgz",
++      "integrity": "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/update-browserslist-db": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/update-browserslist-db/-/update-browserslist-db-1.3.4.tgz",
++      "integrity": "sha512-t8wonIOdQyOjtPd2VktlBu6QjTVTks6v8bSi7kd0r2Vll8TK1JYDZtRRdbmCHOAMphkZgrzK+L+vXK4pyZ8t4A==",
++      "dev": true,
++      "funding": [
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/browserslist"
++        },
++        {
++          "type": "tidelift",
++          "url": "https://tidelift.com/funding/github/npm/browserslist"
++        },
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/ai"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "escalade": "^3.2.0",
++        "picocolors": "^1.1.1"
++      },
++      "bin": {
++        "update-browserslist-db": "cli.js"
++      },
++      "peerDependencies": {
++        "browserslist": ">= 4.21.0"
++      }
++    },
++    "node_modules/uri-js": {
++      "version": "4.4.1",
++      "resolved": "https://registry.npmjs.org/uri-js/-/uri-js-4.4.1.tgz",
++      "integrity": "sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==",
++      "dev": true,
++      "license": "BSD-2-Clause",
++      "dependencies": {
++        "punycode": "^2.1.0"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+@@ -883,6 +3118,75 @@
+           "optional": true
+         }
+       }
++    },
++    "node_modules/which": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/which/-/which-2.0.2.tgz",
++      "integrity": "sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==",
++      "dev": true,
++      "license": "ISC",
++      "dependencies": {
++        "isexe": "^2.0.0"
++      },
++      "bin": {
++        "node-which": "bin/node-which"
++      },
++      "engines": {
++        "node": ">= 8"
++      }
++    },
++    "node_modules/word-wrap": {
++      "version": "1.2.5",
++      "resolved": "https://registry.npmjs.org/word-wrap/-/word-wrap-1.2.5.tgz",
++      "integrity": "sha512-BN22B5eaMMI9UMtjrGd5g5eCYPpCPDUy0FJXbYsaT5zYxjFOckS53SQDE3pWkVoWpHXVb3BrYcEN4Twa55B5cA==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/yallist": {
++      "version": "3.1.1",
++      "resolved": "https://registry.npmjs.org/yallist/-/yallist-3.1.1.tgz",
++      "integrity": "sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/yocto-queue": {
++      "version": "0.1.0",
++      "resolved": "https://registry.npmjs.org/yocto-queue/-/yocto-queue-0.1.0.tgz",
++      "integrity": "sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=10"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
++    "node_modules/zod": {
++      "version": "4.6.7",
++      "resolved": "https://registry.npmjs.org/zod/-/zod-4.6.7.tgz",
++      "integrity": "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "url": "https://github.com/sponsors/colinhacks"
++      }
++    },
++    "node_modules/zod-validation-error": {
++      "version": "4.0.2",
++      "resolved": "https://registry.npmjs.org/zod-validation-error/-/zod-validation-error-4.0.2.tgz",
++      "integrity": "sha512-Q6/nZLe6jxuU80qb/4uJ4t5v2VEZ44lzQjPDhYJNztRQ4wyWc6VF3D3Kb/fAuPetZQnhS3hnajCf9CsWesghLQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18.0.0"
++      },
++      "peerDependencies": {
++        "zod": "^3.25.0 || ^4.0.0"
++      }
+     }
+   }
+ }
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..e5dce34 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,27 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "tsc --noEmit && vite build",
++    "typecheck": "tsc --noEmit",
++    "lint": "eslint ."
+   },
+   "dependencies": {
+     "react": "19.3.1",
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@eslint/js": "^10.0.1",
++    "@tailwindcss/vite": "^4.3.5",
++    "@types/node": "^26.6.6",
++    "@types/react": "^19.3.0",
++    "@types/react-dom": "^19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "eslint": "^10.14.0",
++    "eslint-plugin-react-hooks": "^7.1.1",
++    "globals": "^17.14.0",
++    "tailwindcss": "^4.3.5",
++    "typescript": "^6.0.3",
++    "typescript-eslint": "^8.72.2",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/public/favicon.svg b/frontend/public/favicon.svg
+new file mode 100644
+index 0000000..e3704f5
+--- /dev/null
++++ b/frontend/public/favicon.svg
+@@ -0,0 +1 @@
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect width="40" height="40" rx="11" fill="#2e6247"/><path d="m15 12-7 8 7 8m10-16 7 8-7 8m-3-19-4 22" fill="none" stroke="#eaf2e6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+diff --git a/frontend/src/ApiModal.tsx b/frontend/src/ApiModal.tsx
+new file mode 100644
+index 0000000..f7e2fc7
+--- /dev/null
++++ b/frontend/src/ApiModal.tsx
+@@ -0,0 +1,17 @@
++import Modal from "./Modal";
++import Icon from "./icons";
++
++export default function ApiModal({ onClose }: { onClose: () => void }) {
++  return <Modal title="API reference" onClose={onClose}>
++    <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-xl bg-mint text-forest"><Icon name="code" className="h-6 w-6" /></div>
++    <p className="text-[10px] font-bold tracking-[0.18em] text-forest">MADE TO FIT YOUR WORKFLOW</p>
++    <h2 className="mt-2 text-3xl font-semibold tracking-tight">Meet the API.</h2>
++    <p className="mt-3 text-sm leading-6 text-muted">The same simple conversions, from your code. All endpoints use JSON and live under <code className="text-forest">/api</code>.</p>
++    <div className="mt-6 space-y-5">
++      <section><h3 className="text-sm font-semibold">Encode text</h3><pre className="mt-2 overflow-x-auto rounded-lg bg-ink p-4 font-mono text-[11px] leading-6 text-mint">{'POST /api/base64/encode\n{"text": "Hello, world!"}\n\n→ {"encoded": "SGVsbG8sIHdvcmxkIQ=="}'}</pre></section>
++      <section><h3 className="text-sm font-semibold">Decode Base64</h3><pre className="mt-2 overflow-x-auto rounded-lg bg-ink p-4 font-mono text-[11px] leading-6 text-mint">{'POST /api/base64/decode\n{"encoded": "SGVsbG8sIHdvcmxkIQ=="}\n\n→ {"text": "Hello, world!"}'}</pre></section>
++      <section className="rounded-lg border border-line p-4"><h3 className="flex items-center gap-2 text-sm font-semibold"><Icon name="lock" />Accounts & private history</h3><p className="mt-2 text-xs leading-6 text-muted">Register at <code>/api/auth/register</code>, then sign in at <code>/api/auth/login</code> with <code>{'{"username": "you", "password": "…"}'}</code>. Pass the returned token as <code>Authorization: Bearer &lt;token&gt;</code>.</p><div className="mt-3 space-y-2 font-mono text-[11px]"><p>POST /api/conversions</p><p className="break-all text-muted">{'{"direction": "encode", "input": "Hello"}'}</p><p>GET /api/conversions?page=1&page_size=10</p><p>DELETE /api/conversions/&#123;id&#125;</p></div></section>
++    </div>
++    <p className="mt-5 flex items-center gap-2 text-xs text-muted"><Icon name="info" />Base64 is an encoding, not encryption.</p>
++  </Modal>;
++}
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..9044db6 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,248 @@
++import { useCallback, useEffect, useRef, useState } from "react";
++import { api, ApiError, errorMessage } from "./api";
++import type { Direction, Session } from "./api";
++import Icon from "./icons";
++import AuthModal from "./AuthModal";
++import ApiModal from "./ApiModal";
++import History from "./History";
++
++function storedSession(): Session | null {
++  try {
++    const value = JSON.parse(localStorage.getItem("base64-session") || "null");
++    return value && typeof value.token === "string" && typeof value.username === "string" ? value : null;
++  } catch { return null; }
++}
++
++function persistSession(session: Session | null) {
++  try {
++    if (session) localStorage.setItem("base64-session", JSON.stringify(session));
++    else localStorage.removeItem("base64-session");
++  } catch { return; }
++}
++
++const features = [
++  { icon: "globe" as const, title: "Every character welcome.", description: "UTF-8 text, emojis, and everything in between." },
++  { icon: "shield" as const, title: "Private by default.", description: "Nothing is saved unless you choose to save it." },
++  { icon: "bolt" as const, title: "Less friction. More flow.", description: "No signup needed. Just paste, convert, and go." },
++];
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [session, setSession] = useState<Session | null>(storedSession);
++  const [authMode, setAuthMode] = useState<"login" | "register" | null>(null);
++  const [showApi, setShowApi] = useState(false);
++  const [direction, setDirection] = useState<Direction>("encode");
++  const [input, setInput] = useState("");
++  const [output, setOutput] = useState<string | null>(null);
++  const [save, setSave] = useState(false);
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState("");
++  const [notice, setNotice] = useState("");
++  const [copied, setCopied] = useState(false);
++  const [historyRefresh, setHistoryRefresh] = useState(0);
++  const [signingOut, setSigningOut] = useState(false);
++  const inputRef = useRef<HTMLTextAreaElement>(null);
++  const outputRef = useRef<HTMLTextAreaElement>(null);
++  const copyTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
++  const requestVersion = useRef(0);
++
++  const clearSession = useCallback(() => {
++    setSession(null);
++    setSave(false);
++    persistSession(null);
++  }, []);
++
++  const sessionExpired = useCallback(() => {
++    clearSession();
++    setError("Your session has expired. Please sign in again.");
++  }, [clearSession]);
++
++  useEffect(() => {
++    if (!session) return;
++    let active = true;
++    api<{ username: string }>("/auth/me", {}, session.token).catch((error) => {
++      if (active && error instanceof ApiError && error.status === 401) sessionExpired();
++    });
++    return () => { active = false; };
++  }, [session, sessionExpired]);
++
++  useEffect(() => {
++    function sync(event: StorageEvent) {
++      if (event.key === "base64-session") {
++        setSession(storedSession());
++        setSave(false);
++        setHistoryRefresh((value) => value + 1);
++      }
++    }
++    window.addEventListener("storage", sync);
++    return () => {
++      window.removeEventListener("storage", sync);
++      if (copyTimeout.current) clearTimeout(copyTimeout.current);
++    };
++  }, []);
++
++  function authenticated(next: Session) {
++    setSession(next);
++    persistSession(next);
++    setAuthMode(null);
++    setError("");
++    setNotice("You're signed in. Make yourself at home.");
++  }
++
++  async function signOut() {
++    setSigningOut(true);
++    try {
++      if (session) await api("/auth/logout", { method: "POST" }, session.token);
++      clearSession();
++      setNotice("You're signed out. Your history is safely tucked away.");
++    } catch (error) {
++      if (error instanceof ApiError && error.status === 401) clearSession();
++      else setError(errorMessage(error));
++    } finally { setSigningOut(false); }
++  }
++
++  function resetResult() {
++    requestVersion.current += 1;
++    setOutput(null);
++    setError("");
++    setNotice("");
++    setCopied(false);
++  }
++
++  function changeDirection(next: Direction) {
++    if (next === direction) return;
++    setDirection(next);
++    resetResult();
++  }
++
++  async function convert() {
++    if (busy) return;
++    const version = ++requestVersion.current;
++    setBusy(true);
++    setError("");
++    setNotice("");
++    setCopied(false);
++    try {
++      let result: string;
++      const saving = save && session;
++      if (saving) {
++        const conversion = await api<{ output: string }>("/conversions", { method: "POST", body: JSON.stringify({ direction, input }) }, session.token);
++        result = conversion.output;
++        setHistoryRefresh((value) => value + 1);
++      } else {
++        const conversion = await api<{ encoded?: string; text?: string }>(`/base64/${direction}`, { method: "POST", body: JSON.stringify(direction === "encode" ? { text: input } : { encoded: input }) });
++        result = (direction === "encode" ? conversion.encoded : conversion.text) ?? "";
++      }
++      if (version === requestVersion.current) {
++        setOutput(result);
++        setNotice(saving ? "Converted and saved to your private history." : "All done. Your conversion is ready.");
++      }
++    } catch (error) {
++      if (version !== requestVersion.current) return;
++      setOutput(null);
++      if (error instanceof ApiError && error.status === 401 && save) sessionExpired();
++      else setError(errorMessage(error));
++    } finally { setBusy(false); }
++  }
++
++  async function paste() {
++    try {
++      const text = await navigator.clipboard.readText();
++      setInput(text);
++      resetResult();
++      inputRef.current?.focus();
++    } catch { setError("Clipboard access is unavailable. Paste directly into the input using Ctrl+V or ⌘V."); }
++  }
++
++  async function copy() {
++    if (output === null) return;
++    try {
++      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(output);
++      else {
++        outputRef.current?.focus();
++        outputRef.current?.select();
++        if (!document.execCommand("copy")) throw new Error();
++      }
++      setCopied(true);
++      if (copyTimeout.current) clearTimeout(copyTimeout.current);
++      copyTimeout.current = setTimeout(() => setCopied(false), 2200);
++    } catch { setError("Couldn't copy automatically. Select the output and copy it manually."); }
++  }
++
++  function useOutput() {
++    if (output === null || busy) return;
++    setInput(output);
++    setDirection(direction === "encode" ? "decode" : "encode");
++    resetResult();
++    inputRef.current?.focus();
++  }
++
++  function openHistory() {
++    if (!session) setAuthMode("login");
++    else document.getElementById("history")?.scrollIntoView({ behavior: "smooth" });
++  }
++
++  const isEncoding = direction === "encode";
++  const charCount = Array.from(input).length;
++  const outputCount = Array.from(output || "").length;
++
++  return <div className="min-h-screen">
++    <header className="border-b border-line bg-paper/90">
++      <div className="mx-auto flex h-[84px] max-w-[1200px] items-center justify-between gap-5 px-5 sm:px-8">
++        <a href="/" aria-label="Base64 home" className="flex shrink-0 items-center gap-2.5 rounded-sm"><span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-forest text-mint"><Icon name="code" className="h-5 w-5" /></span><span className="text-[23px] font-bold tracking-[-1.3px]">base64<span className="text-forest">.</span></span><span className="ml-2 hidden border-l border-line pl-4 text-[9px] font-medium leading-[1.6] tracking-[0.13em] text-muted xl:block">A LITTLE TOOL.<br />A LOT OF POSSIBILITY.</span></a>
++        <nav aria-label="Main navigation" className="ml-4 hidden items-center gap-7 md:flex"><a href="#converter" className="flex items-center gap-1.5 rounded-sm text-[13px] font-semibold text-forest"><span className="h-1.5 w-1.5 rounded-full bg-forest" />Converter</a><button onClick={openHistory} className="flex items-center gap-1.5 rounded-sm text-[13px] text-muted transition-colors hover:text-ink">History{!session && <Icon name="lock" className="h-3 w-3" />}</button><button onClick={() => setShowApi(true)} className="rounded-sm text-[13px] text-muted transition-colors hover:text-ink">API reference</button></nav>
++        {session ? <div className="flex min-w-0 items-center gap-3"><span className="flex min-w-0 items-center gap-2 text-xs font-medium"><span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-mint text-forest"><Icon name="user" className="h-3.5 w-3.5" /></span><span className="max-w-[120px] truncate sm:max-w-[160px]">{session.username}</span></span><button disabled={signingOut} onClick={() => void signOut()} className="flex items-center gap-2 rounded-lg border border-line px-3 py-2.5 text-xs text-muted transition-colors hover:border-ink/30 hover:text-ink disabled:opacity-50"><span className="hidden sm:inline">{signingOut ? "Signing out…" : "Sign out"}</span><Icon name="logout" /></button></div> : <div className="flex items-center gap-5"><button onClick={() => setAuthMode("login")} className="rounded-sm text-[13px] font-medium transition-colors hover:text-forest">Sign in</button><button onClick={() => setAuthMode("register")} className="hidden items-center gap-3 rounded-lg bg-ink px-4 py-2.5 text-xs font-medium text-white transition-colors hover:bg-forest sm:flex">Create account<Icon name="arrow" className="h-3.5 w-3.5 -rotate-45" /></button></div>}
++      </div>
++    </header>
++
++    <main className="mx-auto max-w-[1120px] px-5 pb-12 sm:px-8">
++      <section className="relative flex items-center justify-between gap-8 pb-10 pt-14 sm:pb-11 sm:pt-[66px]">
++        <div className="relative z-10"><div className="mb-5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-forest"><span className="h-1.5 w-1.5 rounded-full bg-forest" />A simpler way to Base64</div><h1 className="text-[38px] font-semibold leading-[1.15] tracking-[-1.9px] sm:text-[49px] sm:tracking-[-2.4px]">Your text, <span className="text-forest">transformed.</span></h1><p className="mt-5 max-w-[470px] text-[14px] leading-7 text-muted">Encode a thought. Decode a mystery.<br className="hidden sm:block" />A clean, simple Base64 converter that gets out of your way.</p></div>
++        <div aria-hidden="true" className="relative mr-2 hidden h-[165px] w-[260px] shrink-0 lg:block">
++          <div className="absolute left-6 top-3 h-[145px] w-[224px] rounded-[50%] border border-dashed border-[#ccd8c4] -rotate-[22deg]" />
++          <div className="absolute left-11 top-2 h-[145px] w-[180px] rounded-[50%] border border-[#dce4d6] rotate-[28deg]" />
++          <div className="absolute left-0 top-12 flex h-[78px] w-[82px] -rotate-[8deg] items-center justify-center rounded-xl border border-[#d5ded0] bg-white font-mono text-[32px] tracking-[-2px] shadow-[0_5px_15px_-8px_rgba(32,53,45,0.15)]">Aa<span className="text-forest">.</span></div>
++          <div className="absolute left-[94px] top-[77px] text-forest/60"><Icon name="arrow" className="h-7 w-7" /></div>
++          <div className="absolute right-0 top-8 flex h-[86px] w-[94px] rotate-[8deg] items-center justify-center rounded-xl border border-[#d0dec5] bg-[#e7efde] font-mono text-[36px] tracking-[-2px] text-forest shadow-[0_5px_15px_-8px_rgba(32,53,45,0.15)]">64</div>
++          <span className="absolute right-9 top-0 h-2 w-2 rounded-full bg-[#94aa85]" /><span className="absolute bottom-2 left-10 text-[20px] font-light text-[#9faf92]">+</span><span className="absolute bottom-0 right-7 font-mono text-[9px] tracking-[0.12em] text-muted">SAME TEXT. NEW FORM.</span>
++        </div>
++      </section>
++
++      <section id="converter" aria-label="Base64 converter" className="scroll-mt-6 overflow-hidden rounded-xl border border-[#dce2d7] bg-white shadow-[0_6px_30px_-16px_rgba(32,53,45,0.13)]">
++        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-5 py-4 sm:px-6">
++          <div className="flex gap-1 rounded-lg border border-line bg-paper p-1" role="group" aria-label="Conversion direction"><button onClick={() => changeDirection("encode")} disabled={busy} aria-pressed={isEncoding} className={`flex items-center gap-2 rounded-md px-5 py-2 text-xs font-medium transition-all disabled:opacity-60 ${isEncoding ? "bg-white text-forest shadow-[0_1px_4px_rgba(32,53,45,0.1)]" : "text-muted hover:text-ink"}`}><Icon name="arrow" className="h-3.5 w-3.5" />Encode</button><button onClick={() => changeDirection("decode")} disabled={busy} aria-pressed={!isEncoding} className={`flex items-center gap-2 rounded-md px-5 py-2 text-xs font-medium transition-all disabled:opacity-60 ${!isEncoding ? "bg-white text-forest shadow-[0_1px_4px_rgba(32,53,45,0.1)]" : "text-muted hover:text-ink"}`}><Icon name="arrow" className="h-3.5 w-3.5 rotate-180" />Decode</button></div>
++          <span className="flex items-center gap-2 rounded-md border border-line px-2.5 py-1.5 font-mono text-[9px] tracking-[0.06em] text-muted"><span className="h-1 w-1 rounded-full bg-[#779366]" />UTF-8 SUPPORTED</span>
++        </div>
++
++        <div className="relative grid gap-5 p-5 sm:gap-6 sm:p-6 md:grid-cols-2">
++          <div className="min-w-0"><div className="mb-3 flex h-6 items-center justify-between"><label htmlFor="converter-input" className="flex items-center gap-2 text-xs font-semibold">{isEncoding ? "Plain text" : "Base64 input"}<span className="rounded bg-paper px-1.5 py-0.5 font-mono text-[9px] font-normal text-muted">INPUT</span></label><div className="flex items-center gap-3"><button onClick={() => void paste()} disabled={busy} className="flex items-center gap-1.5 rounded-sm text-[11px] text-muted transition-colors hover:text-forest disabled:opacity-40"><Icon name="clipboard" className="h-3 w-3" />Paste</button><span className="h-3 w-px bg-line" /><button onClick={() => { setInput(""); resetResult(); inputRef.current?.focus(); }} disabled={busy || (!input && output === null)} className="rounded-sm text-[11px] text-muted transition-colors hover:text-forest disabled:opacity-40">Clear</button></div></div>
++            <div className="overflow-hidden rounded-lg border border-line bg-[#fcfdfa] transition-colors focus-within:border-forest/50 focus-within:ring-2 focus-within:ring-forest/10"><textarea ref={inputRef} id="converter-input" value={input} disabled={busy} onChange={(event) => { setInput(event.target.value); resetResult(); }} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void convert(); } }} placeholder={isEncoding ? "Type or paste your text here…" : "Paste your Base64 string here…"} spellCheck={false} className="block h-[205px] w-full resize-y border-0 bg-transparent p-4 font-mono text-[12px] leading-[1.85] text-ink placeholder:text-[#a0a79c] focus-visible:ring-0 focus-visible:ring-offset-0 disabled:opacity-60 sm:h-[223px]" /><div className="flex h-9 items-center justify-between border-t border-line/70 px-4 text-[10px] text-muted"><span>{charCount.toLocaleString()} {charCount === 1 ? "character" : "characters"}</span><button disabled={busy} onClick={() => { setInput(isEncoding ? "Hello, world!" : "SGVsbG8sIHdvcmxkIQ=="); resetResult(); inputRef.current?.focus(); }} className="flex items-center gap-1 rounded-sm text-[10px] text-forest hover:underline disabled:opacity-40">Try an example<Icon name="arrow" className="h-3 w-3" /></button></div></div>
++          </div>
++
++          <button onClick={useOutput} disabled={output === null || busy} title="Use output as input and reverse direction" aria-label="Swap input and output" className="absolute left-1/2 top-[157px] z-10 hidden h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-line bg-white text-forest shadow-sm transition-all hover:border-forest/50 hover:bg-mint disabled:text-muted/50 md:flex"><Icon name="swap" className="h-3.5 w-3.5" /></button>
++
++          <div className="min-w-0"><div className="mb-3 flex h-6 items-center justify-between"><label htmlFor="converter-output" className="flex items-center gap-2 text-xs font-semibold">{isEncoding ? "Base64" : "Plain text"}<span className="rounded bg-mint px-1.5 py-0.5 font-mono text-[9px] font-normal text-forest">OUTPUT</span></label><button onClick={() => void copy()} disabled={output === null || busy} className="flex items-center gap-1.5 rounded-sm text-[11px] text-muted transition-colors hover:text-forest disabled:opacity-40"><Icon name={copied ? "check" : "copy"} className="h-3 w-3" />{copied ? "Copied!" : "Copy"}</button></div>
++            <div className={`relative overflow-hidden rounded-lg border transition-colors ${output !== null ? "border-[#cbdcc0] bg-[#f4f8f0]" : "border-line bg-[#f4f6f1]"}`}><textarea ref={outputRef} id="converter-output" value={output ?? ""} readOnly placeholder={busy ? "A little transformation in progress…" : isEncoding ? "Your Base64 output will appear here…" : "Your decoded text will appear here…"} spellCheck={false} className="block h-[205px] w-full resize-y border-0 bg-transparent p-4 font-mono text-[12px] leading-[1.85] text-forest placeholder:text-[#a0a79c] focus-visible:ring-inset focus-visible:ring-offset-0 sm:h-[223px]" />{output === "" && <span className="pointer-events-none absolute left-4 top-4 font-mono text-xs text-muted">Empty text — a valid conversion.</span>}<div className="flex h-9 items-center justify-between border-t border-line/70 px-4 text-[10px] text-muted"><span>{outputCount.toLocaleString()} {outputCount === 1 ? "character" : "characters"}</span><span className="flex items-center gap-1.5">{output !== null ? <><Icon name="check" className="h-3 w-3 text-forest" />Ready to copy</> : <><span className="h-1 w-1 rounded-full bg-muted/50" />Awaiting input</>}</span></div></div>
++          </div>
++        </div>
++
++        {error && <div role="alert" className="mx-5 mb-4 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs leading-5 text-red-700 sm:mx-6"><Icon name="info" className="mt-0.5 h-4 w-4 shrink-0" />{error}</div>}
++        <div className="flex flex-col items-stretch justify-between gap-5 border-t border-line bg-[#fdfefb] px-5 py-5 sm:flex-row sm:items-center sm:px-6">
++          <div className="flex items-center gap-3"><button role="switch" aria-checked={save} aria-label="Save to history" disabled={!session || busy} onClick={() => setSave(!save)} className={`flex h-5 w-9 shrink-0 items-center rounded-full p-[3px] transition-colors disabled:opacity-65 ${save ? "bg-forest" : "bg-[#dfe4da]"}`}><span className={`h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${save ? "translate-x-4" : "translate-x-0"}`} /></button><div><p className="text-[12px] font-medium">Save to history</p>{session ? <p className="mt-1 flex items-center gap-1 text-[10px] text-muted"><Icon name="lock" className="h-2.5 w-2.5" />Your conversions, just for you.</p> : <p className="mt-1 text-[10px] text-muted"><button onClick={() => setAuthMode("login")} className="rounded-sm text-forest underline decoration-forest/30 underline-offset-2 hover:decoration-forest">Sign in</button> to keep your conversions.</p>}</div></div>
++          <div className="flex items-center justify-between gap-5"><span className="hidden text-[10px] text-muted sm:block"><kbd className="rounded border border-line bg-white px-1.5 py-1 font-sans text-[9px]">⌘ / Ctrl</kbd><span className="mx-1">+</span><kbd className="rounded border border-line bg-white px-1.5 py-1 font-sans text-[9px]">Enter</kbd></span><button onClick={() => void convert()} disabled={busy} className="flex min-w-[156px] flex-1 items-center justify-center gap-6 rounded-lg bg-forest px-5 py-3.5 text-xs font-medium text-white shadow-[0_2px_4px_rgba(32,53,45,0.1)] transition-colors hover:bg-ink disabled:opacity-60 sm:flex-none">{busy ? "Converting…" : isEncoding ? "Encode text" : "Decode Base64"}<Icon name="arrow" className="h-4 w-4" /></button></div>
++        </div>
++      </section>
++
++      <div className="flex min-h-[40px] flex-wrap items-center justify-between gap-2 px-1 py-3 text-[10px] text-muted"><span role="status" className="flex items-center gap-1.5">{notice ? <><Icon name="check" className="h-3 w-3 text-forest" />{notice}</> : <><Icon name="lock" className="h-3 w-3" />{save && session ? "Saving to your private history is on." : "Just a conversion. Nothing stored."}</>}</span><span className="hidden items-center gap-1.5 sm:flex">Standard Base64<span className="mx-1 text-muted/40">/</span>RFC 4648</span></div>
++
++      <section aria-label="Why Base64" className="grid gap-7 py-7 sm:grid-cols-3 sm:gap-8 sm:py-8">{features.map((feature) => <div key={feature.title} className="flex gap-3.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#e2e8dc] bg-[#eef2e9] text-forest"><Icon name={feature.icon} className="h-[18px] w-[18px]" /></span><div><h2 className="mt-0.5 text-[12px] font-semibold">{feature.title}</h2><p className="mt-1.5 max-w-[245px] text-[11px] leading-[1.7] text-muted">{feature.description}</p></div></div>)}</section>
++
++      <div className="mt-3">{session ? <History key={session.token} token={session.token} refresh={historyRefresh} onExpired={sessionExpired} /> : <section className="relative flex flex-col items-start justify-between gap-5 overflow-hidden rounded-xl border border-[#dce4d5] bg-[#edf2e6] p-6 sm:flex-row sm:items-center sm:px-7 sm:py-6"><div className="flex items-start gap-4"><span className="mt-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#d7e1cc] bg-[#e5ecdc] text-forest"><Icon name="history" className="h-5 w-5" /></span><div><h2 className="text-[15px] font-semibold tracking-[-0.2px]">Good things are worth keeping.</h2><p className="mt-2 text-[12px] leading-5 text-muted">Save your conversions to a private history. Find them whenever you need them.</p></div></div><button onClick={() => setAuthMode("register")} className="flex shrink-0 items-center gap-4 rounded-lg border border-[#cddac4] bg-[#f8faf5] px-4 py-3 text-[11px] font-semibold text-forest transition-colors hover:border-forest/50 hover:bg-white">Create a free account<Icon name="arrow" className="h-3.5 w-3.5 -rotate-45" /></button></section>}</div>
++
++      <details className="group mt-7 border-b border-line pb-5"><summary className="flex cursor-pointer list-none items-center justify-between rounded-sm py-1 text-xs text-muted"><span className="flex items-center gap-2"><Icon name="info" className="h-3.5 w-3.5" />A quick note on Base64</span><Icon name="plus" className="h-3.5 w-3.5 transition-transform group-open:rotate-45" /></summary><p className="mt-4 max-w-3xl text-xs leading-7 text-muted">Base64 represents data using 64 standard characters, making it easy to move text through systems that expect plain ASCII. This tool encodes UTF-8 text and adds standard padding. When decoding, use a valid Base64 string without spaces or line breaks. Remember: Base64 is encoding, not encryption — never use it to protect sensitive information.</p></details>
++      <footer className="flex flex-wrap items-center justify-between gap-4 pt-6 text-[10px] text-muted"><span className="flex items-center gap-2"><Icon name="code" className="h-3.5 w-3.5 text-forest" /><span>Less noise. More utility.</span></span><div className="flex items-center gap-5"><button onClick={() => setShowApi(true)} className="rounded-sm transition-colors hover:text-forest">API reference</button><span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-[#749565]" />Made for the little things.</span></div></footer>
++    </main>
++
++    {authMode && <AuthModal initialMode={authMode} onClose={() => setAuthMode(null)} onSuccess={authenticated} />}
++    {showApi && <ApiModal onClose={() => setShowApi(false)} />}
++  </div>;
+ }
+diff --git a/frontend/src/AuthModal.tsx b/frontend/src/AuthModal.tsx
+new file mode 100644
+index 0000000..edcae15
+--- /dev/null
++++ b/frontend/src/AuthModal.tsx
+@@ -0,0 +1,46 @@
++import { useState } from "react";
++import type { FormEvent } from "react";
++import { api, errorMessage } from "./api";
++import type { Session } from "./api";
++import Icon from "./icons";
++import Modal from "./Modal";
++
++export default function AuthModal({ initialMode, onClose, onSuccess }: { initialMode: "login" | "register"; onClose: () => void; onSuccess: (session: Session) => void }) {
++  const [mode, setMode] = useState(initialMode);
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState("");
++  const [busy, setBusy] = useState(false);
++
++  async function submit(event: FormEvent) {
++    event.preventDefault();
++    setBusy(true);
++    setError("");
++    try {
++      const body = JSON.stringify({ username: username.trim(), password });
++      if (mode === "register") await api("/auth/register", { method: "POST", body });
++      const { token } = await api<{ token: string }>("/auth/login", { method: "POST", body });
++      const user = await api<{ username: string }>("/auth/me", {}, token);
++      onSuccess({ token, username: user.username });
++    } catch (error) {
++      setError(errorMessage(error));
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return <Modal title={mode === "login" ? "Sign in" : "Create an account"} onClose={onClose}>
++    <div className="mb-6 flex h-12 w-12 items-center justify-center rounded-xl bg-mint text-forest"><Icon name="lock" className="h-6 w-6" /></div>
++    <p className="mb-2 text-[10px] font-bold tracking-[0.18em] text-forest">YOUR OWN LITTLE SPACE</p>
++    <h2 className="text-3xl font-semibold tracking-tight">{mode === "login" ? "Welcome back." : "Keep it for later."}</h2>
++    <p className="mt-3 text-sm leading-6 text-muted">{mode === "login" ? "Sign in to pick up where you left off. Your conversion history is just for you." : "Create a free account and give your conversions a private place to live."}</p>
++    <form onSubmit={submit} className="mt-7 space-y-5">
++      <div><label htmlFor="username" className="mb-2 block text-sm font-medium">Username</label><input id="username" name="username" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required maxLength={80} placeholder="Your username" disabled={busy} className="w-full rounded-lg border border-line bg-white px-4 py-3 text-sm placeholder:text-muted/70" /></div>
++      <div><label htmlFor="password" className="mb-2 block text-sm font-medium">Password</label><input id="password" name="password" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} required maxLength={1024} placeholder={mode === "login" ? "Your password" : "Choose a password"} disabled={busy} className="w-full rounded-lg border border-line bg-white px-4 py-3 text-sm placeholder:text-muted/70" /></div>
++      {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p>}
++      <button disabled={busy} className="flex w-full items-center justify-center gap-3 rounded-lg bg-forest py-3.5 text-sm font-medium text-white transition-colors hover:bg-ink disabled:opacity-50">{busy ? "One moment…" : mode === "login" ? "Sign in" : "Create account"}<Icon name="arrow" /></button>
++    </form>
++    <p className="mt-6 text-center text-sm text-muted">{mode === "login" ? "New around here?" : "Already have an account?"} <button type="button" disabled={busy} onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }} className="ml-1 font-medium text-forest hover:underline">{mode === "login" ? "Create an account" : "Sign in"}</button></p>
++    <div className="mt-7 flex items-center justify-center gap-2 border-t border-line pt-5 text-xs text-muted"><Icon name="shield" className="h-3.5 w-3.5" />Private history. No unnecessary extras.</div>
++  </Modal>;
++}
+diff --git a/frontend/src/History.tsx b/frontend/src/History.tsx
+new file mode 100644
+index 0000000..220468a
+--- /dev/null
++++ b/frontend/src/History.tsx
+@@ -0,0 +1,77 @@
++import { useEffect, useState } from "react";
++import { api, ApiError, errorMessage } from "./api";
++import type { HistoryPage } from "./api";
++import Icon from "./icons";
++
++function formatDate(value: string) {
++  const date = new Date(value);
++  const today = new Date();
++  const day = date.toDateString() === today.toDateString() ? "Today" : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
++  return `${day}, ${date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
++}
++
++export default function History({ token, refresh, onExpired }: { token: string; refresh: number; onExpired: () => void }) {
++  const [page, setPage] = useState(1);
++  const [pageSize, setPageSize] = useState(5);
++  const [data, setData] = useState<HistoryPage | null>(null);
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState("");
++  const [reload, setReload] = useState(0);
++  const [deleting, setDeleting] = useState<number | null>(null);
++
++  useEffect(() => { setPage(1); }, [refresh]);
++
++  useEffect(() => {
++    let active = true;
++    setLoading(true);
++    setError("");
++    api<HistoryPage>(`/conversions?page=${page}&page_size=${pageSize}`, {}, token)
++      .then((data) => { if (active) setData(data); })
++      .catch((error) => {
++        if (!active) return;
++        if (error instanceof ApiError && error.status === 401) onExpired();
++        else setError(errorMessage(error));
++      })
++      .finally(() => { if (active) setLoading(false); });
++    return () => { active = false; };
++  }, [token, page, pageSize, refresh, reload, onExpired]);
++
++  async function remove(id: number) {
++    setDeleting(id);
++    setError("");
++    try {
++      await api(`/conversions/${id}`, { method: "DELETE" }, token);
++      if (data && data.items.length === 1 && page > 1) setPage(page - 1);
++      else setReload((value) => value + 1);
++    } catch (error) {
++      if (error instanceof ApiError && error.status === 401) onExpired();
++      else setError(errorMessage(error));
++    } finally {
++      setDeleting(null);
++    }
++  }
++
++  const pages = Math.max(1, Math.ceil((data?.total || 0) / pageSize));
++
++  return <section id="history" className="scroll-mt-8 overflow-hidden rounded-xl border border-line bg-white shadow-[0_4px_20px_-12px_rgba(32,53,45,0.1)]">
++    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-6 py-5">
++      <div className="flex items-center gap-3"><Icon name="history" className="h-5 w-5 text-forest" /><h2 className="text-base font-semibold">Your history</h2><span className="rounded-md bg-paper px-2 py-0.5 text-xs text-muted">{data?.total ?? "—"}</span></div>
++      <span className="flex items-center gap-1.5 text-xs text-muted"><Icon name="lock" className="h-3.5 w-3.5" />Only visible to you</span>
++    </div>
++    {error && <div role="alert" className="m-5 flex items-center justify-between gap-4 rounded-lg bg-red-50 p-3 text-sm text-red-700"><span>{error}</span><button onClick={() => setReload((value) => value + 1)} className="font-medium underline">Retry</button></div>}
++    {loading && !data ? <p role="status" className="px-6 py-16 text-center text-sm text-muted">Loading your history…</p> : !data?.items.length ? <div className="flex flex-col items-center px-6 py-12 text-center"><span className="mb-4 rounded-xl bg-mint p-3 text-forest"><Icon name="history" className="h-6 w-6" /></span><h3 className="text-sm font-semibold">A fresh start.</h3><p className="mt-2 max-w-sm text-sm leading-6 text-muted">Turn on “Save to history” and convert something. It’ll be waiting for you right here.</p></div> : <div aria-busy={loading} className={loading ? "opacity-50" : ""}>
++      <div className="hidden grid-cols-[100px_minmax(0,1fr)_minmax(0,1fr)_140px_32px] gap-5 border-b border-line bg-paper/60 px-6 py-3 text-[10px] font-medium uppercase tracking-wider text-muted md:grid"><span>Conversion</span><span>Input</span><span>Output</span><span>Saved</span><span /></div>
++      {data.items.map((item) => <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_32px] items-center gap-x-5 gap-y-3 border-b border-line/70 px-6 py-4 last:border-0 md:grid-cols-[100px_minmax(0,1fr)_minmax(0,1fr)_140px_32px]">
++        <span className={`flex w-fit items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium ${item.direction === "encode" ? "bg-mint text-forest" : "bg-[#eff0f7] text-[#64628b]"}`}><Icon name="arrow" className={`h-3 w-3 ${item.direction === "decode" ? "rotate-180" : ""}`} />{item.direction === "encode" ? "Encode" : "Decode"}</span>
++        <p title={item.input_preview} className="col-start-1 min-w-0 truncate font-mono text-xs text-ink/75 md:col-auto"><span className="mr-2 font-sans text-[10px] text-muted md:hidden">IN</span>{item.input_preview || <span className="font-sans italic text-muted">Empty text</span>}</p>
++        <p title={item.output_preview} className="col-start-1 min-w-0 truncate font-mono text-xs text-forest md:col-auto"><span className="mr-2 font-sans text-[10px] text-muted md:hidden">OUT</span>{item.output_preview || <span className="font-sans italic text-muted">Empty text</span>}</p>
++        <time dateTime={item.created_at} className="col-start-1 text-[11px] text-muted md:col-auto">{formatDate(item.created_at)}</time>
++        <button disabled={deleting !== null || loading} onClick={() => void remove(item.id)} aria-label={`Delete conversion ${item.id}`} className="col-start-2 row-start-1 rounded-md p-2 text-muted transition-colors hover:bg-red-50 hover:text-red-600 disabled:opacity-40 md:col-auto"><Icon name="trash" /></button>
++      </div>)}
++    </div>}
++    <div className="flex flex-wrap items-center justify-between gap-4 border-t border-line px-6 py-4 text-xs text-muted">
++      <label className="flex items-center gap-2">Rows per page <select aria-label="Rows per page" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }} className="rounded-md border border-line bg-white p-1 text-ink"><option value={5}>5</option><option value={10}>10</option><option value={20}>20</option></select></label>
++      <div className="flex items-center gap-4"><span>Page {page} of {pages}</span><div className="flex gap-1"><button aria-label="Previous page" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)} className="rounded-md border border-line p-1.5 text-ink hover:bg-paper disabled:opacity-30"><Icon name="chevron" className="h-4 w-4 rotate-180" /></button><button aria-label="Next page" disabled={page >= pages || loading} onClick={() => setPage(page + 1)} className="rounded-md border border-line p-1.5 text-ink hover:bg-paper disabled:opacity-30"><Icon name="chevron" /></button></div></div>
++    </div>
++  </section>;
++}
+diff --git a/frontend/src/Modal.tsx b/frontend/src/Modal.tsx
+new file mode 100644
+index 0000000..35f3a4f
+--- /dev/null
++++ b/frontend/src/Modal.tsx
+@@ -0,0 +1,47 @@
++import { useEffect, useRef } from "react";
++import type { ReactNode } from "react";
++import Icon from "./icons";
++
++export default function Modal({ children, onClose, title }: { children: ReactNode; onClose: () => void; title: string }) {
++  const container = useRef<HTMLDivElement>(null);
++  const closeRef = useRef(onClose);
++
++  useEffect(() => { closeRef.current = onClose; }, [onClose]);
++
++  useEffect(() => {
++    const previous = document.activeElement as HTMLElement | null;
++    const previousOverflow = document.body.style.overflow;
++    document.body.style.overflow = "hidden";
++    const focusable = () => container.current?.querySelectorAll<HTMLElement>("button:not(:disabled), input, a[href], textarea, [tabindex='0']");
++    focusable()?.[0]?.focus();
++    function onKey(event: KeyboardEvent) {
++      if (event.key === "Escape") closeRef.current();
++      if (event.key === "Tab") {
++        const elements = focusable();
++        if (!elements?.length) return;
++        const first = elements[0];
++        const last = elements[elements.length - 1];
++        if (event.shiftKey && document.activeElement === first) {
++          event.preventDefault();
++          last.focus();
++        } else if (!event.shiftKey && document.activeElement === last) {
++          event.preventDefault();
++          first.focus();
++        }
++      }
++    }
++    document.addEventListener("keydown", onKey);
++    return () => {
++      document.body.style.overflow = previousOverflow;
++      document.removeEventListener("keydown", onKey);
++      previous?.focus();
++    };
++  }, []);
++
++  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/35 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
++    <div ref={container} role="dialog" aria-modal="true" aria-label={title} className="relative max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-2xl border border-line bg-paper p-7 shadow-2xl sm:p-9">
++      <button type="button" onClick={onClose} aria-label="Close dialog" className="absolute right-4 top-4 rounded-lg p-2 text-muted transition-colors hover:bg-line hover:text-ink"><Icon name="close" /></button>
++      {children}
++    </div>
++  </div>;
++}
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..28ed248
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,43 @@
++export class ApiError extends Error {
++  status: number;
++
++  constructor(message: string, status: number) {
++    super(message);
++    this.status = status;
++  }
++}
++
++export async function api<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
++  let response: Response;
++  try {
++    response = await fetch(`/api${path}`, {
++      ...options,
++      headers: {
++        ...(options.body ? { "Content-Type": "application/json" } : {}),
++        ...(token ? { Authorization: `Bearer ${token}` } : {}),
++        ...options.headers,
++      },
++    });
++  } catch {
++    throw new ApiError("Unable to reach the server. Check your connection and try again.", 0);
++  }
++  if (response.status === 204) return undefined as T;
++  const body = await response.json();
++  if (!response.ok) throw new ApiError(body.error || "Something went wrong. Please try again.", response.status);
++  return body as T;
++}
++
++export type Session = { token: string; username: string };
++export type Direction = "encode" | "decode";
++export type Conversion = {
++  id: number;
++  direction: Direction;
++  input_preview: string;
++  output_preview: string;
++  created_at: string;
++};
++export type HistoryPage = { items: Conversion[]; total: number; page: number; page_size: number };
++
++export function errorMessage(error: unknown) {
++  return error instanceof Error ? error.message : "Something went wrong. Please try again.";
++}
+diff --git a/frontend/src/icons.tsx b/frontend/src/icons.tsx
+new file mode 100644
+index 0000000..d899823
+--- /dev/null
++++ b/frontend/src/icons.tsx
+@@ -0,0 +1,27 @@
++type IconName = "arrow" | "swap" | "copy" | "check" | "close" | "history" | "lock" | "code" | "globe" | "shield" | "bolt" | "chevron" | "trash" | "logout" | "clipboard" | "info" | "plus" | "user";
++
++const paths: Record<IconName, ReactNode> = {
++  arrow: <><path d="M4 12h16m-6-6 6 6-6 6" /></>,
++  swap: <><path d="M4 7h16m-4-4 4 4-4 4M20 17H4m4-4-4 4 4 4" /></>,
++  copy: <><rect x="8" y="8" width="12" height="13" rx="2" /><path d="M15 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3" /></>,
++  check: <path d="m5 12 4 4L19 6" />,
++  close: <path d="m6 6 12 12M6 18 18 6" />,
++  history: <><path d="M3 11a9 9 0 1 1 2.7 7M3 4v7h7M12 7v5l3 2" /></>,
++  lock: <><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" /></>,
++  code: <path d="m7 6-6 6 6 6m10-12 6 6-6 6m-3-15-4 18" />,
++  globe: <><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18" /></>,
++  shield: <><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z" /><path d="m8 12 3 3 5-6" /></>,
++  bolt: <path d="m13 2-9 12h7l-1 8 10-13h-7l1-7Z" />,
++  chevron: <path d="m9 5 7 7-7 7" />,
++  trash: <><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" /></>,
++  logout: <><path d="M9 3H4v18h5m5-9H8m7-4 4 4-4 4m-1-4h7" /></>,
++  clipboard: <><rect x="8" y="3" width="8" height="4" rx="1" /><path d="M8 5H5v16h14V5h-3" /></>,
++  info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v6m0-10v.1" /></>,
++  plus: <path d="M12 5v14M5 12h14" />,
++  user: <><circle cx="12" cy="8" r="4" /><path d="M4 21v-2a8 8 0 0 1 16 0v2" /></>,
++};
++
++export default function Icon({ name, className = "h-4 w-4" }: { name: IconName; className?: string }) {
++  return <svg aria-hidden="true" className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
++}
++import type { ReactNode } from "react";
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..caddcba
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1,19 @@
++@import "tailwindcss";
++
++@theme {
++  --font-sans: "Inter", "Segoe UI", Arial, sans-serif;
++  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
++  --color-ink: #20352d;
++  --color-muted: #7c847f;
++  --color-paper: #f7f8f5;
++  --color-line: #e4e8e1;
++  --color-forest: #2e6247;
++  --color-mint: #eaf2e6;
++}
++
++@layer base {
++  body { @apply m-0 min-w-[320px] bg-paper font-sans text-ink antialiased; }
++  button, a, input, textarea { @apply outline-none focus-visible:ring-2 focus-visible:ring-forest/60 focus-visible:ring-offset-2; }
++  button { @apply cursor-pointer disabled:cursor-not-allowed; }
++  ::selection { @apply bg-[#d3e9c8] text-ink; }
++}
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..696e0d2 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,5 @@
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+ createRoot(document.getElementById("root")!).render(<App />);
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..0f8b187
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,19 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "types": ["vite/client", "node"],
++    "module": "ESNext",
++    "moduleResolution": "Bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "skipLibCheck": true,
++    "noEmit": true,
++    "allowImportingTsExtensions": true,
++    "resolveJsonModule": true,
++    "verbatimModuleSyntax": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true
++  },
++  "include": ["src", "vite.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..775ad4a 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
+ import react from "@vitejs/plugin-react";
++import tailwindcss from "@tailwindcss/vite";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

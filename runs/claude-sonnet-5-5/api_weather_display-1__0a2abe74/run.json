@@ -1,0 +1,488 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 532,
+  "completed_at": "2026-11-09T20:27:26.946591+00:00",
+  "condition_id": 81,
+  "condition_label": "local-anthropic/claude-sonnet-5-5",
+  "config_fingerprint": "a2b92b7eeb26ec2c9a705ae33fe289cce858969be578fee00c6f90488f323d04",
+  "cost_usd": 0.0,
+  "duration": 215.121154,
+  "fingerprints": {
+    "config_fingerprint": "a2b92b7eeb26ec2c9a705ae33fe289cce858969be578fee00c6f90488f323d04",
+    "prompt_hash": "ee8b0a0e2f3bdfbecf2e60f786e3d3854d88fed31342db1e33a232cf5897b72b",
+    "run_fingerprint": "4b5a7bee6afc48dd875b71410c4129fcd24437394d2d6e7d0052f61dd337d657",
+    "task_hash": "d505900e129710a6e15ef3b80e16487435ce220131d435dedfe3532655a72bfe",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "0a2abe74-f497-450b-a428-1f190976ab87",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-anthropic/claude-sonnet-5-5",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-09T20:27:07.092166+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 641,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 64,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 549,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 108,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "weather.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "weather.list.ok",
+          "ms": 2,
+          "note": "$.items[0].humidity: expected integer/null, got float; $.items[0].condition: 'Sunny' not in enum; $.items[1].humidity: expected integer/null, got float; $.items[1].condition: 'Cloudy' not in enum; $.items[2].humidity: expected integer/null, got float",
+          "observed": {
+            "body": "{\"items\":[{\"id\":6,\"city\":\"Cairo\",\"country\":\"Egypt\",\"temperature_c\":31.0,\"condition\":\"Sunny\",\"humidity\":28.0,\"wind_kph\":12.0,\"observed_at\":\"2026-11-09T20:27:17.707831Z\"},{\"id\":1,\"city\":\"London\",\"country\":\"United Kingdom\",\"temperature_c\":12.5,\"condition\":\"Cloudy\",\"humidity\":78.0,\"wind_kph\":15.0,\"obser",
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "weather.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "weather.create.ok",
+          "ms": 3,
+          "note": "$.humidity: expected integer/null, got float",
+          "observed": {
+            "body": "{\"id\":8,\"city\":\"llmlab city cfcd1864\",\"country\":\"llmlab country\",\"temperature_c\":1.0,\"condition\":\"sunny\",\"humidity\":1.0,\"wind_kph\":1.0,\"observed_at\":\"2026-11-09T20:27:21.154871Z\"}\n",
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "weather.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "weather.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "weather.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "weather.create.invalid.missing",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "weather.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "weather.create.invalid.too_long",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "weather.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "weather.create.invalid.enum",
+          "ms": 4,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"id\":9,\"city\":\"llmlab city 3bc29e61\",\"country\":\"llmlab country\",\"temperature_c\":1.0,\"condition\":\"llmlab-not-an-option\",\"humidity\":1.0,\"wind_kph\":1.0,\"observed_at\":\"2026-11-09T20:27:21.165866Z\"}\n",
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "negative",
+          "endpoint": "weather.create",
+          "expected": {
+            "status": [
+              409
+            ]
+          },
+          "id": "weather.create.duplicate",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 409
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "weather.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "weather.get.ok",
+          "ms": 1,
+          "note": "$.humidity: expected integer/null, got float",
+          "observed": {
+            "body": "{\"id\":11,\"city\":\"llmlab city 25b54fc7\",\"country\":\"llmlab country\",\"temperature_c\":1.0,\"condition\":\"sunny\",\"humidity\":1.0,\"wind_kph\":1.0,\"observed_at\":\"2026-11-09T20:27:21.188758Z\"}\n",
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "weather.replace",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "weather.replace.ok",
+          "ms": 2,
+          "note": "$.humidity: expected integer/null, got float",
+          "observed": {
+            "body": "{\"id\":12,\"city\":\"llmlab city 42345f25\",\"country\":\"llmlab country\",\"temperature_c\":1.0,\"condition\":\"sunny\",\"humidity\":1.0,\"wind_kph\":1.0,\"observed_at\":\"2026-11-09T20:27:21.198189Z\"}\n",
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "weather.replace",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "weather.replace.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "weather.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "weather.replace.invalid.missing",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "weather.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "weather.replace.invalid.too_long",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "weather.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "weather.replace.invalid.enum",
+          "ms": 3,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"id\":16,\"city\":\"llmlab city 486bd8b0\",\"country\":\"llmlab country\",\"temperature_c\":1.0,\"condition\":\"llmlab-not-an-option\",\"humidity\":1.0,\"wind_kph\":1.0,\"observed_at\":\"2026-11-09T20:27:21.221246Z\"}\n",
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "weather.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "weather.delete.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 204
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "weather.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "weather.delete.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "weather.recent",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "weather.recent.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 18,
+        "agent_pass_rate": 0.6666666666666666,
+        "agent_passed": 12,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 3,
+            "passed": 3
+          },
+          "functional": {
+            "n": 8,
+            "passed": 4
+          },
+          "negative": {
+            "n": 1,
+            "passed": 1
+          },
+          "validation": {
+            "n": 6,
+            "passed": 4
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.6666666666666666,
+        "probes_exploited": 0,
+        "probes_skipped": 1,
+        "probes_tested": 0,
+        "regression_pass_rate": null,
+        "sec_pass": null,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.6666666666666666
+      },
+      "not_measured_reason": null,
+      "probes": [
+        {
+          "cwe": "cwe-89",
+          "endpoint": "weather.list",
+          "evidence": "precondition checks did not pass: weather.list.ok",
+          "id": "probe.weather.sqli",
+          "kind": "sqli_boolean",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        }
+      ],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1017,
+  "loc_model": 1017,
+  "model": "claude-sonnet-5-5",
+  "model_id": "local-anthropic/claude-sonnet-5-5",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "4b5a7bee6afc48dd875b71410c4129fcd24437394d2d6e7d0052f61dd337d657",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-09T20:23:51.825437+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "afed1882-2d75-41ad-982c-1d1ddfd043ff",
+  "task": "api_weather_display@1",
+  "tokens_used": 355914,
+  "tree_hash": "74331bd1b6c59eb70d66d4a8b6d750f692cc4a1477124bc3d32b145262c005ab",
+  "truncated": false,
+  "unit": "task:api_weather_display@1",
+  "usable": true
+}

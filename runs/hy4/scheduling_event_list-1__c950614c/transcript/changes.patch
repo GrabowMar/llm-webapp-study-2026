@@ -1,0 +1,2852 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..f8e338d
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,9 @@
++**/node_modules/
++**/__pycache__/
++**/*.py[cod]
++.venv/
++venv/
++frontend/dist/
++data/*.db
++data/*.db-wal
++data/*.db-shm
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..f81ed61 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,221 @@
+-"""Flask entry point."""
++"""Shared event calendar: Flask API + static frontend."""
+ 
++from __future__ import annotations
++
++import functools
++import os
++import secrets
++import sqlite3
++from datetime import date, datetime, timezone
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
++DB_PATH = DATA_DIR / "calendar.db"
+ 
+ app = Flask(__name__, static_folder=None)
++app.url_map.strict_slashes = False
++EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
++
++
++class ApiError(Exception):
++    def __init__(self, status: int, message: str, errors: dict | None = None):
++        super().__init__(message)
++        self.status = status
++        self.message = message
++        self.errors = errors or {}
++
++    def payload(self) -> dict:
++        body: dict = {"message": self.message}
++        if self.errors:
++            body["errors"] = self.errors
++        return body
++
++
++@app.errorhandler(ApiError)
++def handle_api_error(exc: ApiError):
++    return jsonify(exc.payload()), exc.status
++
++
++@app.errorhandler(404)
++def handle_404(_exc):
++    if request.path.startswith("/api/"):
++        return jsonify({"message": "Not found."}), 404
++    return send_from_directory(DIST, "index.html")
++
++
++@app.errorhandler(405)
++def handle_405(_exc):
++    return jsonify({"message": "Method not allowed."}), 405
++
++
++@app.after_request
++def add_cors(response):
++    response.headers.setdefault("Access-Control-Allow-Origin", "*")
++    response.headers.setdefault("Access-Control-Allow-Headers", "Authorization, Content-Type")
++    response.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
++    return response
++
++
++def db() -> sqlite3.Connection:
++    if "db" not in g:
++        conn = sqlite3.connect(DB_PATH, timeout=30)
++        conn.row_factory = sqlite3.Row
++        conn.execute("PRAGMA foreign_keys = ON")
++        conn.execute("PRAGMA busy_timeout = 10000")
++        g.db = conn
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc):
++    conn = g.pop("db", None)
++    if conn is not None:
++        conn.close()
++
++
++def init_db() -> None:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH, timeout=30)
++    try:
++        conn.execute("PRAGMA journal_mode = WAL")
++        conn.executescript(
++            """
++            CREATE TABLE IF NOT EXISTS users (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
++                password_hash TEXT NOT NULL
++            );
++            CREATE TABLE IF NOT EXISTS tokens (
++                token TEXT PRIMARY KEY,
++                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++                username TEXT NOT NULL
++            );
++            CREATE TABLE IF NOT EXISTS events (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                title TEXT NOT NULL,
++                description TEXT NOT NULL DEFAULT '',
++                location TEXT NOT NULL DEFAULT '',
++                start_time TEXT NOT NULL,
++                end_time TEXT NOT NULL,
++                start_ts INTEGER NOT NULL,
++                end_ts INTEGER NOT NULL,
++                created_at TEXT NOT NULL,
++                created_by TEXT NOT NULL
++            );
++            CREATE INDEX IF NOT EXISTS idx_events_start_ts ON events(start_ts);
++            """
++        )
++        conn.commit()
++    finally:
++        conn.close()
++
++
++def to_micros(moment: datetime) -> int:
++    delta = moment.astimezone(timezone.utc) - EPOCH
++    return (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
++
++
++def format_utc(moment: datetime) -> str:
++    moment = moment.astimezone(timezone.utc)
++    text = moment.strftime("%Y-%m-%dT%H:%M:%S")
++    if moment.microsecond:
++        text += f".{moment.microsecond:06d}".rstrip("0")
++    return text + "Z"
++
++
++def parse_datetime(value: object, field: str) -> datetime:
++    if not isinstance(value, str) or not value.strip():
++        raise ApiError(400, "Invalid event data.", {field: f"{field} is required."})
++    text = value.strip()
++    if text.endswith(("Z", "z")):
++        text = text[:-1] + "+00:00"
++    try:
++        moment = datetime.fromisoformat(text)
++    except ValueError:
++        raise ApiError(
++            400, "Invalid event data.", {field: f"{field} must be a valid ISO 8601 date-time."}
++        )
++    if moment.tzinfo is None:
++        moment = moment.replace(tzinfo=timezone.utc)
++    return moment.astimezone(timezone.utc)
++
++
++def parse_bound(value: str, field: str, is_end: bool) -> int:
++    try:
++        day = date.fromisoformat(value.strip())
++    except ValueError:
++        return to_micros(parse_datetime(value, field))
++    moment = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
++    if is_end:
++        moment = moment.replace(hour=23, minute=59, second=59, microsecond=999999)
++    return to_micros(moment)
++
++
++def event_dict(row: sqlite3.Row) -> dict:
++    return {
++        "id": row["id"],
++        "title": row["title"],
++        "description": row["description"],
++        "location": row["location"],
++        "start_time": row["start_time"],
++        "end_time": row["end_time"],
++        "created_at": row["created_at"],
++        "created_by": row["created_by"],
++    }
++
++
++def body_object() -> dict:
++    body = request.get_json(silent=True)
++    if not isinstance(body, dict):
++        raise ApiError(400, "A JSON object is required.")
++    return body
++
++
++def optional_text(body: dict, field: str) -> str:
++    value = body.get(field)
++    if value is None:
++        return ""
++    if not isinstance(value, str):
++        raise ApiError(400, "Invalid event data.", {field: f"{field} must be a string."})
++    return value
++
++
++def require_auth(view):
++    @functools.wraps(view)
++    def wrapped(*args, **kwargs):
++        header = request.headers.get("Authorization", "")
++        parts = header.split()
++        if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
++            raise ApiError(401, "Authentication required.")
++        row = db().execute(
++            "SELECT user_id, username FROM tokens WHERE token = ?", (parts[1],)
++        ).fetchone()
++        if row is None:
++            raise ApiError(401, "Invalid or expired token.")
++        g.username = row["username"]
++        g.user_id = row["user_id"]
++        return view(*args, **kwargs)
++
++    return wrapped
++
++
++def validate_credentials(body: dict) -> tuple[str, str]:
++    errors: dict = {}
++    username = body.get("username")
++    password = body.get("password")
++    if not isinstance(username, str) or not username.strip():
++        errors["username"] = "Username is required."
++    elif len(username.strip()) > 150:
++        errors["username"] = "Username must be 150 characters or fewer."
++    if not isinstance(password, str) or not password:
++        errors["password"] = "Password is required."
++    if errors:
++        raise ApiError(400, "Invalid account data.", errors)
++    return username.strip(), password
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +223,215 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    body = body_object()
++    username, password = validate_credentials(body)
++    conn = db()
++    if conn.execute(
++        "SELECT 1 FROM users WHERE username = ? COLLATE NOCASE", (username,)
++    ).fetchone():
++        raise ApiError(409, "Username is already taken.", {"username": "Username is already taken."})
++    cur = conn.execute(
++        "INSERT INTO users (username, password_hash) VALUES (?, ?)",
++        (username, generate_password_hash(password)),
++    )
++    token = secrets.token_urlsafe(32)
++    conn.execute(
++        "INSERT INTO tokens (token, user_id, username) VALUES (?, ?, ?)",
++        (token, cur.lastrowid, username),
++    )
++    conn.commit()
++    return jsonify({"username": username, "token": token}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    body = body_object()
++    username, password = validate_credentials(body)
++    row = db().execute(
++        "SELECT id, username, password_hash FROM users WHERE username = ? COLLATE NOCASE",
++        (username,),
++    ).fetchone()
++    if row is None or not check_password_hash(row["password_hash"], password):
++        raise ApiError(401, "Invalid username or password.")
++    token = secrets.token_urlsafe(32)
++    conn = db()
++    conn.execute(
++        "INSERT INTO tokens (token, user_id, username) VALUES (?, ?, ?)",
++        (token, row["id"], row["username"]),
++    )
++    conn.commit()
++    return jsonify({"token": token, "username": row["username"]}), 200
++
++
++@app.get("/api/auth/me")
++@require_auth
++def me():
++    return jsonify({"username": g.username})
++
++
++@app.post("/api/auth/logout")
++@require_auth
++def logout():
++    token = request.headers.get("Authorization", "").split()[1]
++    conn = db()
++    conn.execute("DELETE FROM tokens WHERE token = ?", (token,))
++    conn.commit()
++    return jsonify({"message": "Signed out."})
++
++
++@app.get("/api/events")
++def list_events():
++    clauses: list[str] = []
++    params: list = []
++    if request.args.get("start_date"):
++        start_bound = parse_bound(request.args["start_date"], "start_date", False)
++        clauses.append("end_ts >= ?")
++        params.append(start_bound)
++    if request.args.get("end_date"):
++        end_bound = parse_bound(request.args["end_date"], "end_date", True)
++        clauses.append("start_ts <= ?")
++        params.append(end_bound)
++    where = " WHERE " + " AND ".join(clauses) if clauses else ""
++    conn = db()
++    rows = conn.execute(
++        f"SELECT * FROM events{where} ORDER BY start_ts ASC, id ASC", params
++    ).fetchall()
++    items = [event_dict(row) for row in rows]
++    return jsonify({"items": items, "total": len(items)})
++
++
++@app.get("/api/events/<int:event_id>")
++def get_event(event_id: int):
++    row = db().execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
++    if row is None:
++        raise ApiError(404, "Event not found.")
++    return jsonify(event_dict(row))
++
++
++def event_fields(body: dict) -> dict:
++    errors: dict = {}
++
++    title = body.get("title")
++    if not isinstance(title, str) or not title.strip():
++        errors["title"] = "Title is required."
++    elif len(title) > 255:
++        errors["title"] = "Title must be 255 characters or fewer."
++
++    start = end = None
++    try:
++        start = parse_datetime(body.get("start_time"), "start_time")
++    except ApiError as exc:
++        errors.update(exc.errors)
++    try:
++        end = parse_datetime(body.get("end_time"), "end_time")
++    except ApiError as exc:
++        errors.update(exc.errors)
++
++    description = ""
++    location = ""
++    try:
++        description = optional_text(body, "description")
++    except ApiError as exc:
++        errors.update(exc.errors)
++    try:
++        location = optional_text(body, "location")
++    except ApiError as exc:
++        errors.update(exc.errors)
++
++    if errors:
++        raise ApiError(400, "Invalid event data.", errors)
++    if end < start:
++        raise ApiError(
++            400, "Invalid event data.", {"end_time": "End time must not be before start time."}
++        )
++    return {
++        "title": title.strip(),
++        "description": description,
++        "location": location,
++        "start_time": format_utc(start),
++        "end_time": format_utc(end),
++        "start_ts": to_micros(start),
++        "end_ts": to_micros(end),
++    }
++
++
++@app.post("/api/events")
++@require_auth
++def create_event():
++    fields = event_fields(body_object())
++    conn = db()
++    cur = conn.execute(
++        """INSERT INTO events
++           (title, description, location, start_time, end_time, start_ts, end_ts, created_at, created_by)
++           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
++        (
++            fields["title"],
++            fields["description"],
++            fields["location"],
++            fields["start_time"],
++            fields["end_time"],
++            fields["start_ts"],
++            fields["end_ts"],
++            format_utc(datetime.now(timezone.utc)),
++            g.username,
++        ),
++    )
++    conn.commit()
++    row = conn.execute("SELECT * FROM events WHERE id = ?", (cur.lastrowid,)).fetchone()
++    return jsonify(event_dict(row)), 201
++
++
++@app.put("/api/events/<int:event_id>")
++@require_auth
++def update_event(event_id: int):
++    conn = db()
++    existing = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
++    if existing is None:
++        raise ApiError(404, "Event not found.")
++    fields = event_fields(body_object())
++    conn.execute(
++        """UPDATE events SET title = ?, description = ?, location = ?,
++           start_time = ?, end_time = ?, start_ts = ?, end_ts = ? WHERE id = ?""",
++        (
++            fields["title"],
++            fields["description"],
++            fields["location"],
++            fields["start_time"],
++            fields["end_time"],
++            fields["start_ts"],
++            fields["end_ts"],
++            event_id,
++        ),
++    )
++    conn.commit()
++    row = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
++    return jsonify(event_dict(row))
++
++
++@app.delete("/api/events/<int:event_id>")
++@require_auth
++def delete_event(event_id: int):
++    conn = db()
++    cur = conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
++    conn.commit()
++    if cur.rowcount == 0:
++        raise ApiError(404, "Event not found.")
++    return "", 204
++
++
++@app.route("/api/<path:_path>", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
++def api_not_found(_path: str):
++    raise ApiError(404, "Not found.")
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
++
++
++init_db()
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..ac472d9 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Event Calendar</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..7a92a2a 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,10 +10,65 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "^4.3.5",
++        "@types/react": "^19.3.0",
++        "@types/react-dom": "^19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "^4.3.5",
++        "typescript": "^5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +359,376 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,6 +759,13 @@
+         }
+       }
+     },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +776,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +823,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1113,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -789,6 +1262,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1300,20 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..c775b4c 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,20 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "tsc --noEmit && vite build",
++    "typecheck": "tsc --noEmit"
+   },
+   "dependencies": {
+     "react": "19.3.1",
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "4.3.5",
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "4.3.5",
++    "typescript": "5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..6090552 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,424 @@
++import { useCallback, useEffect, useState } from "react";
++import {
++  ApiError,
++  clearSession,
++  fetchEvents,
++  fetchMe,
++  getToken,
++  login,
++  logout,
++  register,
++  storeSession,
++  type CalendarEvent,
++} from "./api";
++import AuthForm from "./components/AuthForm";
++import { DayView, MonthView, WeekView } from "./components/CalendarViews";
++import EventDetails from "./components/EventDetails";
++import EventForm from "./components/EventForm";
++import Modal from "./components/Modal";
++import {
++  dateKey,
++  eventOverlapsPeriod,
++  getPeriod,
++  periodTitle,
++  shiftPeriod,
++  type ViewMode,
++} from "./date";
++
++const MODES: ViewMode[] = ["month", "week", "day"];
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [username, setUsername] = useState<string | null>(null);
++  const [authReady, setAuthReady] = useState(false);
++  const [authMode, setAuthMode] = useState<"login" | "register" | null>(null);
++  const [mode, setMode] = useState<ViewMode>("month");
++  const [anchor, setAnchor] = useState(() => new Date());
++  const [events, setEvents] = useState<CalendarEvent[]>([]);
++  const [loading, setLoading] = useState(true);
++  const [loadError, setLoadError] = useState("");
++  const [selected, setSelected] = useState<CalendarEvent | null>(null);
++  const [formState, setFormState] = useState<{
++    event: CalendarEvent | null;
++    defaultStart?: Date;
++  } | null>(null);
++  const [confirmSignOut, setConfirmSignOut] = useState(false);
++  const [toast, setToast] = useState("");
++
++  const loadEvents = useCallback(async () => {
++    const period = getPeriod(anchor, mode);
++    const startDate = dateKey(period.start);
++    const endDate = dateKey(period.end);
++    setLoading(true);
++    setLoadError("");
++    try {
++      const result = await fetchEvents(startDate, endDate);
++      setEvents(
++        result.items.filter((item) => eventOverlapsPeriod(item, period)),
++      );
++    } catch (error) {
++      setLoadError(
++        error instanceof ApiError
++          ? error.message
++          : "Could not load events. Please try again.",
++      );
++    } finally {
++      setLoading(false);
++    }
++  }, [anchor, mode]);
++
++  useEffect(() => {
++    loadEvents();
++  }, [loadEvents]);
++
++  useEffect(() => {
++    const token = getToken();
++    if (!token) {
++      setAuthReady(true);
++      return;
++    }
++    fetchMe()
++      .then((result) => setUsername(result.username))
++      .catch(() => {
++        clearSession();
++        setUsername(null);
++      })
++      .finally(() => setAuthReady(true));
++  }, []);
++
++  useEffect(() => {
++    if (!toast) return;
++    const timer = window.setTimeout(() => setToast(""), 3500);
++    return () => window.clearTimeout(timer);
++  }, [toast]);
++
++  const handleAuthenticated = (token: string, name: string) => {
++    storeSession(token, name);
++    setUsername(name);
++    setAuthMode(null);
++    setToast(`Welcome, ${name}!`);
++  };
++
++  const handleSignOut = async () => {
++    try {
++      await logout();
++    } catch {
++      // clearing locally is enough even if the server request fails
++    }
++    clearSession();
++    setUsername(null);
++    setConfirmSignOut(false);
++    setSelected(null);
++    setFormState(null);
++    setToast("Signed out.");
++  };
++
++  const handleSaved = () => {
++    setFormState(null);
++    setSelected(null);
++    loadEvents();
++    setToast(formState?.event ? "Event updated." : "Event created.");
++  };
++
++  const handleDeleted = () => {
++    setSelected(null);
++    loadEvents();
++    setToast("Event deleted.");
++  };
++
++  if (!authReady) {
++    return (
++      <div className="flex min-h-screen items-center justify-center text-slate-500">
++        Loading…
++      </div>
++    );
++  }
++
++  if (authMode && !username) {
++    return (
++      <AuthForm
++        mode={authMode}
++        submit={authMode === "login" ? login : register}
++        onSuccess={handleAuthenticated}
++        onSwitchMode={setAuthMode}
++        onCancel={() => setAuthMode(null)}
++      />
++    );
++  }
++
++  const signedIn = username !== null;
++
++  return (
++    <div className="min-h-screen bg-slate-50 text-slate-900">
++      <header className="border-b border-slate-200 bg-white">
++        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
++          <div className="flex items-center gap-2">
++            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm">
++              <svg
++                className="h-5 w-5"
++                viewBox="0 0 24 24"
++                fill="none"
++                stroke="currentColor"
++                strokeWidth="2"
++              >
++                <rect x="3" y="5" width="18" height="16" rx="2" />
++                <path d="M3 10h18M8 3v4M16 3v4" strokeLinecap="round" />
++              </svg>
++            </div>
++            <span className="text-lg font-bold tracking-tight">
++              Event Calendar
++            </span>
++          </div>
++
++          <div className="flex items-center gap-2">
++            {username ? (
++              <>
++                <span className="hidden text-sm text-slate-500 sm:inline">
++                  Signed in as
++                </span>
++                <span className="rounded-full bg-indigo-50 px-3 py-1 text-sm font-semibold text-indigo-700">
++                  {username}
++                </span>
++                <button
++                  type="button"
++                  onClick={() => setConfirmSignOut(true)}
++                  className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
++                >
++                  Sign out
++                </button>
++              </>
++            ) : (
++              <>
++                <button
++                  type="button"
++                  onClick={() => setAuthMode("login")}
++                  className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
++                >
++                  Sign in
++                </button>
++                <button
++                  type="button"
++                  onClick={() => setAuthMode("register")}
++                  className="rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white transition hover:bg-indigo-700"
++                >
++                  Register
++                </button>
++              </>
++            )}
++          </div>
++        </div>
++      </header>
++
++      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
++        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
++          <div className="flex items-center gap-2">
++            <button
++              type="button"
++              aria-label="Previous period"
++              onClick={() => setAnchor(shiftPeriod(anchor, mode, -1))}
++              className="rounded-lg border border-slate-300 bg-white p-2 text-slate-600 transition hover:bg-slate-100"
++            >
++              <svg className="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2">
++                <path d="M12 4l-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
++              </svg>
++            </button>
++            <button
++              type="button"
++              aria-label="Next period"
++              onClick={() => setAnchor(shiftPeriod(anchor, mode, 1))}
++              className="rounded-lg border border-slate-300 bg-white p-2 text-slate-600 transition hover:bg-slate-100"
++            >
++              <svg className="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2">
++                <path d="M8 4l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
++              </svg>
++            </button>
++            <button
++              type="button"
++              onClick={() => setAnchor(new Date())}
++              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
++            >
++              Today
++            </button>
++            <h2 className="ml-2 text-lg font-semibold text-slate-900 sm:text-xl">
++              {periodTitle(anchor, mode)}
++            </h2>
++          </div>
++
++          <div className="flex items-center gap-2">
++            <div className="flex rounded-lg border border-slate-300 bg-white p-0.5">
++              {MODES.map((option) => (
++                <button
++                  key={option}
++                  type="button"
++                  onClick={() => setMode(option)}
++                  className={`rounded-md px-3 py-1.5 text-sm font-medium capitalize transition ${
++                    mode === option
++                      ? "bg-indigo-600 text-white shadow-sm"
++                      : "text-slate-600 hover:bg-slate-100"
++                  }`}
++                >
++                  {option}
++                </button>
++              ))}
++            </div>
++            {signedIn && (
++              <button
++                type="button"
++                onClick={() =>
++                  setFormState({ event: null, defaultStart: new Date() })
++                }
++                className="flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700"
++              >
++                <svg className="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2">
++                  <path d="M10 4v12M4 10h12" strokeLinecap="round" />
++                </svg>
++                New event
++              </button>
++            )}
++          </div>
++        </div>
++
++        {!signedIn && (
++          <div className="mb-4 rounded-lg border border-indigo-100 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">
++            You are browsing as a guest.{" "}
++            <button
++              type="button"
++              onClick={() => setAuthMode("login")}
++              className="font-semibold underline"
++            >
++              Sign in
++            </button>{" "}
++            to create, edit or delete events.
++          </div>
++        )}
++
++        {loadError && (
++          <div className="mb-4 flex items-center justify-between rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
++            <span>{loadError}</span>
++            <button
++              type="button"
++              onClick={loadEvents}
++              className="font-semibold underline"
++            >
++              Retry
++            </button>
++          </div>
++        )}
++
++        {loading ? (
++          <div className="rounded-xl border border-slate-200 bg-white py-20 text-center text-slate-400">
++            Loading events…
++          </div>
++        ) : (
++          <>
++            {mode === "month" && (
++              <MonthView
++                anchor={anchor}
++                events={events}
++                signedIn={signedIn}
++                onSelect={setSelected}
++                onCreateAt={(day) =>
++                  setFormState({ event: null, defaultStart: new Date(day.getTime() + 9 * 3_600_000) })
++                }
++                onShowDay={(day) => {
++                  setAnchor(day);
++                  setMode("day");
++                }}
++              />
++            )}
++            {mode === "week" && (
++              <WeekView
++                anchor={anchor}
++                events={events}
++                signedIn={signedIn}
++                onSelect={setSelected}
++                onCreateAt={(date) =>
++                  setFormState({ event: null, defaultStart: date })
++                }
++                onShowDay={(day) => {
++                  setAnchor(day);
++                  setMode("day");
++                }}
++              />
++            )}
++            {mode === "day" && (
++              <DayView
++                anchor={anchor}
++                events={events}
++                signedIn={signedIn}
++                onSelect={setSelected}
++                onCreateAt={(date) =>
++                  setFormState({ event: null, defaultStart: date })
++                }
++                onShowDay={(day) => setAnchor(day)}
++              />
++            )}
++            {events.length === 0 && !loadError && (
++              <p className="mt-3 text-center text-sm text-slate-400">
++                No events in this {mode}.
++              </p>
++            )}
++          </>
++        )}
++      </main>
++
++      <footer className="mx-auto max-w-7xl px-4 pb-8 text-center text-xs text-slate-400 sm:px-6">
++        All times shown in UTC.
++      </footer>
++
++      {selected && (
++        <EventDetails
++          event={selected}
++          signedIn={signedIn}
++          onEdit={() => setFormState({ event: selected })}
++          onDeleted={handleDeleted}
++          onClose={() => setSelected(null)}
++        />
++      )}
++
++      {formState && (
++        <EventForm
++          key={formState.event?.id ?? `new-${formState.defaultStart?.getTime() ?? 0}`}
++          event={formState.event}
++          defaultStart={formState.defaultStart}
++          onSaved={handleSaved}
++          onClose={() => setFormState(null)}
++        />
++      )}
++
++      {confirmSignOut && (
++        <Modal
++          title="Sign out"
++          onClose={() => setConfirmSignOut(false)}
++          footer={
++            <>
++              <button
++                type="button"
++                onClick={() => setConfirmSignOut(false)}
++                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
++              >
++                Cancel
++              </button>
++              <button
++                type="button"
++                onClick={handleSignOut}
++                className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700"
++              >
++                Sign out
++              </button>
++            </>
++          }
++        >
++          <p className="text-sm text-slate-600">
++            Are you sure you want to sign out, {username}?
++          </p>
++        </Modal>
++      )}
++
++      {toast && (
++        <div className="fixed bottom-5 right-5 z-[60] rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white shadow-lg">
++          {toast}
++        </div>
++      )}
++    </div>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..f3535ab
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,154 @@
++export interface CalendarEvent {
++  id: number;
++  title: string;
++  description: string;
++  location: string;
++  start_time: string;
++  end_time: string;
++  created_at: string;
++  created_by: string;
++}
++
++export interface EventInput {
++  title: string;
++  description: string;
++  location: string;
++  start_time: string;
++  end_time: string;
++}
++
++export class ApiError extends Error {
++  status: number;
++  errors: Record<string, string>;
++
++  constructor(status: number, message: string, errors: Record<string, string> = {}) {
++    super(message);
++    this.status = status;
++    this.errors = errors;
++  }
++}
++
++const TOKEN_KEY = "event-calendar-token";
++const USERNAME_KEY = "event-calendar-username";
++
++export function getToken(): string | null {
++  return localStorage.getItem(TOKEN_KEY);
++}
++
++export function getStoredUsername(): string | null {
++  return localStorage.getItem(USERNAME_KEY);
++}
++
++export function storeSession(token: string, username: string): void {
++  localStorage.setItem(TOKEN_KEY, token);
++  localStorage.setItem(USERNAME_KEY, username);
++}
++
++export function clearSession(): void {
++  localStorage.removeItem(TOKEN_KEY);
++  localStorage.removeItem(USERNAME_KEY);
++}
++
++async function parseError(response: Response): Promise<ApiError> {
++  let payload: { message?: string; errors?: Record<string, string> } = {};
++  try {
++    payload = await response.json();
++  } catch {
++    // response had no JSON body
++  }
++  return new ApiError(
++    response.status,
++    payload.message ?? `Request failed (${response.status}).`,
++    payload.errors ?? {},
++  );
++}
++
++async function request<T>(
++  path: string,
++  options: RequestInit = {},
++  authenticated = false,
++): Promise<T> {
++  const headers = new Headers(options.headers);
++  if (options.body !== undefined && !headers.has("Content-Type")) {
++    headers.set("Content-Type", "application/json");
++  }
++  const token = getToken();
++  if (authenticated && token) {
++    headers.set("Authorization", `Bearer ${token}`);
++  }
++  let response: Response;
++  try {
++    response = await fetch(path, { ...options, headers });
++  } catch {
++    throw new ApiError(0, "Could not reach the server. Please try again.");
++  }
++  if (!response.ok) {
++    throw await parseError(response);
++  }
++  if (response.status === 204) {
++    return undefined as T;
++  }
++  return (await response.json()) as T;
++}
++
++export async function register(
++  username: string,
++  password: string,
++): Promise<{ token: string; username: string }> {
++  return request("/api/auth/register", {
++    method: "POST",
++    body: JSON.stringify({ username, password }),
++  });
++}
++
++export async function login(
++  username: string,
++  password: string,
++): Promise<{ token: string; username: string }> {
++  return request("/api/auth/login", {
++    method: "POST",
++    body: JSON.stringify({ username, password }),
++  });
++}
++
++export async function fetchMe(): Promise<{ username: string }> {
++  return request("/api/auth/me", {}, true);
++}
++
++export async function logout(): Promise<void> {
++  await request("/api/auth/logout", { method: "POST" }, true);
++}
++
++export async function fetchEvents(
++  startDate?: string,
++  endDate?: string,
++): Promise<{ items: CalendarEvent[]; total: number }> {
++  const params = new URLSearchParams();
++  if (startDate) params.set("start_date", startDate);
++  if (endDate) params.set("end_date", endDate);
++  const query = params.toString();
++  return request(`/api/events${query ? `?${query}` : ""}`);
++}
++
++export async function createEvent(input: EventInput): Promise<CalendarEvent> {
++  return request(
++    "/api/events",
++    { method: "POST", body: JSON.stringify(input) },
++    true,
++  );
++}
++
++export async function updateEvent(
++  id: number,
++  input: EventInput,
++): Promise<CalendarEvent> {
++  return request(
++    `/api/events/${id}`,
++    { method: "PUT", body: JSON.stringify(input) },
++    true,
++  );
++}
++
++export async function deleteEvent(id: number): Promise<void> {
++  return request(`/api/events/${id}`, { method: "DELETE" }, true);
++}
+diff --git a/frontend/src/components/AuthForm.tsx b/frontend/src/components/AuthForm.tsx
+new file mode 100644
+index 0000000..8425232
+--- /dev/null
++++ b/frontend/src/components/AuthForm.tsx
+@@ -0,0 +1,145 @@
++import { useState, type FormEvent } from "react";
++import { ApiError } from "../api";
++
++interface AuthFormProps {
++  mode: "login" | "register";
++  onSuccess: (token: string, username: string) => void;
++  onSwitchMode: (mode: "login" | "register") => void;
++  submit: (
++    username: string,
++    password: string,
++  ) => Promise<{ token: string; username: string }>;
++  onCancel: () => void;
++}
++
++export default function AuthForm({
++  mode,
++  onSuccess,
++  onSwitchMode,
++  submit,
++  onCancel,
++}: AuthFormProps) {
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [errors, setErrors] = useState<Record<string, string>>({});
++  const [message, setMessage] = useState("");
++  const [busy, setBusy] = useState(false);
++
++  const handleSubmit = async (event: FormEvent) => {
++    event.preventDefault();
++    setErrors({});
++    setMessage("");
++    setBusy(true);
++    try {
++      const result = await submit(username.trim(), password);
++      onSuccess(result.token, result.username);
++    } catch (error) {
++      if (error instanceof ApiError) {
++        setErrors(error.errors);
++        setMessage(error.message);
++      } else {
++        setMessage("Something went wrong. Please try again.");
++      }
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  return (
++    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-indigo-50 via-white to-sky-50 p-4">
++      <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 shadow-xl">
++        <div className="mb-6 text-center">
++          <h1 className="text-2xl font-bold text-slate-900">Event Calendar</h1>
++          <p className="mt-1 text-sm text-slate-500">
++            {mode === "login"
++              ? "Sign in to create and manage events."
++              : "Create an account to get started."}
++          </p>
++        </div>
++
++        {message && (
++          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
++            {message}
++          </div>
++        )}
++
++        <form onSubmit={handleSubmit} className="space-y-4">
++          <div>
++            <label
++              htmlFor="auth-username"
++              className="mb-1 block text-sm font-medium text-slate-700"
++            >
++              Username
++            </label>
++            <input
++              id="auth-username"
++              type="text"
++              autoComplete="username"
++              value={username}
++              onChange={(event) => setUsername(event.target.value)}
++              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            />
++            {errors.username && (
++              <p className="mt-1 text-xs text-red-600">{errors.username}</p>
++            )}
++          </div>
++          <div>
++            <label
++              htmlFor="auth-password"
++              className="mb-1 block text-sm font-medium text-slate-700"
++            >
++              Password
++            </label>
++            <input
++              id="auth-password"
++              type="password"
++              autoComplete={
++                mode === "login" ? "current-password" : "new-password"
++              }
++              value={password}
++              onChange={(event) => setPassword(event.target.value)}
++              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
++            />
++            {errors.password && (
++              <p className="mt-1 text-xs text-red-600">{errors.password}</p>
++            )}
++          </div>
++          <button
++            type="submit"
++            disabled={busy}
++            className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
++          >
++            {busy
++              ? "Please wait…"
++              : mode === "login"
++                ? "Sign in"
++                : "Create account"}
++          </button>
++        </form>
++
++        <div className="mt-5 flex items-center justify-between text-sm">
++          <button
++            type="button"
++            onClick={() => {
++              setErrors({});
++              setMessage("");
++              onSwitchMode(mode === "login" ? "register" : "login");
++            }}
++            className="font-medium text-indigo-600 hover:text-indigo-800"
++          >
++            {mode === "login"
++              ? "Need an account? Register"
++              : "Have an account? Sign in"}
++          </button>
++          <button
++            type="button"
++            onClick={onCancel}
++            className="text-slate-500 hover:text-slate-700"
++          >
++            Browse as guest
++          </button>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/CalendarViews.tsx b/frontend/src/components/CalendarViews.tsx
+new file mode 100644
+index 0000000..360d178
+--- /dev/null
++++ b/frontend/src/components/CalendarViews.tsx
+@@ -0,0 +1,400 @@
++import {
++  dateKey,
++  eventsOnDay,
++  formatTime,
++  isToday,
++  monthGridDays,
++  weekDays,
++  WEEKDAY_LABELS,
++  type ViewMode,
++} from "../date";
++import type { CalendarEvent } from "../api";
++
++const PALETTE = [
++  {
++    chip: "border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100",
++    block: "border-indigo-500 bg-indigo-100 text-indigo-900 hover:bg-indigo-200",
++    dot: "bg-indigo-500",
++  },
++  {
++    chip: "border-sky-200 bg-sky-50 text-sky-800 hover:bg-sky-100",
++    block: "border-sky-500 bg-sky-100 text-sky-900 hover:bg-sky-200",
++    dot: "bg-sky-500",
++  },
++  {
++    chip: "border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100",
++    block: "border-emerald-500 bg-emerald-100 text-emerald-900 hover:bg-emerald-200",
++    dot: "bg-emerald-500",
++  },
++  {
++    chip: "border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100",
++    block: "border-amber-500 bg-amber-100 text-amber-900 hover:bg-amber-200",
++    dot: "bg-amber-500",
++  },
++  {
++    chip: "border-rose-200 bg-rose-50 text-rose-800 hover:bg-rose-100",
++    block: "border-rose-500 bg-rose-100 text-rose-900 hover:bg-rose-200",
++    dot: "bg-rose-500",
++  },
++  {
++    chip: "border-violet-200 bg-violet-50 text-violet-800 hover:bg-violet-100",
++    block: "border-violet-500 bg-violet-100 text-violet-900 hover:bg-violet-200",
++    dot: "bg-violet-500",
++  },
++];
++
++export function colorFor(id: number) {
++  return PALETTE[Math.abs(id) % PALETTE.length];
++}
++
++interface ViewProps {
++  anchor: Date;
++  events: CalendarEvent[];
++  signedIn: boolean;
++  onSelect: (event: CalendarEvent) => void;
++  onCreateAt: (date: Date) => void;
++  onShowDay: (date: Date) => void;
++}
++
++const HOUR_HEIGHT = 52;
++const DAY_MS = 86_400_000;
++
++interface Segment {
++  event: CalendarEvent;
++  top: number;
++  height: number;
++  column: number;
++  columns: number;
++}
++
++function daySegments(events: CalendarEvent[], day: Date): Segment[] {
++  const dayStart = Date.UTC(
++    day.getUTCFullYear(),
++    day.getUTCMonth(),
++    day.getUTCDate(),
++  );
++  const dayEnd = dayStart + DAY_MS;
++  const segments: Omit<Segment, "column" | "columns">[] = [];
++
++  for (const event of events) {
++    const eventStart = new Date(event.start_time).getTime();
++    const eventEnd = new Date(event.end_time).getTime();
++    const start = Math.max(eventStart, dayStart);
++    const end = Math.min(eventEnd, dayEnd);
++    if (end <= start) continue;
++    const top = ((start - dayStart) / 3_600_000) * HOUR_HEIGHT;
++    const height = Math.max(((end - start) / 3_600_000) * HOUR_HEIGHT, 22);
++    segments.push({ event, top, height });
++  }
++
++  segments.sort((a, b) => a.top - b.top || a.event.id - b.event.id);
++
++  const clusters: (typeof segments)[] = [];
++  let current: typeof segments = [];
++  let clusterEnd = -Infinity;
++  for (const segment of segments) {
++    if (current.length && segment.top >= clusterEnd) {
++      clusters.push(current);
++      current = [];
++      clusterEnd = -Infinity;
++    }
++    current.push(segment);
++    clusterEnd = Math.max(clusterEnd, segment.top + segment.height);
++  }
++  if (current.length) clusters.push(current);
++
++  const laidOut: Segment[] = [];
++  for (const cluster of clusters) {
++    const columnEnds: number[] = [];
++    const placed = cluster.map((segment) => {
++      let column = columnEnds.findIndex(
++        (end) => end <= segment.top + 0.01,
++      );
++      if (column === -1) {
++        column = columnEnds.length;
++        columnEnds.push(0);
++      }
++      columnEnds[column] = segment.top + segment.height;
++      return { ...segment, column };
++    });
++    const columns = columnEnds.length;
++    placed.forEach((segment) => {
++      laidOut.push({ ...segment, columns });
++    });
++  }
++  return laidOut;
++}
++
++function EventChip({
++  event,
++  onClick,
++  showTime = true,
++}: {
++  event: CalendarEvent;
++  onClick: () => void;
++  showTime?: boolean;
++}) {
++  const color = colorFor(event.id);
++  return (
++    <button
++      type="button"
++      onClick={(click) => {
++        click.stopPropagation();
++        onClick();
++      }}
++      title={event.title}
++      className={`flex w-full items-center gap-1 truncate rounded border-l-2 px-1.5 py-0.5 text-left text-xs font-medium transition ${color.chip}`}
++    >
++      {showTime && (
++        <span className="shrink-0 opacity-70">
++          {formatTime(event.start_time)}
++        </span>
++      )}
++      <span className="truncate">{event.title}</span>
++    </button>
++  );
++}
++
++export function MonthView({
++  anchor,
++  events,
++  signedIn,
++  onSelect,
++  onCreateAt,
++  onShowDay,
++}: ViewProps) {
++  const days = monthGridDays(anchor);
++  const currentMonth = anchor.getUTCMonth();
++
++  return (
++    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
++      <div className="grid grid-cols-7 border-b border-slate-200 bg-slate-50">
++        {WEEKDAY_LABELS.map((label) => (
++          <div
++            key={label}
++            className="px-2 py-2 text-center text-xs font-semibold uppercase tracking-wide text-slate-500"
++          >
++            <span className="hidden sm:inline">{label}</span>
++            <span className="sm:hidden">{label.charAt(0)}</span>
++          </div>
++        ))}
++      </div>
++      <div className="grid grid-cols-7">
++        {days.map((day, index) => {
++          const inMonth = day.getUTCMonth() === currentMonth;
++          const dayEvents = eventsOnDay(events, day).sort(
++            (a, b) =>
++              new Date(a.start_time).getTime() -
++              new Date(b.start_time).getTime(),
++          );
++          const visible = dayEvents.slice(0, 3);
++          const extra = dayEvents.length - visible.length;
++          return (
++            <div
++              key={dateKey(day)}
++              onClick={() => {
++                if (signedIn) onCreateAt(day);
++              }}
++              className={`min-h-[92px] border-b border-r border-slate-100 p-1.5 sm:min-h-[116px] ${
++                inMonth ? "bg-white" : "bg-slate-50/60"
++              } ${index % 7 === 6 ? "border-r-0" : ""} ${
++                index >= 35 ? "border-b-0" : ""
++              } ${signedIn ? "cursor-pointer hover:bg-indigo-50/40" : ""}`}
++            >
++              <div className="mb-1 flex items-center justify-between">
++                <span
++                  className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold ${
++                    isToday(day)
++                      ? "bg-indigo-600 text-white"
++                      : inMonth
++                        ? "text-slate-700"
++                        : "text-slate-400"
++                  }`}
++                >
++                  {day.getUTCDate()}
++                </span>
++                {signedIn && (
++                  <span className="hidden text-slate-300 group-hover:text-indigo-400 sm:inline">
++                    +
++                  </span>
++                )}
++              </div>
++              <div className="space-y-1">
++                {visible.map((event) => (
++                  <EventChip
++                    key={event.id}
++                    event={event}
++                    onClick={() => onSelect(event)}
++                  />
++                ))}
++                {extra > 0 && (
++                  <button
++                    type="button"
++                    onClick={(click) => {
++                      click.stopPropagation();
++                      onShowDay(day);
++                    }}
++                    className="w-full rounded px-1.5 py-0.5 text-left text-xs font-medium text-indigo-600 hover:bg-indigo-50"
++                  >
++                    +{extra} more
++                  </button>
++                )}
++              </div>
++            </div>
++          );
++        })}
++      </div>
++    </div>
++  );
++}
++
++function TimeGrid({
++  days,
++  events,
++  signedIn,
++  onSelect,
++  onCreateAt,
++}: Omit<ViewProps, "anchor" | "onShowDay"> & { days: Date[] }) {
++  const hours = Array.from({ length: 24 }, (_, index) => index);
++
++  return (
++    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
++      <div className="grid border-b border-slate-200 bg-slate-50" style={{ gridTemplateColumns: `56px repeat(${days.length}, minmax(0, 1fr))` }}>
++        <div />
++        {days.map((day) => (
++          <div
++            key={dateKey(day)}
++            className="border-l border-slate-200 px-2 py-2 text-center"
++          >
++            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
++              {WEEKDAY_LABELS[
++                (day.getUTCDay() + 6) % 7
++              ]}
++            </div>
++            <div
++              className={`mx-auto mt-0.5 flex h-7 w-7 items-center justify-center rounded-full text-sm font-semibold ${
++                isToday(day) ? "bg-indigo-600 text-white" : "text-slate-800"
++              }`}
++            >
++              {day.getUTCDate()}
++            </div>
++          </div>
++        ))}
++      </div>
++      <div className="max-h-[600px] overflow-y-auto">
++        <div className="grid" style={{ gridTemplateColumns: `56px repeat(${days.length}, minmax(0, 1fr))` }}>
++          <div>
++            {hours.map((hour) => (
++              <div
++                key={hour}
++                className="relative border-b border-slate-100 pr-2 text-right text-[11px] text-slate-400"
++                style={{ height: HOUR_HEIGHT }}
++              >
++                <span className="relative -top-2">
++                  {String(hour).padStart(2, "0")}:00
++                </span>
++              </div>
++            ))}
++          </div>
++          {days.map((day) => {
++            const segments = daySegments(events, day);
++            return (
++              <div
++                key={dateKey(day)}
++                onClick={(click) => {
++                  if (!signedIn) return;
++                  const rect = click.currentTarget.getBoundingClientRect();
++                  const offset = click.clientY - rect.top;
++                  const hour = Math.max(
++                    0,
++                    Math.min(23, Math.floor(offset / HOUR_HEIGHT)),
++                  );
++                  onCreateAt(new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), hour)));
++                }}
++                className={`relative border-l border-slate-100 ${
++                  isToday(day) ? "bg-indigo-50/30" : ""
++                } ${signedIn ? "cursor-pointer" : ""}`}
++                style={{ height: HOUR_HEIGHT * 24 }}
++              >
++                {hours.map((hour) => (
++                  <div
++                    key={hour}
++                    className="pointer-events-none border-b border-slate-100"
++                    style={{ height: HOUR_HEIGHT }}
++                  />
++                ))}
++                {segments.map((segment) => {
++                  const color = colorFor(segment.event.id);
++                  const width = 100 / segment.columns;
++                  return (
++                    <button
++                      key={`${segment.event.id}-${dateKey(day)}`}
++                      type="button"
++                      onClick={(click) => {
++                        click.stopPropagation();
++                        onSelect(segment.event);
++                      }}
++                      title={segment.event.title}
++                      className={`absolute overflow-hidden rounded border-l-4 border-y border-r border-transparent px-1.5 py-0.5 text-left text-xs shadow-sm transition ${color.block}`}
++                      style={{
++                        top: segment.top + 1,
++                        height: Math.max(segment.height - 2, 20),
++                        left: `calc(${segment.column * width}% + 2px)`,
++                        width: `calc(${width}% - 4px)`,
++                        zIndex: 10 + segment.column,
++                      }}
++                    >
++                      <span className="block truncate font-semibold">
++                        {segment.event.title}
++                      </span>
++                      <span className="block truncate opacity-75">
++                        {formatTime(segment.event.start_time)}–
++                        {formatTime(segment.event.end_time)}
++                      </span>
++                    </button>
++                  );
++                })}
++              </div>
++            );
++          })}
++        </div>
++      </div>
++    </div>
++  );
++}
++
++export function WeekView(props: ViewProps) {
++  const days = weekDays(props.anchor);
++  return (
++    <TimeGrid
++      days={days}
++      events={props.events}
++      signedIn={props.signedIn}
++      onSelect={props.onSelect}
++      onCreateAt={props.onCreateAt}
++    />
++  );
++}
++
++export function DayView(props: ViewProps) {
++  const day = new Date(
++    Date.UTC(
++      props.anchor.getUTCFullYear(),
++      props.anchor.getUTCMonth(),
++      props.anchor.getUTCDate(),
++    ),
++  );
++  return (
++    <TimeGrid
++      days={[day]}
++      events={props.events}
++      signedIn={props.signedIn}
++      onSelect={props.onSelect}
++      onCreateAt={props.onCreateAt}
++    />
++  );
++}
++
++export function viewLabel(mode: ViewMode): string {
++  return mode === "month" ? "Month" : mode === "week" ? "Week" : "Day";
++}
+diff --git a/frontend/src/components/EventDetails.tsx b/frontend/src/components/EventDetails.tsx
+new file mode 100644
+index 0000000..deb2ce9
+--- /dev/null
++++ b/frontend/src/components/EventDetails.tsx
+@@ -0,0 +1,137 @@
++import { useState } from "react";
++import { ApiError, deleteEvent, type CalendarEvent } from "../api";
++import { formatDateTime, formatTime } from "../date";
++import Modal from "./Modal";
++
++interface EventDetailsProps {
++  event: CalendarEvent;
++  signedIn: boolean;
++  onEdit: () => void;
++  onDeleted: () => void;
++  onClose: () => void;
++}
++
++export default function EventDetails({
++  event,
++  signedIn,
++  onEdit,
++  onDeleted,
++  onClose,
++}: EventDetailsProps) {
++  const [confirming, setConfirming] = useState(false);
++  const [busy, setBusy] = useState(false);
++  const [message, setMessage] = useState("");
++
++  const handleDelete = async () => {
++    setBusy(true);
++    setMessage("");
++    try {
++      await deleteEvent(event.id);
++      onDeleted();
++    } catch (error) {
++      setMessage(
++        error instanceof ApiError
++          ? error.message
++          : "Could not delete the event. Please try again.",
++      );
++      setBusy(false);
++      setConfirming(false);
++    }
++  };
++
++  return (
++    <Modal
++      title="Event details"
++      onClose={onClose}
++      footer={
++        signedIn ? (
++          confirming ? (
++            <>
++              <span className="mr-auto text-sm font-medium text-slate-700">
++                Delete this event?
++              </span>
++              <button
++                type="button"
++                onClick={() => setConfirming(false)}
++                disabled={busy}
++                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
++              >
++                Cancel
++              </button>
++              <button
++                type="button"
++                onClick={handleDelete}
++                disabled={busy}
++                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-700 disabled:opacity-60"
++              >
++                {busy ? "Deleting…" : "Confirm delete"}
++              </button>
++            </>
++          ) : (
++            <>
++              <button
++                type="button"
++                onClick={() => setConfirming(true)}
++                className="mr-auto rounded-lg border border-red-200 px-4 py-2 text-sm font-medium text-red-600 transition hover:bg-red-50"
++              >
++                Delete
++              </button>
++              <button
++                type="button"
++                onClick={onEdit}
++                className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700"
++              >
++                Edit
++              </button>
++            </>
++          )
++        ) : (
++          <button
++            type="button"
++            onClick={onClose}
++            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
++          >
++            Close
++          </button>
++        )
++      }
++    >
++      {message && (
++        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
++          {message}
++        </div>
++      )}
++      <h3 className="text-xl font-semibold text-slate-900">{event.title}</h3>
++      <dl className="mt-5 space-y-4 text-sm">
++        <div>
++          <dt className="font-medium text-slate-500">When</dt>
++          <dd className="mt-0.5 text-slate-900">
++            {formatDateTime(event.start_time)} – {formatDateTime(event.end_time)}
++            <span className="ml-1 text-slate-400">
++              ({formatTime(event.start_time)}–{formatTime(event.end_time)})
++            </span>
++          </dd>
++        </div>
++        {event.location && (
++          <div>
++            <dt className="font-medium text-slate-500">Location</dt>
++            <dd className="mt-0.5 whitespace-pre-wrap text-slate-900">
++              {event.location}
++            </dd>
++          </div>
++        )}
++        {event.description && (
++          <div>
++            <dt className="font-medium text-slate-500">Description</dt>
++            <dd className="mt-0.5 whitespace-pre-wrap text-slate-900">
++              {event.description}
++            </dd>
++          </div>
++        )}
++        <div className="border-t border-slate-100 pt-3 text-xs text-slate-400">
++          Created by {event.created_by} on {formatDateTime(event.created_at)}
++        </div>
++      </dl>
++    </Modal>
++  );
++}
+diff --git a/frontend/src/components/EventForm.tsx b/frontend/src/components/EventForm.tsx
+new file mode 100644
+index 0000000..0b5bff4
+--- /dev/null
++++ b/frontend/src/components/EventForm.tsx
+@@ -0,0 +1,191 @@
++import { useState, type FormEvent } from "react";
++import {
++  ApiError,
++  createEvent,
++  updateEvent,
++  type CalendarEvent,
++  type EventInput,
++} from "../api";
++import { fromInputValue, toInputValue } from "../date";
++import Modal from "./Modal";
++
++interface EventFormProps {
++  event: CalendarEvent | null;
++  defaultStart?: Date;
++  onSaved: () => void;
++  onClose: () => void;
++}
++
++function defaultInputDate(value?: Date): string {
++  const date = value ?? new Date();
++  const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
++  return `${key}T${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")}`;
++}
++
++export default function EventForm({
++  event,
++  defaultStart,
++  onSaved,
++  onClose,
++}: EventFormProps) {
++  const startSeed = defaultStart ?? new Date(new Date().setUTCHours(9, 0, 0, 0));
++  const initialStart = event ? toInputValue(event.start_time) : defaultInputDate(startSeed);
++  const endSeed = new Date(startSeed.getTime() + 3_600_000);
++  const [title, setTitle] = useState(event?.title ?? "");
++  const [description, setDescription] = useState(event?.description ?? "");
++  const [location, setLocation] = useState(event?.location ?? "");
++  const [startTime, setStartTime] = useState(initialStart);
++  const [endTime, setEndTime] = useState(
++    event ? toInputValue(event.end_time) : defaultInputDate(endSeed),
++  );
++  const [errors, setErrors] = useState<Record<string, string>>({});
++  const [message, setMessage] = useState("");
++  const [busy, setBusy] = useState(false);
++
++  const handleSubmit = async (submitEvent: FormEvent) => {
++    submitEvent.preventDefault();
++    setErrors({});
++    setMessage("");
++    setBusy(true);
++    const input: EventInput = {
++      title: title.trim(),
++      description,
++      location,
++      start_time: fromInputValue(startTime),
++      end_time: fromInputValue(endTime),
++    };
++    try {
++      if (event) {
++        await updateEvent(event.id, input);
++      } else {
++        await createEvent(input);
++      }
++      onSaved();
++    } catch (error) {
++      if (error instanceof ApiError) {
++        setErrors(error.errors);
++        setMessage(error.message);
++      } else {
++        setMessage("Something went wrong. Please try again.");
++      }
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const fieldError = (name: string) =>
++    errors[name] ? (
++      <p className="mt-1 text-xs text-red-600">{errors[name]}</p>
++    ) : null;
++
++  const inputClass =
++    "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200";
++  const labelClass = "mb-1 block text-sm font-medium text-slate-700";
++
++  return (
++    <Modal
++      title={event ? "Edit event" : "New event"}
++      onClose={onClose}
++      footer={
++        <>
++          <button
++            type="button"
++            onClick={onClose}
++            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
++          >
++            Cancel
++          </button>
++          <button
++            type="submit"
++            form="event-form"
++            disabled={busy}
++            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
++          >
++            {busy ? "Saving…" : event ? "Save changes" : "Create event"}
++          </button>
++        </>
++      }
++    >
++      {message && (
++        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
++          {message}
++        </div>
++      )}
++      <form id="event-form" onSubmit={handleSubmit} className="space-y-4">
++        <div>
++          <label htmlFor="event-title" className={labelClass}>
++            Title
++          </label>
++          <input
++            id="event-title"
++            type="text"
++            value={title}
++            onChange={(change) => setTitle(change.target.value)}
++            className={inputClass}
++            placeholder="Event title"
++          />
++          {fieldError("title")}
++        </div>
++        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
++          <div>
++            <label htmlFor="event-start" className={labelClass}>
++              Start (UTC)
++            </label>
++            <input
++              id="event-start"
++              type="datetime-local"
++              value={startTime}
++              onChange={(change) => setStartTime(change.target.value)}
++              className={inputClass}
++            />
++            {fieldError("start_time")}
++          </div>
++          <div>
++            <label htmlFor="event-end" className={labelClass}>
++              End (UTC)
++            </label>
++            <input
++              id="event-end"
++              type="datetime-local"
++              value={endTime}
++              onChange={(change) => setEndTime(change.target.value)}
++              className={inputClass}
++            />
++            {fieldError("end_time")}
++          </div>
++        </div>
++        <div>
++          <label htmlFor="event-location" className={labelClass}>
++            Location
++          </label>
++          <input
++            id="event-location"
++            type="text"
++            value={location}
++            onChange={(change) => setLocation(change.target.value)}
++            className={inputClass}
++            placeholder="Optional"
++          />
++          {fieldError("location")}
++        </div>
++        <div>
++          <label htmlFor="event-description" className={labelClass}>
++            Description
++          </label>
++          <textarea
++            id="event-description"
++            rows={4}
++            value={description}
++            onChange={(change) => setDescription(change.target.value)}
++            className={inputClass}
++            placeholder="Optional"
++          />
++          {fieldError("description")}
++        </div>
++        <p className="text-xs text-slate-400">
++          Date-times are interpreted as UTC.
++        </p>
++      </form>
++    </Modal>
++  );
++}
+diff --git a/frontend/src/components/Modal.tsx b/frontend/src/components/Modal.tsx
+new file mode 100644
+index 0000000..7f64d31
+--- /dev/null
++++ b/frontend/src/components/Modal.tsx
+@@ -0,0 +1,67 @@
++import { useEffect, type ReactNode } from "react";
++
++interface ModalProps {
++  title: string;
++  onClose: () => void;
++  children: ReactNode;
++  footer?: ReactNode;
++  width?: string;
++}
++
++export default function Modal({
++  title,
++  onClose,
++  children,
++  footer,
++  width = "max-w-lg",
++}: ModalProps) {
++  useEffect(() => {
++    const onKey = (event: KeyboardEvent) => {
++      if (event.key === "Escape") onClose();
++    };
++    window.addEventListener("keydown", onKey);
++    return () => window.removeEventListener("keydown", onKey);
++  }, [onClose]);
++
++  return (
++    <div
++      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
++      onMouseDown={(event) => {
++        if (event.target === event.currentTarget) onClose();
++      }}
++    >
++      <div
++        role="dialog"
++        aria-modal="true"
++        aria-label={title}
++        className={`flex max-h-[90vh] w-full ${width} flex-col overflow-hidden rounded-2xl bg-white shadow-2xl`}
++      >
++        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
++          <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
++          <button
++            type="button"
++            aria-label="Close"
++            onClick={onClose}
++            className="rounded-full p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
++          >
++            <svg
++              className="h-5 w-5"
++              viewBox="0 0 20 20"
++              fill="none"
++              stroke="currentColor"
++              strokeWidth="2"
++            >
++              <path d="M5 5l10 10M15 5L5 15" strokeLinecap="round" />
++            </svg>
++          </button>
++        </div>
++        <div className="flex-1 overflow-y-auto px-6 py-5">{children}</div>
++        {footer && (
++          <div className="flex justify-end gap-3 border-t border-slate-200 px-6 py-4">
++            {footer}
++          </div>
++        )}
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/date.ts b/frontend/src/date.ts
+new file mode 100644
+index 0000000..cedf122
+--- /dev/null
++++ b/frontend/src/date.ts
+@@ -0,0 +1,151 @@
++export type ViewMode = "month" | "week" | "day";
++
++export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
++
++const pad = (value: number) => String(value).padStart(2, "0");
++
++export function dateKey(value: Date | string): string {
++  const date = typeof value === "string" ? new Date(value) : value;
++  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
++}
++
++export function addDays(date: Date, amount: number): Date {
++  return new Date(date.getTime() + amount * 86_400_000);
++}
++
++export function startOfDay(date: Date): Date {
++  return new Date(
++    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
++  );
++}
++
++export function startOfWeek(date: Date): Date {
++  const day = startOfDay(date).getUTCDay();
++  return addDays(startOfDay(date), -(day === 0 ? 6 : day - 1));
++}
++
++export function startOfMonth(date: Date): Date {
++  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
++}
++
++export interface Period {
++  start: Date;
++  end: Date;
++}
++
++export function getPeriod(anchor: Date, mode: ViewMode): Period {
++  if (mode === "day") {
++    const start = startOfDay(anchor);
++    return { start, end: new Date(start.getTime() + 86_400_000 - 1) };
++  }
++  if (mode === "week") {
++    const start = startOfWeek(anchor);
++    return { start, end: new Date(start.getTime() + 7 * 86_400_000 - 1) };
++  }
++  const start = startOfMonth(anchor);
++  const end = new Date(
++    Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() + 1, 1) - 1,
++  );
++  return { start, end };
++}
++
++export function shiftPeriod(anchor: Date, mode: ViewMode, delta: number): Date {
++  if (mode === "day") return addDays(anchor, delta);
++  if (mode === "week") return addDays(anchor, 7 * delta);
++  return new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() + delta, 1));
++}
++
++export function periodTitle(anchor: Date, mode: ViewMode): string {
++  if (mode === "day") {
++    return anchor.toLocaleDateString(undefined, {
++      timeZone: "UTC",
++      weekday: "long",
++      year: "numeric",
++      month: "long",
++      day: "numeric",
++    });
++  }
++  if (mode === "week") {
++    const { start, end } = getPeriod(anchor, "week");
++    const sameMonth = start.getUTCMonth() === end.getUTCMonth();
++    const startText = start.toLocaleDateString(undefined, {
++      timeZone: "UTC",
++      month: "short",
++      day: "numeric",
++    });
++    const endText = end.toLocaleDateString(undefined, {
++      timeZone: "UTC",
++      month: sameMonth ? undefined : "short",
++      day: "numeric",
++      year: "numeric",
++    });
++    return `${startText} – ${endText}`;
++  }
++  return anchor.toLocaleDateString(undefined, {
++    timeZone: "UTC",
++    year: "numeric",
++    month: "long",
++  });
++}
++
++export function monthGridDays(anchor: Date): Date[] {
++  const first = startOfWeek(startOfMonth(anchor));
++  return Array.from({ length: 42 }, (_, index) => addDays(first, index));
++}
++
++export function weekDays(anchor: Date): Date[] {
++  const start = startOfWeek(anchor);
++  return Array.from({ length: 7 }, (_, index) => addDays(start, index));
++}
++
++export function toInputValue(isoUtc: string): string {
++  const date = new Date(isoUtc);
++  if (Number.isNaN(date.getTime())) return "";
++  return `${dateKey(date)}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
++}
++
++export function fromInputValue(value: string): string {
++  if (!value) return "";
++  return value.length === 16 ? `${value}:00` : value;
++}
++
++export function formatTime(isoUtc: string): string {
++  const date = new Date(isoUtc);
++  return `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
++}
++
++export function formatDateTime(isoUtc: string): string {
++  const date = new Date(isoUtc);
++  return `${date.toLocaleDateString(undefined, {
++    timeZone: "UTC",
++    year: "numeric",
++    month: "short",
++    day: "numeric",
++  })} at ${formatTime(isoUtc)} UTC`;
++}
++
++export function eventOverlapsPeriod(
++  event: { start_time: string; end_time: string },
++  period: Period,
++): boolean {
++  const start = new Date(event.start_time).getTime();
++  const end = new Date(event.end_time).getTime();
++  return start <= period.end.getTime() && end >= period.start.getTime();
++}
++
++export function eventsOnDay<T extends { start_time: string; end_time: string }>(
++  events: T[],
++  day: Date,
++): T[] {
++  const start = startOfDay(day).getTime();
++  const end = start + 86_400_000;
++  return events.filter((event) => {
++    const eventStart = new Date(event.start_time).getTime();
++    const eventEnd = new Date(event.end_time).getTime();
++    return eventStart < end && eventEnd > start;
++  });
++}
++
++export function isToday(day: Date): boolean {
++  return dateKey(day) === dateKey(new Date());
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..c2a145c 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
++import { StrictMode } from "react";
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <StrictMode>
++    <App />
++  </StrictMode>,
++);
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..e46620f
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,21 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "useDefineForClassFields": true,
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "skipLibCheck": true,
++    "moduleResolution": "bundler",
++    "allowImportingTsExtensions": true,
++    "resolveJsonModule": true,
++    "isolatedModules": true,
++    "moduleDetection": "force",
++    "noEmit": true,
++    "jsx": "react-jsx",
++    "strict": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "noFallthroughCasesInSwitch": true
++  },
++  "include": ["src", "vite.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..775ad4a 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
+ import react from "@vitejs/plugin-react";
++import tailwindcss from "@tailwindcss/vite";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

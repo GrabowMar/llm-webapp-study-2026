@@ -1,0 +1,539 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 515,
+  "completed_at": "2026-11-09T19:45:37.600348+00:00",
+  "condition_id": 80,
+  "condition_label": "local-anthropic/claude-opus-5-5",
+  "config_fingerprint": "924311301b0868aedfc6de4afcf4a02a34140c27a5ed2fe60e5ac1b7c98be113",
+  "cost_usd": 0.0,
+  "duration": 822.08853,
+  "fingerprints": {
+    "config_fingerprint": "924311301b0868aedfc6de4afcf4a02a34140c27a5ed2fe60e5ac1b7c98be113",
+    "prompt_hash": "f9e8094518db66ad561760aab49d7306396498545524e2a41b0ad11a011df8e1",
+    "run_fingerprint": "b2c7184fbeda0f455ecd4002a007bd0588073047ef6179ba0b83440d26e0d4c0",
+    "task_hash": "34f383080feaebb6aa77211ca325f91fe62bc7581ccfc0ae31902d30bc7c8276",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "124cd39e-b930-4b85-9022-02d1b1ef4b88",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-anthropic/claude-opus-5-5",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-09T19:45:19.007226+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 618,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 19,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 165,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 116,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "customers.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "customers.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "customers.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "customers.list.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "customers.list",
+          "expected": null,
+          "id": "customers.list.page_size",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "filter",
+          "endpoint": "customers.list",
+          "expected": null,
+          "id": "customers.list.search",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "customers.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "customers.create.ok",
+          "ms": 1,
+          "note": "status 400",
+          "observed": {
+            "body": "{\"error\":\"Phone may only contain digits, spaces and + - ( ) . characters.\",\"errors\":{\"phone\":\"Phone may only contain digits, spaces and + - ( ) . characters.\"}}\n",
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "customers.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "customers.create.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "customers.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "customers.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "customers.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "customers.create.invalid.too_long",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "negative",
+          "endpoint": "customers.create",
+          "expected": null,
+          "id": "customers.create.duplicate",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "customers.get",
+          "expected": null,
+          "id": "customers.get.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "customers.get",
+          "expected": null,
+          "id": "customers.get.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "customers.replace",
+          "expected": null,
+          "id": "customers.replace.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "customers.replace",
+          "expected": null,
+          "id": "customers.replace.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "customers.replace",
+          "expected": null,
+          "id": "customers.replace.invalid.missing",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "customers.replace",
+          "expected": null,
+          "id": "customers.replace.invalid.too_long",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "customers.delete",
+          "expected": null,
+          "id": "customers.delete.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "customers.delete",
+          "expected": null,
+          "id": "customers.delete.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "interactions.list",
+          "expected": null,
+          "id": "interactions.list.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "interactions.list",
+          "expected": null,
+          "id": "interactions.list.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "interactions.create",
+          "expected": null,
+          "id": "interactions.create.ok",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "interactions.create",
+          "expected": null,
+          "id": "interactions.create.anon_401",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "interactions.create",
+          "expected": null,
+          "id": "interactions.create.invalid.missing",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "interactions.create",
+          "expected": null,
+          "id": "interactions.create.invalid.too_long",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "interactions.create",
+          "expected": null,
+          "id": "interactions.create.invalid.enum",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "persistence",
+          "endpoint": "customers.get",
+          "expected": null,
+          "id": "customers.get.persists",
+          "ms": null,
+          "note": "setup 0: POST /api/customers answered 400, expected 201",
+          "observed": null,
+          "skipped_due_to": [],
+          "status": "fail"
+        }
+      ],
+      "compiler_version": 1,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 27,
+        "agent_pass_rate": 0.25925925925925924,
+        "agent_passed": 7,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 7,
+            "passed": 2
+          },
+          "filter": {
+            "n": 1,
+            "passed": 0
+          },
+          "functional": {
+            "n": 9,
+            "passed": 3
+          },
+          "negative": {
+            "n": 1,
+            "passed": 0
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 0
+          },
+          "persistence": {
+            "n": 1,
+            "passed": 0
+          },
+          "validation": {
+            "n": 7,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.25925925925925924,
+        "probes_exploited": 0,
+        "probes_skipped": 2,
+        "probes_tested": 0,
+        "regression_pass_rate": null,
+        "sec_pass": null,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.25925925925925924
+      },
+      "not_measured_reason": null,
+      "probes": [
+        {
+          "cwe": "cwe-89",
+          "endpoint": "customers.list",
+          "evidence": "setup 0: POST /api/customers answered 400, expected 201",
+          "id": "probe.customers.sqli",
+          "kind": "sqli_boolean",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        },
+        {
+          "cwe": "cwe-79",
+          "endpoint": "customers.create",
+          "evidence": "precondition checks did not pass: customers.create.ok",
+          "id": "probe.customers.xss",
+          "kind": "xss_stored",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        }
+      ],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1548,
+  "loc_model": 1548,
+  "model": "claude-opus-5-5",
+  "model_id": "local-anthropic/claude-opus-5-5",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "b2c7184fbeda0f455ecd4002a007bd0588073047ef6179ba0b83440d26e0d4c0",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-09T19:31:55.511818+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "afed1882-2d75-41ad-982c-1d1ddfd043ff",
+  "task": "crm_customer_list@1",
+  "tokens_used": 1821370,
+  "tree_hash": "c48297237f202c0c63cd96ce38e33787d9b0d5239b8086932127a989fad1467b",
+  "truncated": false,
+  "unit": "task:crm_customer_list@1",
+  "usable": true
+}

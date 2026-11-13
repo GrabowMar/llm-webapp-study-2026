@@ -1,0 +1,1999 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..f622fe7
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,5 @@
++node_modules/
++frontend/dist/
++data/
++__pycache__/
++*.pyc
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..1d74100 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,198 @@
+-"""Flask entry point."""
++"""Tagged notes: Flask API + frontend server."""
+ 
++from __future__ import annotations
++
++import hashlib
++import hmac
++import json
++import os
++import secrets
++import sqlite3
++from functools import wraps
+ from pathlib import Path
+ 
+ from flask import Flask
++from flask import g
++from flask import jsonify
++from flask import request
+ from flask import send_from_directory
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(__file__).resolve().parent.parent / "data"
++DB_PATH = DATA_DIR / "notes.db"
+ 
+ app = Flask(__name__, static_folder=None)
++app.config["JSON_SORT_KEYS"] = False
++
++_SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
++    password_hash TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS tokens (
++    token TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS notes (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    title TEXT NOT NULL,
++    content TEXT NOT NULL,
++    tags TEXT NOT NULL,
++    pinned INTEGER NOT NULL DEFAULT 0,
++    author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TEXT NOT NULL,
++    updated_at TEXT NOT NULL
++);
++
++CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at);
++"""
++
++_PEPPER = os.environ.get("APP_PEPPER", "tagged-notes-pepper")
++
++
++def now() -> str:
++    import datetime
++
++    return datetime.datetime.now(datetime.timezone.utc).isoformat()
++
++
++def get_db() -> sqlite3.Connection:
++    if "db" not in g:
++        g.db = sqlite3.connect(DB_PATH)
++        g.db.row_factory = sqlite3.Row
++        g.db.execute("PRAGMA foreign_keys = ON")
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(exc=None):
++    db = g.pop("db", None)
++    if db is not None:
++        db.close()
++
++
++def init_db() -> None:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    db = sqlite3.connect(DB_PATH)
++    db.executescript(_SCHEMA)
++    db.commit()
++    db.close()
++
++
++def _hash_password(password: str) -> str:
++    salt = secrets.token_hex(16)
++    digest = hashlib.scrypt(
++        password.encode("utf-8"), salt=salt.encode("utf-8"), n=16384, r=8, p=1
++    )
++    return f"{salt}${digest.hex()}"
++
++
++def _verify_password(password: str, stored: str) -> bool:
++    try:
++        salt, expected = stored.split("$", 1)
++    except ValueError:
++        return False
++    digest = hashlib.scrypt(
++        password.encode("utf-8"), salt=salt.encode("utf-8"), n=16384, r=8, p=1
++    )
++    return hmac.compare_digest(digest.hex(), expected)
++
++
++def _issue_token(db: sqlite3.Connection, user_id: int) -> str:
++    token = secrets.token_hex(32)
++    db.execute(
++        "INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)",
++        (token, user_id, now()),
++    )
++    db.commit()
++    return token
++
++
++def _current_user() -> sqlite3.Row | None:
++    auth = request.headers.get("Authorization", "")
++    if not auth.startswith("Bearer "):
++        return None
++    token = auth[len("Bearer "):].strip()
++    if not token:
++        return None
++    db = get_db()
++    row = db.execute(
++        "SELECT u.id, u.username FROM users u "
++        "JOIN tokens t ON t.user_id = u.id WHERE t.token = ?",
++        (token,),
++    ).fetchone()
++    return row
++
++
++def login_required(view):
++    @wraps(view)
++    def wrapped(*args, **kwargs):
++        user = _current_user()
++        if user is None:
++            return jsonify({"error": "Authentication required"}), 401
++        g.user = user
++        return view(*args, **kwargs)
++
++    return wrapped
++
++
++def _json_body() -> dict | None:
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        return None
++    return data
++
++
++def _note_to_dict(row: sqlite3.Row) -> dict:
++    tags = json.loads(row["tags"]) if row["tags"] else []
++    return {
++        "id": row["id"],
++        "title": row["title"],
++        "content": row["content"],
++        "tags": tags,
++        "pinned": bool(row["pinned"]),
++        "created_at": row["created_at"],
++        "updated_at": row["updated_at"],
++        "author": row["author"],
++    }
++
++
++def _normalize_tags(tags) -> list[str] | None:
++    if tags is None:
++        return None
++    if not isinstance(tags, list):
++        raise ValueError("tags must be a list")
++    normalized: list[str] = []
++    for tag in tags:
++        if not isinstance(tag, str):
++            raise ValueError("tags must be strings")
++        t = tag.strip().lower()
++        if t and t not in normalized:
++            normalized.append(t)
++    return normalized
++
++
++def _title_error(title) -> str | None:
++    if title is None:
++        return "title is required"
++    if not isinstance(title, str):
++        return "title must be a string"
++    if not title.strip():
++        return "title must not be empty"
++    return None
++
++
++def _content_error(content) -> str | None:
++    if content is None:
++        return "content is required"
++    if not isinstance(content, str):
++        return "content must be a string"
++    return None
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +200,294 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    data = _json_body()
++    if data is None:
++        return jsonify({"error": "Invalid JSON body"}), 400
++
++    username = data.get("username")
++    password = data.get("password")
++
++    if not isinstance(username, str) or not username.strip():
++        return jsonify({"error": "username is required"}), 400
++    username = username.strip()
++    if not isinstance(password, str) or not password:
++        return jsonify({"error": "password is required"}), 400
++
++    db = get_db()
++    existing = db.execute(
++        "SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)
++    ).fetchone()
++    if existing:
++        return jsonify({"error": "username is already taken"}), 409
++
++    cur = db.execute(
++        "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++        (username, _hash_password(password), now()),
++    )
++    db.commit()
++    return jsonify({"id": cur.lastrowid, "username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    data = _json_body()
++    if data is None:
++        return jsonify({"error": "Invalid JSON body"}), 400
++
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not isinstance(password, str):
++        return jsonify({"error": "Invalid credentials"}), 401
++
++    db = get_db()
++    row = db.execute(
++        "SELECT id, username, password_hash FROM users WHERE username = ? COLLATE NOCASE",
++        (username.strip(),),
++    ).fetchone()
++    if row is None or not _verify_password(password, row["password_hash"]):
++        return jsonify({"error": "Invalid credentials"}), 401
++
++    token = _issue_token(db, row["id"])
++    return jsonify({"token": token}), 200
++
++
++@app.get("/api/notes")
++def list_notes():
++    tag = request.args.get("tag")
++    author = request.args.get("author")
++    q = request.args.get("q")
++
++    try:
++        page = max(1, int(request.args.get("page", "1")))
++    except ValueError:
++        page = 1
++    try:
++        page_size = int(request.args.get("page_size", "10"))
++    except ValueError:
++        page_size = 10
++    page_size = min(max(1, page_size), 100)
++
++    db = get_db()
++
++    where = []
++    params: list = []
++    if tag:
++        where.append(
++            "EXISTS (SELECT 1 FROM json_each(n.tags) je "
++            "WHERE lower(je.value) = lower(?))"
++        )
++        params.append(tag.strip())
++    if author:
++        where.append("u.username = ? COLLATE NOCASE")
++        params.append(author.strip())
++    if q:
++        where.append("(n.title LIKE ? OR n.content LIKE ?)")
++        like = f"%{q}%"
++        params.append(like)
++        params.append(like)
++
++    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
++
++    total = db.execute(
++        f"SELECT COUNT(*) FROM notes n JOIN users u ON u.id = n.author_id {where_sql}",
++        params,
++    ).fetchone()[0]
++
++    offset = (page - 1) * page_size
++    rows = db.execute(
++        f"""
++        SELECT n.id, n.title, n.content, n.tags, n.pinned,
++               n.created_at, n.updated_at, u.username AS author
++        FROM notes n JOIN users u ON u.id = n.author_id
++        {where_sql}
++        ORDER BY n.pinned DESC, n.updated_at DESC, n.id DESC
++        LIMIT ? OFFSET ?
++        """,
++        params + [page_size, offset],
++    ).fetchall()
++
++    items = [_note_to_dict(r) for r in rows]
++    return jsonify(
++        {"items": items, "total": total, "page": page, "page_size": page_size}
++    )
++
++
++@app.post("/api/notes")
++@login_required
++def create_note():
++    data = _json_body()
++    if data is None:
++        return jsonify({"error": "Invalid JSON body"}), 400
++
++    title = data.get("title")
++    content = data.get("content")
++
++    err = _title_error(title) or _content_error(content)
++    if err:
++        return jsonify({"error": err}), 400
++
++    try:
++        tags = _normalize_tags(data.get("tags", []))
++    except ValueError as e:
++        return jsonify({"error": str(e)}), 400
++
++    pinned = data.get("pinned", False)
++    if not isinstance(pinned, bool):
++        return jsonify({"error": "pinned must be a boolean"}), 400
++
++    ts = now()
++    db = get_db()
++    cur = db.execute(
++        "INSERT INTO notes (title, content, tags, pinned, author_id, created_at, updated_at) "
++        "VALUES (?, ?, ?, ?, ?, ?, ?)",
++        (
++            title,
++            content,
++            json.dumps(tags),
++            1 if pinned else 0,
++            g.user["id"],
++            ts,
++            ts,
++        ),
++    )
++    db.commit()
++
++    row = db.execute(
++        "SELECT n.id, n.title, n.content, n.tags, n.pinned, "
++        "n.created_at, n.updated_at, u.username AS author "
++        "FROM notes n JOIN users u ON u.id = n.author_id WHERE n.id = ?",
++        (cur.lastrowid,),
++    ).fetchone()
++    return jsonify(_note_to_dict(row)), 201
++
++
++@app.get("/api/notes/<int:note_id>")
++def get_note(note_id: int):
++    db = get_db()
++    row = db.execute(
++        "SELECT n.id, n.title, n.content, n.tags, n.pinned, "
++        "n.created_at, n.updated_at, u.username AS author "
++        "FROM notes n JOIN users u ON u.id = n.author_id WHERE n.id = ?",
++        (note_id,),
++    ).fetchone()
++    if row is None:
++        return jsonify({"error": "Note not found"}), 404
++    return jsonify(_note_to_dict(row))
++
++
++def _load_note(db, note_id: int) -> sqlite3.Row | None:
++    return db.execute(
++        "SELECT n.id, n.title, n.content, n.tags, n.pinned, "
++        "n.created_at, n.updated_at, n.author_id, u.username AS author "
++        "FROM notes n JOIN users u ON u.id = n.author_id WHERE n.id = ?",
++        (note_id,),
++    ).fetchone()
++
++
++@app.patch("/api/notes/<int:note_id>")
++@login_required
++def update_note(note_id: int):
++    db = get_db()
++    row = _load_note(db, note_id)
++    if row is None:
++        return jsonify({"error": "Note not found"}), 404
++    if row["author_id"] != g.user["id"]:
++        return jsonify({"error": "Only the author may edit this note"}), 403
++
++    data = _json_body()
++    if data is None:
++        return jsonify({"error": "Invalid JSON body"}), 400
++    if not data:
++        return jsonify({"error": "No fields to update"}), 400
++
++    allowed = {"title", "content", "tags", "pinned"}
++    unknown = set(data) - allowed
++    if unknown:
++        return jsonify({"error": f"Unknown fields: {', '.join(sorted(unknown))}"}), 400
++
++    updates = []
++    params: list = []
++
++    if "title" in data:
++        err = _title_error(data["title"])
++        if err:
++            return jsonify({"error": err}), 400
++        updates.append("title = ?")
++        params.append(data["title"])
++
++    if "content" in data:
++        err = _content_error(data["content"])
++        if err:
++            return jsonify({"error": err}), 400
++        updates.append("content = ?")
++        params.append(data["content"])
++
++    if "tags" in data:
++        try:
++            tags = _normalize_tags(data["tags"])
++        except ValueError as e:
++            return jsonify({"error": str(e)}), 400
++        updates.append("tags = ?")
++        params.append(json.dumps(tags))
++
++    if "pinned" in data:
++        if not isinstance(data["pinned"], bool):
++            return jsonify({"error": "pinned must be a boolean"}), 400
++        updates.append("pinned = ?")
++        params.append(1 if data["pinned"] else 0)
++
++    if not updates:
++        return jsonify({"error": "No valid fields to update"}), 400
++
++    updates.append("updated_at = ?")
++    params.append(now())
++    params.append(note_id)
++
++    db.execute(
++        f"UPDATE notes SET {', '.join(updates)} WHERE id = ?", params
++    )
++    db.commit()
++
++    updated = _load_note(db, note_id)
++    return jsonify(_note_to_dict(updated))
++
++
++@app.delete("/api/notes/<int:note_id>")
++@login_required
++def delete_note(note_id: int):
++    db = get_db()
++    row = _load_note(db, note_id)
++    if row is None:
++        return jsonify({"error": "Note not found"}), 404
++    if row["author_id"] != g.user["id"]:
++        return jsonify({"error": "Only the author may delete this note"}), 403
++
++    db.execute("DELETE FROM notes WHERE id = ?", (note_id,))
++    db.commit()
++    return "", 204
++
++
++@app.get("/api/tags")
++def list_tags():
++    db = get_db()
++    rows = db.execute(
++        "SELECT je.value AS tag, COUNT(*) AS count "
++        "FROM notes n, json_each(n.tags) je "
++        "GROUP BY lower(je.value) "
++        "ORDER BY count DESC, lower(je.value) ASC"
++    ).fetchall()
++    items = [{"tag": r["tag"], "count": r["count"]} for r in rows]
++    return jsonify({"items": items})
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
++
++
++init_db()
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..1e370f3 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Notes</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..04084dd 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -7,13 +7,66 @@
+       "name": "app-frontend",
+       "dependencies": {
+         "react": "19.3.1",
+-        "react-dom": "19.3.1"
++        "react-dom": "19.3.1",
++        "react-router-dom": "^7.18.5"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "^4.3.5",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "^4.3.5",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +357,356 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,6 +737,19 @@
+         }
+       }
+     },
++    "node_modules/cookie": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/cookie/-/cookie-1.1.1.tgz",
++      "integrity": "sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/express"
++      }
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +760,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +807,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1097,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -739,6 +1196,44 @@
+         "react": "^19.3.1"
+       }
+     },
++    "node_modules/react-router": {
++      "version": "7.18.5",
++      "resolved": "https://registry.npmjs.org/react-router/-/react-router-7.18.5.tgz",
++      "integrity": "sha512-dTgvcXDOrLPrlLHrcZAqWveiK1hMSqN+rGAJzegP8HtmNkfRxOoshGWBNX3ZJ0cZjOHkRdlUJtaIhZMLLyGyPw==",
++      "license": "MIT",
++      "dependencies": {
++        "cookie": "^1.0.1",
++        "set-cookie-parser": "^2.6.0"
++      },
++      "engines": {
++        "node": ">=20.0.0"
++      },
++      "peerDependencies": {
++        "react": ">=18",
++        "react-dom": ">=18"
++      },
++      "peerDependenciesMeta": {
++        "react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/react-router-dom": {
++      "version": "7.18.5",
++      "resolved": "https://registry.npmjs.org/react-router-dom/-/react-router-dom-7.18.5.tgz",
++      "integrity": "sha512-9HcfDMU6JJ/fp6gJZYGwNE6RknVGS4kBjH1HkNw959mCJi70TVwdipQWv2FEol9uGpi+SZTFtVpJPtEQfayeOw==",
++      "license": "MIT",
++      "dependencies": {
++        "react-router": "7.18.5"
++      },
++      "engines": {
++        "node": ">=20.0.0"
++      },
++      "peerDependencies": {
++        "react": ">=18",
++        "react-dom": ">=18"
++      }
++    },
+     "node_modules/rolldown": {
+       "version": "1.2.16",
+       "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz",
+@@ -779,6 +1274,12 @@
+       "integrity": "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==",
+       "license": "MIT"
+     },
++    "node_modules/set-cookie-parser": {
++      "version": "2.7.3",
++      "resolved": "https://registry.npmjs.org/set-cookie-parser/-/set-cookie-parser-2.7.3.tgz",
++      "integrity": "sha512-irZHtTqurLna57KQG/s+fzOwv/J6XSH4cs8M/vsrY3uCaQ3S6+QJguAH0WdN47SXlk82voMZ4naWMQf8fdEoIg==",
++      "license": "MIT"
++    },
+     "node_modules/source-map-js": {
+       "version": "1.2.2",
+       "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz",
+@@ -789,6 +1290,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..101ae11 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -8,10 +8,13 @@
+   },
+   "dependencies": {
+     "react": "19.3.1",
+-    "react-dom": "19.3.1"
++    "react-dom": "19.3.1",
++    "react-router-dom": "^7.18.5"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "^4.3.5",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "^4.3.5",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..279ee2a 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,76 @@
++import { Link, Route, Routes, useNavigate } from "react-router-dom";
++import { AuthProvider, useAuth } from "./auth";
++import { NoteList } from "./pages/NoteList";
++import { NotePage } from "./pages/NotePage";
++import { NoteForm } from "./pages/NoteForm";
++import { AuthForm } from "./pages/AuthForm";
++
++function Shell() {
++  const { username, signOut } = useAuth();
++  const navigate = useNavigate();
++
++  return (
++    <div className="min-h-screen bg-slate-50 text-slate-800">
++      <header className="border-b border-slate-200 bg-white">
++        <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3">
++          <Link to="/" className="text-lg font-bold text-slate-900">
++            Notes
++          </Link>
++          <div className="flex items-center gap-3">
++            {username ? (
++              <>
++                <span className="text-sm text-slate-600">
++                  signed in as{" "}
++                  <span className="font-medium text-slate-900">{username}</span>
++                </span>
++                <button
++                  onClick={() => {
++                    signOut();
++                    navigate("/");
++                  }}
++                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium hover:bg-slate-100"
++                >
++                  Sign out
++                </button>
++              </>
++            ) : (
++              <>
++                <Link
++                  to="/login"
++                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium hover:bg-slate-100"
++                >
++                  Sign in
++                </Link>
++                <Link
++                  to="/register"
++                  className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
++                >
++                  Register
++                </Link>
++              </>
++            )}
++          </div>
++        </div>
++      </header>
++
++      <main className="mx-auto max-w-4xl px-4 py-6">
++        <Routes>
++          <Route path="/" element={<NoteList />} />
++          <Route path="/notes/new" element={<NoteForm />} />
++          <Route path="/notes/:id" element={<NotePage />} />
++          <Route path="/notes/:id/edit" element={<NoteForm />} />
++          <Route path="/login" element={<AuthForm mode="login" />} />
++          <Route path="/register" element={<AuthForm mode="register" />} />
++        </Routes>
++      </main>
++    </div>
++  );
++}
++
+ export default function App() {
+-  return <h1>App</h1>;
++  return (
++    <AuthProvider>
++      <Shell />
++    </AuthProvider>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..feae51b
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,139 @@
++export interface Note {
++  id: number;
++  title: string;
++  content: string;
++  tags: string[];
++  pinned: boolean;
++  created_at: string;
++  updated_at: string;
++  author: string;
++}
++
++export interface NoteListResponse {
++  items: Note[];
++  total: number;
++  page: number;
++  page_size: number;
++}
++
++export interface TagCount {
++  tag: string;
++  count: number;
++}
++
++export interface TagListResponse {
++  items: TagCount[];
++}
++
++export class ApiError extends Error {
++  status: number;
++  constructor(message: string, status: number) {
++    super(message);
++    this.status = status;
++  }
++}
++
++function token(): string | null {
++  return localStorage.getItem("token");
++}
++
++export function setToken(value: string | null) {
++  if (value) {
++    localStorage.setItem("token", value);
++  } else {
++    localStorage.removeItem("token");
++  }
++}
++
++async function request<T>(
++  method: string,
++  path: string,
++  body?: unknown,
++): Promise<T> {
++  const headers: Record<string, string> = {};
++  if (body !== undefined) headers["Content-Type"] = "application/json";
++  const t = token();
++  if (t) headers["Authorization"] = `Bearer ${t}`;
++
++  const res = await fetch(path, {
++    method,
++    headers,
++    body: body !== undefined ? JSON.stringify(body) : undefined,
++  });
++
++  if (res.status === 204) return undefined as T;
++
++  let data: unknown = null;
++  try {
++    data = await res.json();
++  } catch {
++    data = null;
++  }
++
++  if (!res.ok) {
++    const msg =
++      data && typeof data === "object" && "error" in data
++        ? String((data as { error: string }).error)
++        : `Request failed (${res.status})`;
++    throw new ApiError(msg, res.status);
++  }
++  return data as T;
++}
++
++export function register(username: string, password: string) {
++  return request<{ id: number; username: string }>("POST", "/api/auth/register", {
++    username,
++    password,
++  });
++}
++
++export function login(username: string, password: string) {
++  return request<{ token: string }>("POST", "/api/auth/login", {
++    username,
++    password,
++  });
++}
++
++export function listNotes(params: {
++  tag?: string;
++  author?: string;
++  q?: string;
++  page?: number;
++  page_size?: number;
++}) {
++  const qs = new URLSearchParams();
++  if (params.tag) qs.set("tag", params.tag);
++  if (params.author) qs.set("author", params.author);
++  if (params.q) qs.set("q", params.q);
++  qs.set("page", String(params.page ?? 1));
++  qs.set("page_size", String(params.page_size ?? 10));
++  return request<NoteListResponse>("GET", `/api/notes?${qs.toString()}`);
++}
++
++export function getNote(id: number) {
++  return request<Note>("GET", `/api/notes/${id}`);
++}
++
++export function createNote(input: {
++  title: string;
++  content: string;
++  tags: string[];
++  pinned: boolean;
++}) {
++  return request<Note>("POST", "/api/notes", input);
++}
++
++export function updateNote(
++  id: number,
++  input: Partial<{ title: string; content: string; tags: string[]; pinned: boolean }>,
++) {
++  return request<Note>("PATCH", `/api/notes/${id}`, input);
++}
++
++export function deleteNote(id: number) {
++  return request<void>("DELETE", `/api/notes/${id}`);
++}
++
++export function listTags() {
++  return request<TagListResponse>("GET", "/api/tags");
++}
+diff --git a/frontend/src/auth.tsx b/frontend/src/auth.tsx
+new file mode 100644
+index 0000000..ff7eb03
+--- /dev/null
++++ b/frontend/src/auth.tsx
+@@ -0,0 +1,40 @@
++import { createContext, useContext, useState, type ReactNode } from "react";
++import { setToken } from "./api";
++
++interface AuthState {
++  username: string | null;
++  signIn: (username: string, token: string) => void;
++  signOut: () => void;
++}
++
++const AuthContext = createContext<AuthState | null>(null);
++
++export function AuthProvider({ children }: { children: ReactNode }) {
++  const [username, setUsername] = useState<string | null>(
++    () => localStorage.getItem("username"),
++  );
++
++  function signIn(name: string, tok: string) {
++    setToken(tok);
++    localStorage.setItem("username", name);
++    setUsername(name);
++  }
++
++  function signOut() {
++    setToken(null);
++    localStorage.removeItem("username");
++    setUsername(null);
++  }
++
++  return (
++    <AuthContext.Provider value={{ username, signIn, signOut }}>
++      {children}
++    </AuthContext.Provider>
++  );
++}
++
++export function useAuth() {
++  const ctx = useContext(AuthContext);
++  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
++  return ctx;
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..164f601 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
+ import { createRoot } from "react-dom/client";
++import { BrowserRouter } from "react-router-dom";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <BrowserRouter>
++    <App />
++  </BrowserRouter>,
++);
+diff --git a/frontend/src/pages/AuthForm.tsx b/frontend/src/pages/AuthForm.tsx
+new file mode 100644
+index 0000000..379a0a7
+--- /dev/null
++++ b/frontend/src/pages/AuthForm.tsx
+@@ -0,0 +1,78 @@
++import { useState, type FormEvent } from "react";
++import { useNavigate } from "react-router-dom";
++import { login, register, ApiError } from "../api";
++import { useAuth } from "../auth";
++
++export function AuthForm({ mode }: { mode: "login" | "register" }) {
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++  const navigate = useNavigate();
++  const { signIn } = useAuth();
++
++  const isLogin = mode === "login";
++
++  async function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setBusy(true);
++    try {
++      if (isLogin) {
++        const res = await login(username, password);
++        signIn(username, res.token);
++        navigate("/");
++      } else {
++        await register(username, password);
++        const res = await login(username, password);
++        signIn(username, res.token);
++        navigate("/");
++      }
++    } catch (err) {
++      setError(err instanceof ApiError ? err.message : "Something went wrong");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <div className="mx-auto max-w-sm">
++      <h1 className="mb-4 text-2xl font-bold">
++        {isLogin ? "Sign in" : "Create an account"}
++      </h1>
++      <form onSubmit={onSubmit} className="space-y-4">
++        <div>
++          <label className="mb-1 block text-sm font-medium">Username</label>
++          <input
++            value={username}
++            onChange={(e) => setUsername(e.target.value)}
++            className="w-full rounded-md border border-slate-300 px-3 py-2"
++            autoComplete="username"
++          />
++        </div>
++        <div>
++          <label className="mb-1 block text-sm font-medium">Password</label>
++          <input
++            type="password"
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            className="w-full rounded-md border border-slate-300 px-3 py-2"
++            autoComplete={isLogin ? "current-password" : "new-password"}
++          />
++        </div>
++        {error && (
++          <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++            {error}
++          </p>
++        )}
++        <button
++          type="submit"
++          disabled={busy}
++          className="w-full rounded-md bg-slate-900 px-3 py-2 font-medium text-white hover:bg-slate-700 disabled:opacity-50"
++        >
++          {busy ? "Please wait…" : isLogin ? "Sign in" : "Register"}
++        </button>
++      </form>
++    </div>
++  );
++}
+diff --git a/frontend/src/pages/NoteForm.tsx b/frontend/src/pages/NoteForm.tsx
+new file mode 100644
+index 0000000..11742c3
+--- /dev/null
++++ b/frontend/src/pages/NoteForm.tsx
+@@ -0,0 +1,148 @@
++import { useEffect, useState, type FormEvent } from "react";
++import { Link, useNavigate, useParams } from "react-router-dom";
++import {
++  createNote,
++  updateNote,
++  getNote,
++  ApiError,
++} from "../api";
++import { useAuth } from "../auth";
++
++export function NoteForm() {
++  const { id } = useParams();
++  const navigate = useNavigate();
++  const { username } = useAuth();
++  const isEdit = Boolean(id);
++
++  const [title, setTitle] = useState("");
++  const [content, setContent] = useState("");
++  const [tagsInput, setTagsInput] = useState("");
++  const [pinned, setPinned] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++  const [loading, setLoading] = useState(isEdit);
++
++  useEffect(() => {
++    if (!isEdit) return;
++    let alive = true;
++    getNote(Number(id))
++      .then((n) => {
++        if (!alive) return;
++        if (username !== n.author) {
++          navigate(`/notes/${n.id}`, { replace: true });
++          return;
++        }
++        setTitle(n.title);
++        setContent(n.content);
++        setTagsInput(n.tags.join(", "));
++        setPinned(n.pinned);
++      })
++      .catch((e) => alive && setError(e.message))
++      .finally(() => alive && setLoading(false));
++    return () => {
++      alive = false;
++    };
++  }, [id, isEdit, username, navigate]);
++
++  function parseTags(): string[] {
++    return tagsInput
++      .split(",")
++      .map((t) => t.trim())
++      .filter(Boolean);
++  }
++
++  async function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setBusy(true);
++    try {
++      const input = {
++        title,
++        content,
++        tags: parseTags(),
++        pinned,
++      };
++      if (isEdit) {
++        const n = await updateNote(Number(id), input);
++        navigate(`/notes/${n.id}`);
++      } else {
++        const n = await createNote(input);
++        navigate(`/notes/${n.id}`);
++      }
++    } catch (err) {
++      setError(err instanceof ApiError ? err.message : "Something went wrong");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  if (loading) {
++    return <p className="text-slate-500">Loading…</p>;
++  }
++
++  return (
++    <div>
++      <h1 className="mb-4 text-2xl font-bold">
++        {isEdit ? "Edit note" : "New note"}
++      </h1>
++      <form onSubmit={onSubmit} className="space-y-4">
++        <div>
++          <label className="mb-1 block text-sm font-medium">Title</label>
++          <input
++            value={title}
++            onChange={(e) => setTitle(e.target.value)}
++            className="w-full rounded-md border border-slate-300 px-3 py-2"
++          />
++        </div>
++        <div>
++          <label className="mb-1 block text-sm font-medium">Content</label>
++          <textarea
++            value={content}
++            onChange={(e) => setContent(e.target.value)}
++            rows={8}
++            className="w-full rounded-md border border-slate-300 px-3 py-2 font-mono"
++          />
++        </div>
++        <div>
++          <label className="mb-1 block text-sm font-medium">
++            Tags (comma-separated)
++          </label>
++          <input
++            value={tagsInput}
++            onChange={(e) => setTagsInput(e.target.value)}
++            placeholder="work, ideas"
++            className="w-full rounded-md border border-slate-300 px-3 py-2"
++          />
++        </div>
++        <label className="flex items-center gap-2">
++          <input
++            type="checkbox"
++            checked={pinned}
++            onChange={(e) => setPinned(e.target.checked)}
++          />
++          <span className="text-sm">Pin this note</span>
++        </label>
++        {error && (
++          <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++            {error}
++          </p>
++        )}
++        <div className="flex gap-3">
++          <button
++            type="submit"
++            disabled={busy}
++            className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
++          >
++            {busy ? "Saving…" : isEdit ? "Save changes" : "Create note"}
++          </button>
++          <Link
++            to={isEdit ? `/notes/${id}` : "/"}
++            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium hover:bg-slate-100"
++          >
++            Cancel
++          </Link>
++        </div>
++      </form>
++    </div>
++  );
++}
+diff --git a/frontend/src/pages/NoteList.tsx b/frontend/src/pages/NoteList.tsx
+new file mode 100644
+index 0000000..8df24e4
+--- /dev/null
++++ b/frontend/src/pages/NoteList.tsx
+@@ -0,0 +1,188 @@
++import { useEffect, useState } from "react";
++import { Link, useSearchParams } from "react-router-dom";
++import { listNotes, listTags, type Note, type TagCount } from "../api";
++import { useAuth } from "../auth";
++
++function TagCloud({
++  tags,
++  active,
++  onSelect,
++}: {
++  tags: TagCount[];
++  active: string | null;
++  onSelect: (tag: string | null) => void;
++}) {
++  return (
++    <div className="flex flex-wrap items-center gap-2">
++      {active && (
++        <button
++          onClick={() => onSelect(null)}
++          className="rounded-full bg-slate-900 px-2 py-0.5 text-xs text-white"
++        >
++          {active} ✕
++        </button>
++      )}
++      {tags.map((t) => (
++        <button
++          key={t.tag}
++          onClick={() => onSelect(t.tag)}
++          className={`rounded-full border px-2 py-0.5 text-xs ${
++            active === t.tag
++              ? "border-slate-900 bg-slate-900 text-white"
++              : "border-slate-300 bg-white text-slate-600 hover:bg-slate-100"
++          }`}
++        >
++          {t.tag} <span className="text-slate-400">{t.count}</span>
++        </button>
++      ))}
++    </div>
++  );
++}
++
++export function NoteList() {
++  const [searchParams, setSearchParams] = useSearchParams();
++  const { username } = useAuth();
++
++  const tag = searchParams.get("tag") ?? null;
++  const author = searchParams.get("author") ?? "";
++  const q = searchParams.get("q") ?? "";
++  const page = Number(searchParams.get("page") ?? "1") || 1;
++  const pageSize = Number(searchParams.get("page_size") ?? "10") || 10;
++
++  const [notes, setNotes] = useState<Note[]>([]);
++  const [total, setTotal] = useState(0);
++  const [tags, setTags] = useState<TagCount[]>([]);
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(true);
++
++  useEffect(() => {
++    let alive = true;
++    setLoading(true);
++    setError(null);
++    listNotes({ tag: tag ?? undefined, author: author || undefined, q: q || undefined, page, page_size: pageSize })
++      .then((res) => {
++        if (!alive) return;
++        setNotes(res.items);
++        setTotal(res.total);
++      })
++      .catch((e) => alive && setError(e.message))
++      .finally(() => alive && setLoading(false));
++    return () => {
++      alive = false;
++    };
++  }, [tag, author, q, page, pageSize]);
++
++  useEffect(() => {
++    let alive = true;
++    listTags()
++      .then((res) => alive && setTags(res.items))
++      .catch(() => {});
++    return () => {
++      alive = false;
++    };
++  }, [notes]);
++
++  function setParam(key: string, value: string | null) {
++    const next = new URLSearchParams(searchParams);
++    if (value) next.set(key, value);
++    else next.delete(key);
++    if (key !== "page") next.delete("page");
++    setSearchParams(next);
++  }
++
++  const totalPages = Math.max(1, Math.ceil(total / pageSize));
++
++  return (
++    <div>
++      <div className="mb-4 flex items-center justify-between">
++        <h1 className="text-2xl font-bold">Notes</h1>
++        {username && (
++          <Link
++            to="/notes/new"
++            className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
++          >
++            New note
++          </Link>
++        )}
++      </div>
++
++      <div className="mb-4 space-y-3">
++        <input
++          value={q}
++          onChange={(e) => setParam("q", e.target.value)}
++          placeholder="Search…"
++          className="w-full rounded-md border border-slate-300 px-3 py-2"
++        />
++        <input
++          value={author}
++          onChange={(e) => setParam("author", e.target.value)}
++          placeholder="Filter by author…"
++          className="w-full rounded-md border border-slate-300 px-3 py-2"
++        />
++        <TagCloud tags={tags} active={tag} onSelect={(t) => setParam("tag", t)} />
++      </div>
++
++      {error && (
++        <p className="mb-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++          {error}
++        </p>
++      )}
++
++      {loading ? (
++        <p className="text-slate-500">Loading…</p>
++      ) : notes.length === 0 ? (
++        <p className="text-slate-500">No notes.</p>
++      ) : (
++        <ul className="divide-y divide-slate-200 rounded-lg border border-slate-200 bg-white">
++          {notes.map((note) => (
++            <li key={note.id}>
++              <Link
++                to={`/notes/${note.id}`}
++                className="block px-4 py-3 hover:bg-slate-50"
++              >
++                <div className="flex items-center gap-2">
++                  {note.pinned && (
++                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700">
++                      Pinned
++                    </span>
++                  )}
++                  <span className="font-medium">{note.title}</span>
++                </div>
++                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
++                  {note.tags.map((t) => (
++                    <span key={t} className="rounded bg-slate-100 px-1.5 py-0.5">
++                      {t}
++                    </span>
++                  ))}
++                  <span>by {note.author}</span>
++                </div>
++              </Link>
++            </li>
++          ))}
++        </ul>
++      )}
++
++      {totalPages > 1 && (
++        <div className="mt-4 flex items-center justify-center gap-2">
++          <button
++            disabled={page <= 1}
++            onClick={() => setParam("page", String(page - 1))}
++            className="rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-40"
++          >
++            Prev
++          </button>
++          <span className="text-sm text-slate-600">
++            Page {page} of {totalPages}
++          </span>
++          <button
++            disabled={page >= totalPages}
++            onClick={() => setParam("page", String(page + 1))}
++            className="rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-40"
++          >
++            Next
++          </button>
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/src/pages/NotePage.tsx b/frontend/src/pages/NotePage.tsx
+new file mode 100644
+index 0000000..a98f1fb
+--- /dev/null
++++ b/frontend/src/pages/NotePage.tsx
+@@ -0,0 +1,112 @@
++import { useEffect, useState } from "react";
++import { Link, useNavigate, useParams } from "react-router-dom";
++import { deleteNote, getNote, ApiError, type Note } from "../api";
++import { useAuth } from "../auth";
++
++export function NotePage() {
++  const { id } = useParams();
++  const navigate = useNavigate();
++  const { username } = useAuth();
++  const [note, setNote] = useState<Note | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [confirming, setConfirming] = useState(false);
++
++  useEffect(() => {
++    let alive = true;
++    getNote(Number(id))
++      .then((n) => alive && setNote(n))
++      .catch((e) => alive && setError(e.message));
++    return () => {
++      alive = false;
++    };
++  }, [id]);
++
++  async function onDelete() {
++    try {
++      await deleteNote(Number(id));
++      navigate("/");
++    } catch (e) {
++      setError(e instanceof ApiError ? e.message : "Delete failed");
++    }
++  }
++
++  if (error) {
++    return <p className="text-red-700">{error}</p>;
++  }
++
++  if (!note) {
++    return <p className="text-slate-500">Loading…</p>;
++  }
++
++  const isAuthor = username !== null && username === note.author;
++
++  return (
++    <div>
++      <Link to="/" className="text-sm text-slate-500 hover:underline">
++        ← Back to notes
++      </Link>
++
++      <div className="mt-4 rounded-lg border border-slate-200 bg-white p-6">
++        <div className="flex items-start justify-between">
++          <h1 className="text-2xl font-bold">{note.title}</h1>
++          {note.pinned && (
++            <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
++              Pinned
++            </span>
++          )}
++        </div>
++
++        <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-500">
++          {note.tags.map((t) => (
++            <span key={t} className="rounded bg-slate-100 px-2 py-0.5">
++              {t}
++            </span>
++          ))}
++        </div>
++
++        <p className="mt-1 text-xs text-slate-400">
++          by {note.author} · updated {new Date(note.updated_at).toLocaleString()}
++        </p>
++
++        <pre className="mt-4 whitespace-pre-wrap font-sans text-slate-800">
++          {note.content}
++        </pre>
++      </div>
++
++      {isAuthor && (
++        <div className="mt-4 flex gap-3">
++          <Link
++            to={`/notes/${note.id}/edit`}
++            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium hover:bg-slate-100"
++          >
++            Edit
++          </Link>
++          {confirming ? (
++            <div className="flex items-center gap-2">
++              <span className="text-sm text-slate-600">Delete this note?</span>
++              <button
++                onClick={onDelete}
++                className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500"
++              >
++                Confirm
++              </button>
++              <button
++                onClick={() => setConfirming(false)}
++                className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium hover:bg-slate-100"
++              >
++                Cancel
++              </button>
++            </div>
++          ) : (
++            <button
++              onClick={() => setConfirming(true)}
++              className="rounded-md border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50"
++            >
++              Delete
++            </button>
++          )}
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..775ad4a 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
+ import react from "@vitejs/plugin-react";
++import tailwindcss from "@tailwindcss/vite";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

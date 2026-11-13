@@ -1,0 +1,1871 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..658eabd
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,6 @@
++node_modules/
++frontend/dist/
++__pycache__/
++*.pyc
++data/
++.tmptest/
+diff --git a/Dockerfile b/Dockerfile
+index 214952b..1bf83a5 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -14,7 +14,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
+ WORKDIR /app
+ COPY backend/requirements.txt backend/requirements.lock* backend/
+ RUN if [ -f backend/requirements.lock ]; then \
+-      pip install --no-cache-dir -r backend/requirements.txt -c backend/requirements.lock; \
++      pip install --no-cache-dir -r backend/requirements.txt -c backend/requirements.lock \
++      || pip install --no-cache-dir --require-hashes -r backend/requirements.lock; \
+     else \
+       pip install --no-cache-dir -r backend/requirements.txt; \
+     fi
+diff --git a/README.md b/README.md
+index 24967b9..54ef37c 100644
+--- a/README.md
++++ b/README.md
+@@ -13,3 +13,11 @@
+ - `frontend/`: a Vite project (React + TypeScript). `npm run build` writes `frontend/dist`, which the image copies next to the backend.
+ 
+ Dependencies are pinned: `backend/requirements.lock` holds the resolved versions and is installed as a pip constraints file. The frontend uses `frontend/package-lock.json` (`npm ci`). When you change dependencies, update the lock file as well (or remove it).
++
++## Notification center
++
++- Accounts: `POST /api/auth/register`, `POST /api/auth/login` (returns `{"token"}`; send `Authorization: Bearer <token>`), `GET /api/auth/me`, `POST /api/auth/logout`.
++- Admin: the account `admin` signs in with the password from `ADMIN_PASSWORD`; when unset or empty, admin sign-in is disabled.
++- Notifications: `GET/POST /api/notifications`, `POST /api/notifications/read-all`, `GET/PATCH/DELETE /api/notifications/{id}`, `POST /api/admin/broadcast`.
++- SQLite database: `data/app.db` (override the directory with `DATA_DIR`).
++- Frontend checks: `npm run typecheck` and `npm run build` in `frontend/`.
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..062b84a 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,296 @@
+-"""Flask entry point."""
++"""Flask entry point for the notification center."""
+ 
++import hashlib
++import hmac
++import os
++import re
++import secrets
++import sqlite3
++from datetime import datetime, timedelta, timezone
++from functools import wraps
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.exceptions import HTTPException
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", "data")).resolve()
++DB_PATH = DATA_DIR / "app.db"
++
++ADMIN_USERNAME = "admin"
++ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD") or ""
++
++TOKEN_TTL = timedelta(days=7)
++USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
++TYPE_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
++PASSWORD_MIN = 8
++PASSWORD_MAX = 256
++MESSAGE_MAX = 2000
++DEFAULT_PAGE_SIZE = 20
++MAX_PAGE_SIZE = 100
++MAX_SQLITE_INT = 2**63 - 1
++
++DUMMY_HASH = generate_password_hash(secrets.token_hex(16))
+ 
+ app = Flask(__name__, static_folder=None)
++app.config["MAX_CONTENT_LENGTH"] = 64 * 1024
++app.json.sort_keys = False
++
++
++class ApiError(Exception):
++    def __init__(self, status: int, message: str):
++        super().__init__(message)
++        self.status = status
++        self.message = message
++
++
++def now_utc() -> datetime:
++    return datetime.now(timezone.utc)
++
++
++def iso(dt: datetime) -> str:
++    return dt.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
++
++
++def connect() -> sqlite3.Connection:
++    conn = sqlite3.connect(DB_PATH, timeout=30)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    conn.execute("PRAGMA busy_timeout = 30000")
++    return conn
++
++
++def get_db() -> sqlite3.Connection:
++    if "db" not in g:
++        g.db = connect()
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc):
++    db = g.pop("db", None)
++    if db is not None:
++        db.close()
++
++
++def init_db() -> None:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = connect()
++    try:
++        conn.execute("PRAGMA journal_mode = WAL")
++        conn.executescript(
++            """
++            CREATE TABLE IF NOT EXISTS users (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
++                password_hash TEXT,
++                created_at TEXT NOT NULL
++            );
++            CREATE TABLE IF NOT EXISTS sessions (
++                token_hash TEXT PRIMARY KEY,
++                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++                expires_at TEXT NOT NULL
++            );
++            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
++            CREATE TABLE IF NOT EXISTS notifications (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++                message TEXT NOT NULL,
++                type TEXT NOT NULL,
++                read INTEGER NOT NULL DEFAULT 0,
++                created_at TEXT NOT NULL
++            );
++            CREATE INDEX IF NOT EXISTS idx_notifications_user_created
++                ON notifications(user_id, created_at DESC, id DESC);
++            CREATE INDEX IF NOT EXISTS idx_notifications_user_read
++                ON notifications(user_id, read);
++            """
++        )
++        with conn:
++            conn.execute(
++                "INSERT OR IGNORE INTO users (username, password_hash, created_at) VALUES (?, NULL, ?)",
++                (ADMIN_USERNAME, iso(now_utc())),
++            )
++            admin = conn.execute(
++                "SELECT id, password_hash FROM users WHERE username = ?", (ADMIN_USERNAME,)
++            ).fetchone()
++            if ADMIN_PASSWORD:
++                current = admin["password_hash"]
++                if not current or not check_password_hash(current, ADMIN_PASSWORD):
++                    conn.execute(
++                        "UPDATE users SET password_hash = ? WHERE id = ?",
++                        (generate_password_hash(ADMIN_PASSWORD), admin["id"]),
++                    )
++                    conn.execute("DELETE FROM sessions WHERE user_id = ?", (admin["id"],))
++            else:
++                conn.execute(
++                    "UPDATE users SET password_hash = NULL WHERE username = ?",
++                    (ADMIN_USERNAME,),
++                )
++                conn.execute(
++                    "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = ?)",
++                    (ADMIN_USERNAME,),
++                )
++            conn.execute("DELETE FROM sessions WHERE expires_at < ?", (iso(now_utc()),))
++    finally:
++        conn.close()
++
++
++init_db()
++
++
++def hash_token(token: str) -> str:
++    return hashlib.sha256(token.encode("utf-8")).hexdigest()
++
++
++def is_admin(user) -> bool:
++    return bool(ADMIN_PASSWORD) and user["username"] == ADMIN_USERNAME
++
++
++def json_body() -> dict:
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        raise ApiError(400, "Request body must be a JSON object")
++    return data
++
++
++def current_user():
++    header = request.headers.get("Authorization", "")
++    scheme, _, token = header.partition(" ")
++    token = token.strip()
++    if scheme.lower() != "bearer" or not token or len(token) > 512:
++        return None
++    row = get_db().execute(
++        """
++        SELECT u.id, u.username, s.expires_at
++        FROM sessions s JOIN users u ON u.id = s.user_id
++        WHERE s.token_hash = ?
++        """,
++        (hash_token(token),),
++    ).fetchone()
++    if row is None:
++        return None
++    if row["expires_at"] < iso(now_utc()):
++        return None
++    if row["username"] == ADMIN_USERNAME and not ADMIN_PASSWORD:
++        return None
++    return row
++
++
++def login_required(fn):
++    @wraps(fn)
++    def wrapper(*args, **kwargs):
++        user = current_user()
++        if user is None:
++            raise ApiError(401, "Authentication required")
++        g.user = user
++        return fn(*args, **kwargs)
++
++    return wrapper
++
++
++def admin_required(fn):
++    @wraps(fn)
++    @login_required
++    def wrapper(*args, **kwargs):
++        if not is_admin(g.user):
++            raise ApiError(403, "Admin privileges required")
++        return fn(*args, **kwargs)
++
++    return wrapper
++
++
++def serialize(row) -> dict:
++    return {
++        "id": row["id"],
++        "message": row["message"],
++        "type": row["type"],
++        "read": bool(row["read"]),
++        "created_at": row["created_at"],
++    }
++
++
++def parse_message_and_type(data: dict, default_type: str) -> tuple[str, str]:
++    message = data.get("message")
++    if not isinstance(message, str) or not message.strip():
++        raise ApiError(400, "message is required and must be a non-empty string")
++    if len(message) > MESSAGE_MAX:
++        raise ApiError(400, f"message must be at most {MESSAGE_MAX} characters")
++    ntype = data.get("type")
++    if ntype is None or ntype == "":
++        ntype = default_type
++    if not isinstance(ntype, str) or not TYPE_RE.match(ntype):
++        raise ApiError(400, "type must be 1-32 characters of letters, digits, '_' or '-'")
++    return message, ntype
++
++
++def parse_bool(value: str, name: str) -> bool:
++    v = value.strip().lower()
++    if v in ("true", "1", "yes"):
++        return True
++    if v in ("false", "0", "no"):
++        return False
++    raise ApiError(400, f"{name} must be true or false")
++
++
++def parse_positive_int(value, name: str, default: int) -> int:
++    if value is None or value == "":
++        return default
++    try:
++        n = int(value)
++    except (TypeError, ValueError):
++        raise ApiError(400, f"{name} must be a positive integer")
++    if n < 1 or n > 1_000_000_000:
++        raise ApiError(400, f"{name} must be a positive integer")
++    return n
++
++
++def get_own_notification(nid: int):
++    if nid > MAX_SQLITE_INT:
++        raise ApiError(404, "Notification not found")
++    row = get_db().execute(
++        "SELECT * FROM notifications WHERE id = ? AND user_id = ?",
++        (nid, g.user["id"]),
++    ).fetchone()
++    if row is None:
++        raise ApiError(404, "Notification not found")
++    return row
++
++
++@app.errorhandler(ApiError)
++def handle_api_error(err: ApiError):
++    return jsonify({"error": err.message}), err.status
++
++
++@app.errorhandler(HTTPException)
++def handle_http_error(err: HTTPException):
++    if request.path.startswith("/api"):
++        return jsonify({"error": err.description or err.name}), err.code
++    return err
++
++
++@app.errorhandler(Exception)
++def handle_unexpected(err: Exception):
++    if isinstance(err, HTTPException):
++        return handle_http_error(err)
++    app.logger.exception("Unhandled error")
++    return jsonify({"error": "Internal server error"}), 500
++
++
++@app.after_request
++def security_headers(resp):
++    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
++    resp.headers.setdefault("X-Frame-Options", "DENY")
++    resp.headers.setdefault("Referrer-Policy", "no-referrer")
++    resp.headers.setdefault(
++        "Content-Security-Policy",
++        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
++        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
++    )
++    if request.path.startswith("/api"):
++        resp.headers.setdefault("Cache-Control", "no-store")
++    return resp
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +298,193 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    data = json_body()
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not USERNAME_RE.match(username):
++        raise ApiError(400, "username must be 1-64 characters of letters, digits, '_', '.' or '-'")
++    if not isinstance(password, str) or not (PASSWORD_MIN <= len(password) <= PASSWORD_MAX):
++        raise ApiError(400, f"password must be {PASSWORD_MIN}-{PASSWORD_MAX} characters")
++    if username.lower() == ADMIN_USERNAME:
++        raise ApiError(409, "Username is already taken")
++    db = get_db()
++    try:
++        with db:
++            cur = db.execute(
++                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++                (username, generate_password_hash(password), iso(now_utc())),
++            )
++    except sqlite3.IntegrityError:
++        raise ApiError(409, "Username is already taken")
++    return jsonify({"id": cur.lastrowid, "username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    data = json_body()
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not isinstance(password, str) or len(password) > PASSWORD_MAX:
++        raise ApiError(401, "Invalid username or password")
++    db = get_db()
++    user = db.execute(
++        "SELECT id, username, password_hash FROM users WHERE username = ?", (username,)
++    ).fetchone()
++    stored = user["password_hash"] if user is not None else None
++    if user is not None and user["username"] == ADMIN_USERNAME and not ADMIN_PASSWORD:
++        stored = None
++    ok = check_password_hash(stored or DUMMY_HASH, password)
++    if not stored or not ok:
++        raise ApiError(401, "Invalid username or password")
++    token = secrets.token_urlsafe(32)
++    now = now_utc()
++    with db:
++        db.execute("DELETE FROM sessions WHERE expires_at < ?", (iso(now),))
++        db.execute(
++            "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
++            (hash_token(token), user["id"], iso(now + TOKEN_TTL)),
++        )
++    return jsonify({"token": token}), 200
++
++
++@app.post("/api/auth/logout")
++@login_required
++def logout():
++    _, _, token = request.headers.get("Authorization", "").partition(" ")
++    db = get_db()
++    with db:
++        db.execute("DELETE FROM sessions WHERE token_hash = ?", (hash_token(token.strip()),))
++    return "", 204
++
++
++@app.get("/api/auth/me")
++@login_required
++def me():
++    return {"id": g.user["id"], "username": g.user["username"], "is_admin": is_admin(g.user)}
++
++
++@app.get("/api/notifications")
++@login_required
++def list_notifications():
++    args = request.args
++    page = parse_positive_int(args.get("page"), "page", 1)
++    page_size = min(
++        parse_positive_int(args.get("page_size"), "page_size", DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE
++    )
++    where = ["user_id = ?"]
++    params: list = [g.user["id"]]
++    read_arg = args.get("read")
++    if read_arg is not None and read_arg != "":
++        where.append("read = ?")
++        params.append(1 if parse_bool(read_arg, "read") else 0)
++    type_arg = args.get("type")
++    if type_arg is not None and type_arg != "":
++        where.append("type = ?")
++        params.append(type_arg)
++    clause = " AND ".join(where)
++    db = get_db()
++    total = db.execute(f"SELECT COUNT(*) FROM notifications WHERE {clause}", params).fetchone()[0]
++    rows = db.execute(
++        f"SELECT * FROM notifications WHERE {clause} "
++        "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
++        [*params, page_size, (page - 1) * page_size],
++    ).fetchall()
++    unread = db.execute(
++        "SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read = 0", (g.user["id"],)
++    ).fetchone()[0]
++    return {
++        "items": [serialize(r) for r in rows],
++        "total": total,
++        "page": page,
++        "page_size": page_size,
++        "unread_count": unread,
++    }
++
++
++@app.post("/api/notifications")
++@login_required
++def create_notification():
++    message, ntype = parse_message_and_type(json_body(), "info")
++    db = get_db()
++    with db:
++        cur = db.execute(
++            "INSERT INTO notifications (user_id, message, type, read, created_at) VALUES (?, ?, ?, 0, ?)",
++            (g.user["id"], message, ntype, iso(now_utc())),
++        )
++    row = db.execute("SELECT * FROM notifications WHERE id = ?", (cur.lastrowid,)).fetchone()
++    return jsonify(serialize(row)), 201
++
++
++@app.post("/api/notifications/read-all")
++@login_required
++def read_all():
++    db = get_db()
++    with db:
++        cur = db.execute(
++            "UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0", (g.user["id"],)
++        )
++    return {"updated": cur.rowcount}
++
++
++@app.get("/api/notifications/<int:nid>")
++@login_required
++def get_notification(nid: int):
++    return serialize(get_own_notification(nid))
++
++
++@app.patch("/api/notifications/<int:nid>")
++@login_required
++def update_notification(nid: int):
++    get_own_notification(nid)
++    read = json_body().get("read")
++    if not isinstance(read, bool):
++        raise ApiError(400, "read must be a boolean")
++    db = get_db()
++    with db:
++        db.execute(
++            "UPDATE notifications SET read = ? WHERE id = ? AND user_id = ?",
++            (1 if read else 0, nid, g.user["id"]),
++        )
++    return serialize(get_own_notification(nid))
++
++
++@app.delete("/api/notifications/<int:nid>")
++@login_required
++def delete_notification(nid: int):
++    get_own_notification(nid)
++    db = get_db()
++    with db:
++        db.execute("DELETE FROM notifications WHERE id = ? AND user_id = ?", (nid, g.user["id"]))
++    return "", 204
++
++
++@app.post("/api/admin/broadcast")
++@admin_required
++def broadcast():
++    message, ntype = parse_message_and_type(json_body(), "announcement")
++    db = get_db()
++    with db:
++        cur = db.execute(
++            "INSERT INTO notifications (user_id, message, type, read, created_at) "
++            "SELECT id, ?, ?, 0, ? FROM users ORDER BY id",
++            (message, ntype, iso(now_utc())),
++        )
++    return jsonify({"delivered": cur.rowcount}), 201
++
++
++@app.route("/api", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
++@app.route("/api/<path:_path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
++def api_not_found(_path: str = ""):
++    raise ApiError(404, "Not found")
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
++    if not (DIST / "index.html").is_file():
++        return jsonify({"error": "Frontend not built"}), 404
+     return send_from_directory(DIST, "index.html")
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..7843841 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Notification Center</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..08de16a 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,10 +10,65 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "4.3.5",
++        "@types/react": "19.3.0",
++        "@types/react-dom": "19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "4.3.5",
++        "typescript": "5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +359,376 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,6 +759,13 @@
+         }
+       }
+     },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +776,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +823,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1113,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -789,6 +1262,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1300,20 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..4284c65 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,20 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "vite build",
++    "typecheck": "tsc --noEmit"
+   },
+   "dependencies": {
+     "react": "19.3.1",
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "4.3.5",
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "4.3.5",
++    "typescript": "5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..008204a 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,562 @@
++import { FormEvent, useCallback, useEffect, useState } from "react";
++import { api, ApiError, getToken, Me, NotificationPage, setToken } from "./api";
++
++const TYPES = ["info", "success", "warning", "alert", "announcement"] as const;
++const PAGE_SIZE = 10;
++
++const BADGE: Record<string, string> = {
++  info: "bg-sky-100 text-sky-800 ring-sky-200",
++  success: "bg-emerald-100 text-emerald-800 ring-emerald-200",
++  warning: "bg-amber-100 text-amber-800 ring-amber-200",
++  alert: "bg-rose-100 text-rose-800 ring-rose-200",
++  announcement: "bg-violet-100 text-violet-800 ring-violet-200",
++};
++
++const inputCls =
++  "w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200";
++const btnPrimary =
++  "rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50";
++const btnSecondary =
++  "rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
++
++function errMsg(e: unknown): string {
++  return e instanceof Error ? e.message : "Something went wrong";
++}
++
++function formatDate(iso: string): string {
++  const d = new Date(iso);
++  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
++}
++
++function Alert({ kind, children }: { kind: "error" | "success"; children: React.ReactNode }) {
++  const cls =
++    kind === "error"
++      ? "border-rose-200 bg-rose-50 text-rose-800"
++      : "border-emerald-200 bg-emerald-50 text-emerald-800";
++  return (
++    <div role={kind === "error" ? "alert" : "status"} className={`rounded-md border px-3 py-2 text-sm ${cls}`}>
++      {children}
++    </div>
++  );
++}
++
++function TypeBadge({ type }: { type: string }) {
++  const cls = BADGE[type] ?? "bg-slate-100 text-slate-700 ring-slate-200";
++  return (
++    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${cls}`}>
++      {type}
++    </span>
++  );
++}
++
++function BellIcon({ count }: { count: number }) {
++  return (
++    <div className="relative" aria-label={`${count} unread notifications`} title={`${count} unread`}>
++      <svg
++        xmlns="http://www.w3.org/2000/svg"
++        viewBox="0 0 24 24"
++        fill="none"
++        stroke="currentColor"
++        strokeWidth={1.8}
++        className="h-7 w-7 text-slate-600"
++        aria-hidden="true"
++      >
++        <path
++          strokeLinecap="round"
++          strokeLinejoin="round"
++          d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"
++        />
++      </svg>
++      <span
++        data-testid="unread-count"
++        className={`absolute -right-2 -top-1.5 min-w-5 rounded-full px-1.5 text-center text-xs font-semibold leading-5 ${
++          count > 0 ? "bg-rose-600 text-white" : "bg-slate-200 text-slate-600"
++        }`}
++      >
++        {count > 99 ? "99+" : count}
++      </span>
++    </div>
++  );
++}
++
++function AuthScreen({ onLoggedIn }: { onLoggedIn: () => void }) {
++  const [mode, setMode] = useState<"login" | "register">("login");
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [info, setInfo] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  async function submit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setInfo(null);
++    setBusy(true);
++    try {
++      if (mode === "register") {
++        await api.register(username, password);
++      }
++      const { token } = await api.login(username, password);
++      setToken(token);
++      onLoggedIn();
++    } catch (err) {
++      setError(errMsg(err));
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <div className="mx-auto mt-16 max-w-sm rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
++      <div className="mb-6 flex rounded-lg bg-slate-100 p-1 text-sm font-medium">
++        {(["login", "register"] as const).map((m) => (
++          <button
++            key={m}
++            type="button"
++            onClick={() => {
++              setMode(m);
++              setError(null);
++              setInfo(null);
++            }}
++            className={`flex-1 rounded-md px-3 py-1.5 ${
++              mode === m ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
++            }`}
++          >
++            {m === "login" ? "Sign in" : "Register"}
++          </button>
++        ))}
++      </div>
++      <form onSubmit={submit} className="space-y-4">
++        <h2 className="text-lg font-semibold text-slate-900">
++          {mode === "login" ? "Sign in to your inbox" : "Create an account"}
++        </h2>
++        <label className="block text-sm">
++          <span className="mb-1 block font-medium text-slate-700">Username</span>
++          <input
++            className={inputCls}
++            name="username"
++            autoComplete="username"
++            value={username}
++            onChange={(e) => setUsername(e.target.value)}
++            required
++          />
++        </label>
++        <label className="block text-sm">
++          <span className="mb-1 block font-medium text-slate-700">Password</span>
++          <input
++            className={inputCls}
++            name="password"
++            type="password"
++            autoComplete={mode === "login" ? "current-password" : "new-password"}
++            minLength={mode === "register" ? 8 : undefined}
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            required
++          />
++          {mode === "register" && (
++            <span className="mt-1 block text-xs text-slate-500">At least 8 characters.</span>
++          )}
++        </label>
++        {error && <Alert kind="error">{error}</Alert>}
++        {info && <Alert kind="success">{info}</Alert>}
++        <button type="submit" className={`${btnPrimary} w-full`} disabled={busy}>
++          {busy ? "Please wait…" : mode === "login" ? "Sign in" : "Register"}
++        </button>
++      </form>
++    </div>
++  );
++}
++
++function NotificationForm({
++  title,
++  submitLabel,
++  defaultType,
++  onSubmit,
++}: {
++  title: string;
++  submitLabel: string;
++  defaultType: string;
++  onSubmit: (message: string, type: string) => Promise<string | void>;
++}) {
++  const [message, setMessage] = useState("");
++  const [type, setType] = useState(defaultType);
++  const [error, setError] = useState<string | null>(null);
++  const [info, setInfo] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  async function submit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setInfo(null);
++    setBusy(true);
++    try {
++      const result = await onSubmit(message, type);
++      setMessage("");
++      if (result) setInfo(result);
++    } catch (err) {
++      setError(errMsg(err));
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <form onSubmit={submit} className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
++      <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
++      <textarea
++        className={`${inputCls} min-h-20`}
++        placeholder="Message"
++        aria-label="Message"
++        maxLength={2000}
++        value={message}
++        onChange={(e) => setMessage(e.target.value)}
++        required
++      />
++      <div className="flex gap-2">
++        <select className={inputCls} aria-label="Type" value={type} onChange={(e) => setType(e.target.value)}>
++          {TYPES.map((t) => (
++            <option key={t} value={t}>
++              {t}
++            </option>
++          ))}
++        </select>
++        <button type="submit" className={`${btnPrimary} shrink-0`} disabled={busy || !message.trim()}>
++          {submitLabel}
++        </button>
++      </div>
++      {error && <Alert kind="error">{error}</Alert>}
++      {info && <Alert kind="success">{info}</Alert>}
++    </form>
++  );
++}
++
++function Inbox({
++  data,
++  loading,
++  error,
++  readFilter,
++  typeFilter,
++  setReadFilter,
++  setTypeFilter,
++  setPage,
++  onToggle,
++  onDelete,
++  onReadAll,
++}: {
++  data: NotificationPage | null;
++  loading: boolean;
++  error: string | null;
++  readFilter: string;
++  typeFilter: string;
++  setReadFilter: (v: string) => void;
++  setTypeFilter: (v: string) => void;
++  setPage: (p: number) => void;
++  onToggle: (id: number, read: boolean) => void;
++  onDelete: (id: number) => void;
++  onReadAll: () => void;
++}) {
++  const page = data?.page ?? 1;
++  const pageSize = data?.page_size ?? PAGE_SIZE;
++  const total = data?.total ?? 0;
++  const pages = Math.max(1, Math.ceil(total / pageSize));
++
++  return (
++    <section className="rounded-xl border border-slate-200 bg-white shadow-sm">
++      <div className="flex flex-wrap items-end gap-3 border-b border-slate-200 p-4">
++        <h2 className="mr-auto text-base font-semibold text-slate-900">Inbox</h2>
++        <label className="text-xs font-medium text-slate-600">
++          Status
++          <select
++            className={`${inputCls} mt-1`}
++            value={readFilter}
++            onChange={(e) => setReadFilter(e.target.value)}
++          >
++            <option value="">All</option>
++            <option value="false">Unread</option>
++            <option value="true">Read</option>
++          </select>
++        </label>
++        <label className="text-xs font-medium text-slate-600">
++          Type
++          <select
++            className={`${inputCls} mt-1`}
++            value={typeFilter}
++            onChange={(e) => setTypeFilter(e.target.value)}
++          >
++            <option value="">All types</option>
++            {TYPES.map((t) => (
++              <option key={t} value={t}>
++                {t}
++              </option>
++            ))}
++          </select>
++        </label>
++        <button
++          type="button"
++          className={btnSecondary}
++          onClick={onReadAll}
++          disabled={!data || data.unread_count === 0}
++        >
++          Mark all as read
++        </button>
++      </div>
++
++      {error && (
++        <div className="p-4">
++          <Alert kind="error">{error}</Alert>
++        </div>
++      )}
++
++      {data && data.items.length === 0 && !loading && (
++        <p className="p-8 text-center text-sm text-slate-500">No notifications.</p>
++      )}
++      {!data && loading && <p className="p-8 text-center text-sm text-slate-500">Loading…</p>}
++
++      <ul className="divide-y divide-slate-100">
++        {data?.items.map((n) => (
++          <li
++            key={n.id}
++            className={`flex items-start gap-3 px-4 py-3 ${n.read ? "bg-white" : "bg-indigo-50/50"}`}
++          >
++            <span
++              aria-hidden="true"
++              className={`mt-2 h-2 w-2 shrink-0 rounded-full ${n.read ? "bg-transparent" : "bg-indigo-500"}`}
++            />
++            <div className="min-w-0 flex-1">
++              <div className="mb-1 flex flex-wrap items-center gap-2">
++                <TypeBadge type={n.type} />
++                <time className="text-xs text-slate-500" dateTime={n.created_at}>
++                  {formatDate(n.created_at)}
++                </time>
++                {!n.read && <span className="sr-only">Unread</span>}
++              </div>
++              <p
++                className={`whitespace-pre-wrap break-words text-sm ${
++                  n.read ? "font-normal text-slate-600" : "font-bold text-slate-900"
++                }`}
++              >
++                {n.message}
++              </p>
++            </div>
++            <div className="flex shrink-0 gap-2">
++              <button type="button" className={btnSecondary} onClick={() => onToggle(n.id, !n.read)}>
++                {n.read ? "Mark unread" : "Mark read"}
++              </button>
++              <button
++                type="button"
++                className="rounded-md border border-rose-200 bg-white px-3 py-1.5 text-sm font-medium text-rose-700 shadow-sm hover:bg-rose-50"
++                onClick={() => onDelete(n.id)}
++              >
++                Delete
++              </button>
++            </div>
++          </li>
++        ))}
++      </ul>
++
++      <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-sm text-slate-600">
++        <span>
++          {total} notification{total === 1 ? "" : "s"} · Page {page} of {pages}
++        </span>
++        <div className="flex gap-2">
++          <button type="button" className={btnSecondary} disabled={page <= 1} onClick={() => setPage(page - 1)}>
++            Previous
++          </button>
++          <button
++            type="button"
++            className={btnSecondary}
++            disabled={page >= pages}
++            onClick={() => setPage(page + 1)}
++          >
++            Next
++          </button>
++        </div>
++      </div>
++    </section>
++  );
++}
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [me, setMe] = useState<Me | null>(null);
++  const [checking, setChecking] = useState(true);
++  const [data, setData] = useState<NotificationPage | null>(null);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [readFilter, setReadFilter] = useState("");
++  const [typeFilter, setTypeFilter] = useState("");
++  const [page, setPage] = useState(1);
++
++  const signOutLocal = useCallback(() => {
++    setToken(null);
++    setMe(null);
++    setData(null);
++    setPage(1);
++    setReadFilter("");
++    setTypeFilter("");
++  }, []);
++
++  const handleError = useCallback(
++    (e: unknown) => {
++      if (e instanceof ApiError && e.status === 401) signOutLocal();
++      else setError(errMsg(e));
++    },
++    [signOutLocal],
++  );
++
++  const loadMe = useCallback(async () => {
++    if (!getToken()) {
++      setChecking(false);
++      return;
++    }
++    try {
++      setMe(await api.me());
++    } catch (e) {
++      if (e instanceof ApiError && e.status === 401) signOutLocal();
++    } finally {
++      setChecking(false);
++    }
++  }, [signOutLocal]);
++
++  useEffect(() => {
++    loadMe();
++  }, [loadMe]);
++
++  const load = useCallback(async () => {
++    if (!me) return;
++    setLoading(true);
++    try {
++      const res = await api.list({ read: readFilter, type: typeFilter, page, page_size: PAGE_SIZE });
++      const pages = Math.max(1, Math.ceil(res.total / res.page_size));
++      if (res.items.length === 0 && page > pages) {
++        setPage(pages);
++        return;
++      }
++      setData(res);
++      setError(null);
++    } catch (e) {
++      handleError(e);
++    } finally {
++      setLoading(false);
++    }
++  }, [me, readFilter, typeFilter, page, handleError]);
++
++  useEffect(() => {
++    load();
++  }, [load]);
++
++  useEffect(() => {
++    if (!me) return;
++    const t = window.setInterval(load, 30000);
++    return () => window.clearInterval(t);
++  }, [me, load]);
++
++  async function act(fn: () => Promise<unknown>) {
++    try {
++      await fn();
++      await load();
++    } catch (e) {
++      handleError(e);
++    }
++  }
++
++  async function signOut() {
++    try {
++      await api.logout();
++    } catch {
++      /* ignore */
++    }
++    signOutLocal();
++  }
++
++  if (checking) {
++    return <div className="min-h-screen bg-slate-50" />;
++  }
++
++  return (
++    <div className="min-h-screen bg-slate-50 text-slate-900">
++      <header className="border-b border-slate-200 bg-white">
++        <div className="mx-auto flex max-w-5xl items-center gap-4 px-4 py-3">
++          <h1 className="mr-auto text-lg font-semibold">Notification Center</h1>
++          {me && (
++            <>
++              <BellIcon count={data?.unread_count ?? 0} />
++              <span className="text-sm text-slate-600">
++                Signed in as <strong className="font-semibold text-slate-900">{me.username}</strong>
++                {me.is_admin && (
++                  <span className="ml-2 rounded bg-slate-800 px-1.5 py-0.5 text-xs font-medium text-white">
++                    admin
++                  </span>
++                )}
++              </span>
++              <button type="button" className={btnSecondary} onClick={signOut}>
++                Sign out
++              </button>
++            </>
++          )}
++        </div>
++      </header>
++
++      <main className="mx-auto max-w-5xl px-4 py-6">
++        {!me ? (
++          <AuthScreen onLoggedIn={loadMe} />
++        ) : (
++          <div className="grid gap-6 lg:grid-cols-[1fr_18rem]">
++            <Inbox
++              data={data}
++              loading={loading}
++              error={error}
++              readFilter={readFilter}
++              typeFilter={typeFilter}
++              setReadFilter={(v) => {
++                setReadFilter(v);
++                setPage(1);
++              }}
++              setTypeFilter={(v) => {
++                setTypeFilter(v);
++                setPage(1);
++              }}
++              setPage={setPage}
++              onToggle={(id, read) => act(() => api.setRead(id, read))}
++              onDelete={(id) => act(() => api.remove(id))}
++              onReadAll={() => act(() => api.readAll())}
++            />
++            <aside className="space-y-6">
++              <NotificationForm
++                title="Add a notification"
++                submitLabel="Add"
++                defaultType="info"
++                onSubmit={async (message, type) => {
++                  try {
++                    await api.create(message, type);
++                  } catch (e) {
++                    if (e instanceof ApiError && e.status === 401) signOutLocal();
++                    throw e;
++                  }
++                  await load();
++                }}
++              />
++              {me.is_admin && (
++                <NotificationForm
++                  title="Broadcast announcement"
++                  submitLabel="Broadcast"
++                  defaultType="announcement"
++                  onSubmit={async (message, type) => {
++                    let delivered: number;
++                    try {
++                      ({ delivered } = await api.broadcast(message, type));
++                    } catch (e) {
++                      if (e instanceof ApiError && e.status === 401) signOutLocal();
++                      throw e;
++                    }
++                    await load();
++                    return `Delivered to ${delivered} inbox${delivered === 1 ? "" : "es"}.`;
++                  }}
++                />
++              )}
++            </aside>
++          </div>
++        )}
++      </main>
++    </div>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..4c513d6
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,88 @@
++export type Notification = {
++  id: number;
++  message: string;
++  type: string;
++  read: boolean;
++  created_at: string;
++};
++
++export type NotificationPage = {
++  items: Notification[];
++  total: number;
++  page: number;
++  page_size: number;
++  unread_count: number;
++};
++
++export type Me = { id: number; username: string; is_admin: boolean };
++
++export class ApiError extends Error {
++  status: number;
++  constructor(status: number, message: string) {
++    super(message);
++    this.status = status;
++  }
++}
++
++const TOKEN_KEY = "nc_token";
++
++export function getToken(): string | null {
++  return localStorage.getItem(TOKEN_KEY);
++}
++
++export function setToken(token: string | null) {
++  if (token) localStorage.setItem(TOKEN_KEY, token);
++  else localStorage.removeItem(TOKEN_KEY);
++}
++
++async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
++  const headers: Record<string, string> = {};
++  const token = getToken();
++  if (token) headers.Authorization = `Bearer ${token}`;
++  if (body !== undefined) headers["Content-Type"] = "application/json";
++  const res = await fetch(`/api${path}`, {
++    method,
++    headers,
++    body: body === undefined ? undefined : JSON.stringify(body),
++  });
++  if (res.status === 204) return undefined as T;
++  let data: unknown = null;
++  try {
++    data = await res.json();
++  } catch {
++    data = null;
++  }
++  if (!res.ok) {
++    const msg =
++      data && typeof data === "object" && "error" in data && typeof data.error === "string"
++        ? data.error
++        : `Request failed (${res.status})`;
++    throw new ApiError(res.status, msg);
++  }
++  return data as T;
++}
++
++export const api = {
++  register: (username: string, password: string) =>
++    request<{ id: number; username: string }>("POST", "/auth/register", { username, password }),
++  login: (username: string, password: string) =>
++    request<{ token: string }>("POST", "/auth/login", { username, password }),
++  logout: () => request<void>("POST", "/auth/logout"),
++  me: () => request<Me>("GET", "/auth/me"),
++  list: (params: { read?: string; type?: string; page: number; page_size: number }) => {
++    const q = new URLSearchParams();
++    if (params.read) q.set("read", params.read);
++    if (params.type) q.set("type", params.type);
++    q.set("page", String(params.page));
++    q.set("page_size", String(params.page_size));
++    return request<NotificationPage>("GET", `/notifications?${q.toString()}`);
++  },
++  create: (message: string, type: string) =>
++    request<Notification>("POST", "/notifications", { message, type }),
++  setRead: (id: number, read: boolean) =>
++    request<Notification>("PATCH", `/notifications/${id}`, { read }),
++  remove: (id: number) => request<void>("DELETE", `/notifications/${id}`),
++  readAll: () => request<{ updated: number }>("POST", "/notifications/read-all"),
++  broadcast: (message: string, type: string) =>
++    request<{ delivered: number }>("POST", "/admin/broadcast", { message, type }),
++};
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..c2a145c 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
++import { StrictMode } from "react";
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <StrictMode>
++    <App />
++  </StrictMode>,
++);
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..26ae231
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,15 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "noEmit": true,
++    "isolatedModules": true,
++    "skipLibCheck": true,
++    "types": ["vite/client"]
++  },
++  "include": ["src", "vite.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

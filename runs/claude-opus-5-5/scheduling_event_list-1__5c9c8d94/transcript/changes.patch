@@ -1,0 +1,3642 @@
+diff --git a/.dockerignore b/.dockerignore
+index 069be25..82aef47 100644
+--- a/.dockerignore
++++ b/.dockerignore
+@@ -8,3 +8,5 @@ frontend/dist
+ data/*.db
+ data/*.sqlite
+ data/*.sqlite3
++backend/tests
++.venv
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..ca04b1d
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,5 @@
++node_modules/
++frontend/dist/
++.venv/
++__pycache__/
++data/
+diff --git a/Dockerfile b/Dockerfile
+index 214952b..202ab76 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -22,4 +22,4 @@ COPY backend/ backend/
+ COPY --from=frontend /app/frontend/dist frontend/dist
+ RUN mkdir -p data
+ EXPOSE 8000
+-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--pythonpath", "backend", "app:app"]
++CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--threads", "4", "--pythonpath", "backend", "app:app"]
+diff --git a/README.md b/README.md
+index 24967b9..1850802 100644
+--- a/README.md
++++ b/README.md
+@@ -13,3 +13,8 @@
+ - `frontend/`: a Vite project (React + TypeScript). `npm run build` writes `frontend/dist`, which the image copies next to the backend.
+ 
+ Dependencies are pinned: `backend/requirements.lock` holds the resolved versions and is installed as a pip constraints file. The frontend uses `frontend/package-lock.json` (`npm ci`). When you change dependencies, update the lock file as well (or remove it).
++
++## Development
++
++- Backend tests: `python -m unittest backend/tests/test_api.py`
++- Frontend type-check + build: `cd frontend && npm run build`
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..780e086 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,516 @@
+ """Flask entry point."""
+ 
++import hashlib
++import os
++import secrets
++import sqlite3
++from datetime import date, datetime, timedelta, timezone
++from functools import wraps
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.exceptions import HTTPException
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", "data")).resolve()
++DB_PATH = DATA_DIR / "app.db"
++
++TOKEN_TTL = timedelta(days=30)
++EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
++
++MAX_USERNAME = 64
++MAX_PASSWORD = 256
++MAX_TITLE = 200
++MAX_LOCATION = 200
++MAX_DESCRIPTION = 5000
+ 
+ app = Flask(__name__, static_folder=None)
++app.json.sort_keys = False
++
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE,
++    password_hash TEXT NOT NULL,
++    created_at INTEGER NOT NULL
++);
++CREATE TABLE IF NOT EXISTS tokens (
++    token_hash TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at INTEGER NOT NULL,
++    expires_at INTEGER NOT NULL
++);
++CREATE TABLE IF NOT EXISTS events (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    title TEXT NOT NULL,
++    description TEXT,
++    location TEXT,
++    start_time INTEGER NOT NULL,
++    end_time INTEGER NOT NULL,
++    created_at INTEGER NOT NULL,
++    created_by TEXT NOT NULL,
++    updated_at INTEGER NOT NULL
++);
++CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_time);
++CREATE INDEX IF NOT EXISTS idx_events_end ON events(end_time);
++"""
++
++
++def connect() -> sqlite3.Connection:
++    conn = sqlite3.connect(DB_PATH, timeout=30)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    conn.execute("PRAGMA busy_timeout = 30000")
++    return conn
++
++
++def init_db() -> None:
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = connect()
++    try:
++        conn.execute("PRAGMA journal_mode = WAL")
++        conn.executescript(SCHEMA)
++        conn.commit()
++    finally:
++        conn.close()
++
++
++init_db()
++
++
++def db() -> sqlite3.Connection:
++    if "db" not in g:
++        g.db = connect()
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc):
++    conn = g.pop("db", None)
++    if conn is not None:
++        conn.close()
++
++
++# ---------------------------------------------------------------- time helpers
++
++
++def to_micros(dt: datetime) -> int:
++    delta = dt - EPOCH
++    return (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
++
++
++def from_micros(value: int) -> datetime:
++    return EPOCH + timedelta(microseconds=value)
++
++
++def format_dt(value: int) -> str:
++    dt = from_micros(value)
++    text = f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}T{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}"
++    if dt.microsecond:
++        text += f".{dt.microsecond:06d}".rstrip("0")
++    return text + "Z"
++
++
++def now_micros() -> int:
++    return to_micros(datetime.now(timezone.utc))
++
++
++def parse_datetime(value: str) -> datetime:
++    """Parse an ISO 8601 date-time; values without an offset are UTC."""
++    text = value.strip()
++    if not text:
++        raise ValueError("empty")
++    if text[-1] in "zZ":
++        text = text[:-1] + "+00:00"
++    dt = datetime.fromisoformat(text)
++    if dt.tzinfo is None:
++        dt = dt.replace(tzinfo=timezone.utc)
++    return dt.astimezone(timezone.utc)
++
++
++def is_date_only(value: str) -> bool:
++    try:
++        date.fromisoformat(value.strip())
++    except ValueError:
++        return False
++    return "T" not in value and " " not in value.strip()
++
++
++# ---------------------------------------------------------------- errors
++
++
++class ApiError(Exception):
++    def __init__(self, status: int, message: str, errors: dict | None = None):
++        super().__init__(message)
++        self.status = status
++        self.message = message
++        self.errors = errors
++
++
++@app.errorhandler(ApiError)
++def handle_api_error(err: ApiError):
++    body = {"error": err.message}
++    if err.errors:
++        body["errors"] = err.errors
++    return jsonify(body), err.status
++
++
++@app.errorhandler(HTTPException)
++def handle_http_error(err: HTTPException):
++    if request.path.startswith("/api"):
++        return jsonify({"error": err.description or err.name}), err.code
++    return err
++
++
++@app.errorhandler(Exception)
++def handle_unexpected(err: Exception):
++    if isinstance(err, HTTPException):
++        return handle_http_error(err)
++    app.logger.exception("Unhandled error")
++    return jsonify({"error": "Internal server error"}), 500
++
++
++def validation_error(errors: dict) -> ApiError:
++    first = next(iter(errors.values()))
++    return ApiError(400, first, errors)
++
++
++def json_body() -> dict:
++    data = request.get_json(silent=True, force=True)
++    if not isinstance(data, dict):
++        raise ApiError(400, "Request body must be a JSON object")
++    return data
++
++
++# ---------------------------------------------------------------- auth
++
++
++def hash_token(token: str) -> str:
++    return hashlib.sha256(token.encode()).hexdigest()
++
++
++def current_user():
++    if "user" in g:
++        return g.user
++    g.user = None
++    header = request.headers.get("Authorization", "")
++    scheme, _, token = header.partition(" ")
++    token = token.strip()
++    if scheme.lower() == "bearer" and token:
++        row = db().execute(
++            "SELECT u.id, u.username FROM tokens t JOIN users u ON u.id = t.user_id "
++            "WHERE t.token_hash = ? AND t.expires_at > ?",
++            (hash_token(token), now_micros()),
++        ).fetchone()
++        if row is not None:
++            g.user = {"id": row["id"], "username": row["username"]}
++    return g.user
++
++
++def login_required(view):
++    @wraps(view)
++    def wrapper(*args, **kwargs):
++        if current_user() is None:
++            raise ApiError(401, "Authentication required")
++        return view(*args, **kwargs)
++
++    return wrapper
++
++
++def read_credentials() -> tuple[str, str]:
++    data = json_body()
++    username = data.get("username")
++    password = data.get("password")
++    errors = {}
++    if not isinstance(username, str) or not username.strip():
++        errors["username"] = "Username is required"
++    elif len(username.strip()) > MAX_USERNAME:
++        errors["username"] = f"Username must be at most {MAX_USERNAME} characters"
++    if not isinstance(password, str) or password == "":
++        errors["password"] = "Password is required"
++    elif len(password) > MAX_PASSWORD:
++        errors["password"] = f"Password must be at most {MAX_PASSWORD} characters"
++    if errors:
++        raise validation_error(errors)
++    return username.strip(), password
++
++
++@app.post("/api/auth/register")
++def register():
++    username, password = read_credentials()
++    conn = db()
++    try:
++        cur = conn.execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, generate_password_hash(password), now_micros()),
++        )
++        conn.commit()
++    except sqlite3.IntegrityError:
++        conn.rollback()
++        raise ApiError(409, "Username is already taken", {"username": "Username is already taken"})
++    return jsonify({"id": cur.lastrowid, "username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    username, password = read_credentials()
++    conn = db()
++    row = conn.execute(
++        "SELECT id, username, password_hash FROM users WHERE username = ?", (username,)
++    ).fetchone()
++    if row is None or not check_password_hash(row["password_hash"], password):
++        raise ApiError(401, "Invalid username or password")
++    token = secrets.token_urlsafe(32)
++    now = now_micros()
++    conn.execute("DELETE FROM tokens WHERE expires_at <= ?", (now,))
++    conn.execute(
++        "INSERT INTO tokens (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
++        (hash_token(token), row["id"], now, now + to_micros(EPOCH + TOKEN_TTL)),
++    )
++    conn.commit()
++    return jsonify({"token": token, "username": row["username"]})
++
++
++@app.post("/api/auth/logout")
++@login_required
++def logout():
++    header = request.headers.get("Authorization", "")
++    token = header.partition(" ")[2].strip()
++    conn = db()
++    conn.execute("DELETE FROM tokens WHERE token_hash = ?", (hash_token(token),))
++    conn.commit()
++    return "", 204
++
++
++@app.get("/api/auth/me")
++@login_required
++def me():
++    user = current_user()
++    return jsonify({"id": user["id"], "username": user["username"]})
++
++
++# ---------------------------------------------------------------- events
++
++
++def serialize_event(row: sqlite3.Row) -> dict:
++    return {
++        "id": row["id"],
++        "title": row["title"],
++        "description": row["description"],
++        "location": row["location"],
++        "start_time": format_dt(row["start_time"]),
++        "end_time": format_dt(row["end_time"]),
++        "created_at": format_dt(row["created_at"]),
++        "created_by": row["created_by"],
++        "updated_at": format_dt(row["updated_at"]),
++    }
++
++
++def optional_text(data: dict, field: str, label: str, limit: int, errors: dict):
++    value = data.get(field)
++    if value is None:
++        return None
++    if not isinstance(value, str):
++        errors[field] = f"{label} must be a string"
++        return None
++    if len(value) > limit:
++        errors[field] = f"{label} must be at most {limit} characters"
++        return None
++    value = value.strip()
++    return value or None
++
++
++def required_datetime(data: dict, field: str, label: str, errors: dict):
++    value = data.get(field)
++    if value is None or (isinstance(value, str) and not value.strip()):
++        errors[field] = f"{label} is required"
++        return None
++    if not isinstance(value, str):
++        errors[field] = f"{label} must be an ISO 8601 date-time string"
++        return None
++    try:
++        return to_micros(parse_datetime(value))
++    except (ValueError, OverflowError):
++        errors[field] = f"{label} must be a valid ISO 8601 date-time"
++        return None
++
++
++def validate_event(data: dict) -> dict:
++    errors: dict[str, str] = {}
++
++    title = data.get("title")
++    if title is None or (isinstance(title, str) and not title.strip()):
++        errors["title"] = "Title is required"
++    elif not isinstance(title, str):
++        errors["title"] = "Title must be a string"
++    elif len(title.strip()) > MAX_TITLE:
++        errors["title"] = f"Title must be at most {MAX_TITLE} characters"
++
++    description = optional_text(data, "description", "Description", MAX_DESCRIPTION, errors)
++    location = optional_text(data, "location", "Location", MAX_LOCATION, errors)
++    start = required_datetime(data, "start_time", "Start time", errors)
++    end = required_datetime(data, "end_time", "End time", errors)
++
++    if start is not None and end is not None and end < start:
++        errors["end_time"] = "End time must not be before start time"
++
++    if errors:
++        raise validation_error(errors)
++
++    return {
++        "title": title.strip(),
++        "description": description,
++        "location": location,
++        "start_time": start,
++        "end_time": end,
++    }
++
++
++def get_event_row(event_id: int) -> sqlite3.Row:
++    row = db().execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
++    if row is None:
++        raise ApiError(404, "Event not found")
++    return row
++
++
++def parse_range_bound(name: str, is_end: bool):
++    raw = request.args.get(name)
++    if raw is None or raw.strip() == "":
++        return None
++    try:
++        dt = parse_datetime(raw)
++    except (ValueError, OverflowError):
++        raise ApiError(
++            400,
++            f"{name} must be a valid ISO 8601 date or date-time",
++            {name: f"{name} must be a valid ISO 8601 date or date-time"},
++        )
++    value = to_micros(dt)
++    if is_end and is_date_only(raw):
++        # A date-only end bound includes the whole day.
++        return value + to_micros(EPOCH + timedelta(days=1)), True
++    return value, False
++
++
++def parse_int_arg(name: str, minimum: int, maximum: int | None = None):
++    raw = request.args.get(name)
++    if raw is None or raw.strip() == "":
++        return None
++    try:
++        value = int(raw)
++    except ValueError:
++        raise ApiError(400, f"{name} must be an integer", {name: f"{name} must be an integer"})
++    if value < minimum or (maximum is not None and value > maximum):
++        message = f"{name} must be at least {minimum}" + (
++            f" and at most {maximum}" if maximum is not None else ""
++        )
++        raise ApiError(400, message, {name: message})
++    return value
++
++
++@app.get("/api/events")
++def list_events():
++    start = parse_range_bound("start_date", is_end=False)
++    end = parse_range_bound("end_date", is_end=True)
++    limit = parse_int_arg("limit", 1, 1000)
++    offset = parse_int_arg("offset", 0) or 0
++
++    clauses: list[str] = []
++    params: list = []
++    if start is not None:
++        start_value = start[0]
++        clauses.append("(end_time > ? OR start_time >= ?)")
++        params += [start_value, start_value]
++    if end is not None:
++        end_value, exclusive = end
++        clauses.append("start_time < ?" if exclusive else "start_time <= ?")
++        params.append(end_value)
++    if start is not None and end is not None:
++        end_value, exclusive = end
++        if end_value < start[0] or (exclusive and end_value == start[0]):
++            raise ApiError(
++                400,
++                "end_date must not be before start_date",
++                {"end_date": "end_date must not be before start_date"},
++            )
++
++    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
++    conn = db()
++    total = conn.execute(f"SELECT COUNT(*) FROM events{where}", params).fetchone()[0]
++    sql = f"SELECT * FROM events{where} ORDER BY start_time, end_time, id"
++    query_params = list(params)
++    if limit is not None or offset:
++        sql += " LIMIT ? OFFSET ?"
++        query_params += [limit if limit is not None else -1, offset]
++    rows = conn.execute(sql, query_params).fetchall()
++    return jsonify({"items": [serialize_event(r) for r in rows], "total": total})
++
++
++@app.post("/api/events")
++@login_required
++def create_event():
++    fields = validate_event(json_body())
++    now = now_micros()
++    conn = db()
++    cur = conn.execute(
++        "INSERT INTO events (title, description, location, start_time, end_time, "
++        "created_at, created_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
++        (
++            fields["title"],
++            fields["description"],
++            fields["location"],
++            fields["start_time"],
++            fields["end_time"],
++            now,
++            current_user()["username"],
++            now,
++        ),
++    )
++    conn.commit()
++    return jsonify(serialize_event(get_event_row(cur.lastrowid))), 201
++
++
++@app.get("/api/events/<int:event_id>")
++def get_event(event_id: int):
++    return jsonify(serialize_event(get_event_row(event_id)))
++
++
++@app.put("/api/events/<int:event_id>")
++@login_required
++def update_event(event_id: int):
++    get_event_row(event_id)
++    fields = validate_event(json_body())
++    conn = db()
++    conn.execute(
++        "UPDATE events SET title = ?, description = ?, location = ?, start_time = ?, "
++        "end_time = ?, updated_at = ? WHERE id = ?",
++        (
++            fields["title"],
++            fields["description"],
++            fields["location"],
++            fields["start_time"],
++            fields["end_time"],
++            now_micros(),
++            event_id,
++        ),
++    )
++    conn.commit()
++    return jsonify(serialize_event(get_event_row(event_id)))
++
++
++@app.delete("/api/events/<int:event_id>")
++@login_required
++def delete_event(event_id: int):
++    get_event_row(event_id)
++    conn = db()
++    conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
++    conn.commit()
++    return "", 204
++
++
++# ---------------------------------------------------------------- misc
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +518,17 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.route("/api", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
++@app.route("/api/<path:_path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
++def api_not_found(_path: str = ""):
++    raise ApiError(404, "Not found")
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
++    if not (DIST / "index.html").is_file():
++        return "Frontend not built", 404
+     return send_from_directory(DIST, "index.html")
+diff --git a/backend/tests/test_api.py b/backend/tests/test_api.py
+new file mode 100644
+index 0000000..e1693ef
+--- /dev/null
++++ b/backend/tests/test_api.py
+@@ -0,0 +1,123 @@
++import os
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++os.environ["DATA_DIR"] = tempfile.mkdtemp()
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++
++import app as app_module  # noqa: E402
++
++
++class ApiTest(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.client = app_module.app.test_client()
++        cls.client.post("/api/auth/register", json={"username": "alice", "password": "pw"})
++        res = cls.client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
++        cls.auth = {"Authorization": f"Bearer {res.get_json()['token']}"}
++
++    def create(self, **fields):
++        body = {"title": "T", "start_time": "2030-01-01T10:00:00", "end_time": "2030-01-01T11:00:00"}
++        body.update(fields)
++        return self.client.post("/api/events", json=body, headers=self.auth)
++
++    def test_health(self):
++        self.assertEqual(self.client.get("/api/health").get_json(), {"status": "ok"})
++
++    def test_register_and_login(self):
++        res = self.client.post("/api/auth/register", json={"username": "bob", "password": "secret"})
++        self.assertEqual(res.status_code, 201)
++        res = self.client.post("/api/auth/register", json={"username": "bob", "password": "secret"})
++        self.assertEqual(res.status_code, 409)
++        res = self.client.post("/api/auth/register", json={"username": ""})
++        self.assertEqual(res.status_code, 400)
++        res = self.client.post("/api/auth/login", json={"username": "bob", "password": "nope"})
++        self.assertEqual(res.status_code, 401)
++        res = self.client.post("/api/auth/login", json={"username": "bob", "password": "secret"})
++        self.assertEqual(res.status_code, 200)
++        self.assertTrue(res.get_json()["token"])
++
++    def test_auth_required(self):
++        body = {"title": "x", "start_time": "2030-01-01T10:00:00", "end_time": "2030-01-01T11:00:00"}
++        self.assertEqual(self.client.post("/api/events", json=body).status_code, 401)
++        bad = {"Authorization": "Bearer nope"}
++        self.assertEqual(self.client.post("/api/events", json=body, headers=bad).status_code, 401)
++        ev = self.create().get_json()
++        self.assertEqual(self.client.put(f"/api/events/{ev['id']}", json=body).status_code, 401)
++        self.assertEqual(self.client.delete(f"/api/events/{ev['id']}").status_code, 401)
++
++    def test_crud(self):
++        res = self.create(title="Meet", description="d", location="L",
++                          start_time="2030-02-01T10:00:00+02:00", end_time="2030-02-01T09:30:00.25Z")
++        self.assertEqual(res.status_code, 201, res.get_json())
++        ev = res.get_json()
++        self.assertEqual(set(ev) >= {"id", "title", "description", "location", "start_time",
++                                     "end_time", "created_at", "created_by"}, True)
++        self.assertEqual(ev["start_time"], "2030-02-01T08:00:00Z")
++        self.assertEqual(ev["end_time"], "2030-02-01T09:30:00.25Z")
++        self.assertTrue(ev["created_at"].endswith("Z"))
++        self.assertEqual(ev["created_by"], "alice")
++
++        got = self.client.get(f"/api/events/{ev['id']}").get_json()
++        self.assertEqual(got, ev)
++
++        res = self.client.put(f"/api/events/{ev['id']}", headers=self.auth,
++                              json={"title": "New", "start_time": "2030-02-01T10:00:00",
++                                    "end_time": "2030-02-01T12:00:00"})
++        self.assertEqual(res.status_code, 200)
++        upd = res.get_json()
++        self.assertEqual(upd["title"], "New")
++        self.assertIsNone(upd["description"])
++        self.assertIsNone(upd["location"])
++        self.assertEqual(upd["created_by"], "alice")
++        self.assertEqual(upd["created_at"], ev["created_at"])
++
++        self.client.post("/api/auth/register", json={"username": "carol", "password": "pw"})
++        tok = self.client.post("/api/auth/login", json={"username": "carol", "password": "pw"}).get_json()["token"]
++        res = self.client.put(f"/api/events/{ev['id']}", headers={"Authorization": f"Bearer {tok}"},
++                              json={"title": "Carol", "start_time": "2030-02-01T10:00:00",
++                                    "end_time": "2030-02-01T12:00:00"})
++        self.assertEqual(res.status_code, 200)
++        self.assertEqual(res.get_json()["created_by"], "alice")
++
++        self.assertEqual(self.client.delete(f"/api/events/{ev['id']}", headers=self.auth).status_code, 204)
++        self.assertEqual(self.client.get(f"/api/events/{ev['id']}").status_code, 404)
++        self.assertEqual(self.client.delete(f"/api/events/{ev['id']}", headers=self.auth).status_code, 404)
++
++    def test_validation(self):
++        res = self.create(title="", start_time="bad")
++        self.assertEqual(res.status_code, 400)
++        body = res.get_json()
++        self.assertIn("title", body["errors"])
++        self.assertIn("start_time", body["errors"])
++        res = self.create(start_time="2030-01-01T12:00:00Z", end_time="2030-01-01T11:00:00Z")
++        self.assertEqual(res.status_code, 400)
++        self.assertIn("end_time", res.get_json()["errors"])
++        res = self.create(title=5)
++        self.assertEqual(res.status_code, 400)
++        res = self.client.post("/api/events", data="nope", headers=self.auth)
++        self.assertEqual(res.status_code, 400)
++
++    def test_list_range(self):
++        a = self.create(title="R1", start_time="2031-05-10T10:00:00Z", end_time="2031-05-10T11:00:00Z").get_json()
++        b = self.create(title="R0", start_time="2031-05-09T23:00:00Z", end_time="2031-05-10T01:00:00Z").get_json()
++        c = self.create(title="R2", start_time="2031-05-11T00:00:00Z", end_time="2031-05-11T01:00:00Z").get_json()
++        res = self.client.get("/api/events?start_date=2031-05-10&end_date=2031-05-10")
++        data = res.get_json()
++        ids = [e["id"] for e in data["items"]]
++        self.assertEqual(ids, [b["id"], a["id"]])
++        self.assertEqual(data["total"], 2)
++        res = self.client.get("/api/events?start_date=2031-05-10T00:00:00Z&end_date=2031-05-12T00:00:00Z")
++        ids = [e["id"] for e in res.get_json()["items"]]
++        self.assertEqual(ids, [b["id"], a["id"], c["id"]])
++        all_items = self.client.get("/api/events").get_json()
++        starts = [e["start_time"] for e in all_items["items"]]
++        self.assertEqual(starts, sorted(starts))
++        self.assertEqual(all_items["total"], len(all_items["items"]))
++        self.assertEqual(self.client.get("/api/events?start_date=bad").status_code, 400)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..ac472d9 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Event Calendar</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..ea2882a 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,299 +10,1064 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "^4.3.5",
++        "@types/react": "^19.3.0",
++        "@types/react-dom": "^19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "^4.3.5",
++        "typescript": "^7.0.2",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+       "integrity": "sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==",
+       "dev": true,
+       "license": "MIT",
+-      "funding": {
+-        "url": "https://github.com/sponsors/oxc-project"
++      "funding": {
++        "url": "https://github.com/sponsors/oxc-project"
++      }
++    },
++    "node_modules/@rolldown/binding-android-arm-eabi": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.16.tgz",
++      "integrity": "sha512-ia3DwAs0OsMGS7+IConptSiyk9pEXkOx/AbJ2n/lAGxH3QkWQus1t8d7gnAT38FCU2sQu8lUbeR6AiZFv4JxaA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-android-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.16.tgz",
++      "integrity": "sha512-kx5wBiMB6E7TEvpl2B9gjLU004BkvEm2Dr941BFjx/SontPwSzNuQUIoVKxHHoSjpFIfHMmcguyLOtyn0hObRg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-darwin-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.16.tgz",
++      "integrity": "sha512-qslZrXnKJU4cUpjoAmtAo/KQM9e2IRMlmpig6Zpwj+8KWxW8v+nkAf9216Bsek9lOC1jvg2yCjygCFo2f83msQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-darwin-x64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.16.tgz",
++      "integrity": "sha512-FdF+y48ND13eAyM2mQn+85kvAqNlvRWROy2rhgA463X/0Gv4vGtazZtfaF1mRBLscYvtOlh4QnLjOWiFzX69OQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-freebsd-x64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.16.tgz",
++      "integrity": "sha512-ddjqFM5e95AgLbUPtKIS7V1KTVlA0RUgCVr5mn+/IEhsdy3pr+Vuj/HZ7nlMN2FyxIwUktOH1LEPIQXO1v9y1Q==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm-gnueabihf": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.16.tgz",
++      "integrity": "sha512-tHdKWbFkFBI687iim3LIyIvyL7j66VvQYkDPss5Stn/qyE2tWkR1YD0dXmXPFKKqT/o5ZEJVsaRsWS2meQwGOA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.16.tgz",
++      "integrity": "sha512-FJiLGAblPBMlBEdbOqw6kW6QcXDWAf/oJu7gYs9ZJZwmg+K+/zjFLxPTIY9izJUzxzc24FHvmseyA0IvJSl17w==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-arm64-musl": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.16.tgz",
++      "integrity": "sha512-hrJpblMsrQ58U9veWpbXzkhV5zStunds6HWLprqq1qauvgBr1E6P+24kLj6lSLI9vjRn/RYpjprhkHQPKGWpNg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-ppc64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.16.tgz",
++      "integrity": "sha512-qJd/dC6j6CwLG9/s/RP2nb1RZ0GIgj7Ioj7x/SYa3RzjVrlzrmH0fhIOpfvqQDeIsdP0loi+kHaMhJzY1PBIaA==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-s390x-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.16.tgz",
++      "integrity": "sha512-Vx7Xg5uUJuNcujJjI70OICaH0EYj80BtOLZTSN7uOYg8QOLlyKnaG0IW7Fn/J0IpJsaKzmDKMhOQv1JBM9m9vg==",
++      "cpu": [
++        "s390x"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-x64-gnu": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.16.tgz",
++      "integrity": "sha512-TNKhgE3uJTsTzatUSSYt0Kgo+Oa2uSlSjz4r1aEIea7HX6ULBym4fAlYUhG1i6pjNf2njfCUAfKwr6C3E9Xg1w==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-linux-x64-musl": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.16.tgz",
++      "integrity": "sha512-7chXdpjXZ8qG0+mIxECN3cT9kvhZ3/oZhMX6Pp876P7CDrIy8nJswva6Mq357JR7eYXfuskwZxMeV1SzoZdHrA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-openharmony-arm64": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.16.tgz",
++      "integrity": "sha512-Kwjt+7uNTJK5/MDkGWGVO2KQPnj8yAV75dMpfwyHZrJSXWHrniOB0aUEWlVYf3H1hOqFLIStLdM5QXq6bnKmOQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "openharmony"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-win32-arm64-msvc": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.16.tgz",
++      "integrity": "sha512-/LH6WfjDRXXJz/p5xl4TmU+jpcnwcxbKEQBW/GZE0JHfN0lGIyTtsUEGaQ/q/GikkGJ2yLKe6pwm7AnEWO8pdw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/binding-win32-x64-msvc": {
++      "version": "1.2.16",
++      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.16.tgz",
++      "integrity": "sha512-1lv1KvX0Z871zfk7vw+dnXMMnHNyDwMzWG8Kv3HxDXMOhzCX4SHc7HK319fInP0i+0p9D8brkfzL7pJOaGl+tw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": "^20.19.0 || >=22.12.0"
++      }
++    },
++    "node_modules/@rolldown/pluginutils": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
++      "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
+       }
+     },
+-    "node_modules/@rolldown/binding-android-arm-eabi": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.16.tgz",
+-      "integrity": "sha512-ia3DwAs0OsMGS7+IConptSiyk9pEXkOx/AbJ2n/lAGxH3QkWQus1t8d7gnAT38FCU2sQu8lUbeR6AiZFv4JxaA==",
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
++    "node_modules/@typescript/typescript-aix-ppc64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-aix-ppc64/-/typescript-aix-ppc64-7.0.2.tgz",
++      "integrity": "sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==",
+       "cpu": [
+-        "arm"
++        "ppc64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "android"
++        "aix"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-android-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.16.tgz",
+-      "integrity": "sha512-kx5wBiMB6E7TEvpl2B9gjLU004BkvEm2Dr941BFjx/SontPwSzNuQUIoVKxHHoSjpFIfHMmcguyLOtyn0hObRg==",
++    "node_modules/@typescript/typescript-darwin-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.0.2.tgz",
++      "integrity": "sha512-gowzar9MwS/aRWp6f3a4KUqzRjAZjOsmGNCM6LcTgXum+dBfgsBVMN+AgvOCCbguXyick6LJhpBszxMebJ8syA==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "android"
++        "darwin"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-darwin-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.16.tgz",
+-      "integrity": "sha512-qslZrXnKJU4cUpjoAmtAo/KQM9e2IRMlmpig6Zpwj+8KWxW8v+nkAf9216Bsek9lOC1jvg2yCjygCFo2f83msQ==",
++    "node_modules/@typescript/typescript-darwin-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-darwin-x64/-/typescript-darwin-x64-7.0.2.tgz",
++      "integrity": "sha512-SZ9xZInqApNlNGc9s0W1VSsktYSOe9cFqNOIqmN1Gs8SmkjKZYFt017G4VwPxASInODuAdbTW7sXiFUf893RgA==",
+       "cpu": [
+-        "arm64"
++        "x64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "darwin"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-darwin-x64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.16.tgz",
+-      "integrity": "sha512-FdF+y48ND13eAyM2mQn+85kvAqNlvRWROy2rhgA463X/0Gv4vGtazZtfaF1mRBLscYvtOlh4QnLjOWiFzX69OQ==",
++    "node_modules/@typescript/typescript-freebsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-freebsd-arm64/-/typescript-freebsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-W5NH4y/J0plIIS5b2xvTEkU7JFxyqdMAOgf+Ilhl0vHQXKO5dZoxd+C/jEtq56c4F3wk71RB4BMRQ2XdI+bwYQ==",
+       "cpu": [
+-        "x64"
++        "arm64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "darwin"
++        "freebsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-freebsd-x64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.16.tgz",
+-      "integrity": "sha512-ddjqFM5e95AgLbUPtKIS7V1KTVlA0RUgCVr5mn+/IEhsdy3pr+Vuj/HZ7nlMN2FyxIwUktOH1LEPIQXO1v9y1Q==",
++    "node_modules/@typescript/typescript-freebsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-freebsd-x64/-/typescript-freebsd-x64-7.0.2.tgz",
++      "integrity": "sha512-UMGDx5sTpzNw3WiPebH7l90IWfJggEd+egHt/q6p7/Cm3zqoV7VxkGXt+3DxPIw8CcmvAB0j3sVVfbhX+M4Tpw==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "freebsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm-gnueabihf": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.16.tgz",
+-      "integrity": "sha512-tHdKWbFkFBI687iim3LIyIvyL7j66VvQYkDPss5Stn/qyE2tWkR1YD0dXmXPFKKqT/o5ZEJVsaRsWS2meQwGOA==",
++    "node_modules/@typescript/typescript-linux-arm": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-arm/-/typescript-linux-arm-7.0.2.tgz",
++      "integrity": "sha512-gffT3xPz9sR7j/YJExkyPntrI0P2EP9XbOyWzth2/Gs0RstK+90RBcO0ncXoXy/beYll1SXw846Nf2zdnEz0QQ==",
+       "cpu": [
+         "arm"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-FJiLGAblPBMlBEdbOqw6kW6QcXDWAf/oJu7gYs9ZJZwmg+K+/zjFLxPTIY9izJUzxzc24FHvmseyA0IvJSl17w==",
++    "node_modules/@typescript/typescript-linux-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz",
++      "integrity": "sha512-Qh4eU4/y3yDjnfjjyPYihMj5/ODIlmt+Bzu17OI+fiSRDW57QmU5SiN63exPRNJPKUzcc1INa1NXdrJ+MqHjUQ==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-arm64-musl": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.16.tgz",
+-      "integrity": "sha512-hrJpblMsrQ58U9veWpbXzkhV5zStunds6HWLprqq1qauvgBr1E6P+24kLj6lSLI9vjRn/RYpjprhkHQPKGWpNg==",
++    "node_modules/@typescript/typescript-linux-loong64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-loong64/-/typescript-linux-loong64-7.0.2.tgz",
++      "integrity": "sha512-uEHck9i8hoAzXPiYRib1O7miOnz23SxIeVl6F4LXox+qov1K35jHcEW6VHKvZI+pyvl7fZEP4MCU5LYvIq1GuQ==",
+       "cpu": [
+-        "arm64"
++        "loong64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
+       ],
+-      "license": "MIT",
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-mips64el": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-mips64el/-/typescript-linux-mips64el-7.0.2.tgz",
++      "integrity": "sha512-R4KvAMnE43W5Qeqb0Ly56O3mWMWIAgsMyz36DCaycd5nbg/9kzm0liw3JocfRqyJY0KPmzFjbswozXyW0DnIYA==",
++      "cpu": [
++        "mips64el"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-ppc64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-qJd/dC6j6CwLG9/s/RP2nb1RZ0GIgj7Ioj7x/SYa3RzjVrlzrmH0fhIOpfvqQDeIsdP0loi+kHaMhJzY1PBIaA==",
++    "node_modules/@typescript/typescript-linux-ppc64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-ppc64/-/typescript-linux-ppc64-7.0.2.tgz",
++      "integrity": "sha512-DORx5b3sd/4S7eayxm4FQv+A7CrkUIGRaHiwI8oiHTAI1fAPWhF4J0vAlkC8biAlHSVVwxMQ3tjZ2/DVbnQiiA==",
+       "cpu": [
+         "ppc64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
+       ],
+-      "license": "MIT",
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-riscv64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-riscv64/-/typescript-linux-riscv64-7.0.2.tgz",
++      "integrity": "sha512-wf0jqEDOjrPRnKwYRyyJDRo11KMbvMFrU+q4zqKyChODBzvlkbhNQfKvLxQCcwTpdDaXSHZTVuh0JoCrKCUMHQ==",
++      "cpu": [
++        "riscv64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-s390x-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.16.tgz",
+-      "integrity": "sha512-Vx7Xg5uUJuNcujJjI70OICaH0EYj80BtOLZTSN7uOYg8QOLlyKnaG0IW7Fn/J0IpJsaKzmDKMhOQv1JBM9m9vg==",
++    "node_modules/@typescript/typescript-linux-s390x": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-s390x/-/typescript-linux-s390x-7.0.2.tgz",
++      "integrity": "sha512-IkwJc3L7yhytWd/ewjyxNDfOmswCm9GWMJT/ue/dU4aZNbwZeYAetq42VyLmsmSjvoX7z74X6ZaYCtzAr0EuGw==",
+       "cpu": [
+         "s390x"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-x64-gnu": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.16.tgz",
+-      "integrity": "sha512-TNKhgE3uJTsTzatUSSYt0Kgo+Oa2uSlSjz4r1aEIea7HX6ULBym4fAlYUhG1i6pjNf2njfCUAfKwr6C3E9Xg1w==",
++    "node_modules/@typescript/typescript-linux-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-7.0.2.tgz",
++      "integrity": "sha512-EYdf2cNg7rgCWJnxCdJ+F3V39O8ihb37eHAu1LK8oAFizgTQbPOK7zHHXbPt8rX24COqODXeI3sIf0fCXG7H/A==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "linux"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-linux-x64-musl": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.16.tgz",
+-      "integrity": "sha512-7chXdpjXZ8qG0+mIxECN3cT9kvhZ3/oZhMX6Pp876P7CDrIy8nJswva6Mq357JR7eYXfuskwZxMeV1SzoZdHrA==",
++    "node_modules/@typescript/typescript-netbsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-netbsd-arm64/-/typescript-netbsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-+polYF4MF04aPpO5FTkHran9yUQDSXqy5GiSDKpsll5jy3l3+g9QLhpf39T+ePtefhXLOGrLl0QIjkQP6VnelA==",
+       "cpu": [
+-        "x64"
++        "arm64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "netbsd"
+       ],
+-      "license": "MIT",
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-netbsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-netbsd-x64/-/typescript-netbsd-x64-7.0.2.tgz",
++      "integrity": "sha512-8YIT0EHM/3dq10ZOVF/A7pc/YSMtbcecct4rWtexrnSCHOPcpC2KTLXfTCR6vDpnSiY12heNb1GiN/wu+T/FyA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "linux"
++        "netbsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-openharmony-arm64": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.16.tgz",
+-      "integrity": "sha512-Kwjt+7uNTJK5/MDkGWGVO2KQPnj8yAV75dMpfwyHZrJSXWHrniOB0aUEWlVYf3H1hOqFLIStLdM5QXq6bnKmOQ==",
++    "node_modules/@typescript/typescript-openbsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-openbsd-arm64/-/typescript-openbsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-APT8+ClYnuYm1u9+kgGXoMj2VzWzcymwh2gNSQVySHfkRDGOTVkoWLjCmOQSaO+PoqQ57B0flRp9SA+7GnnkzQ==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "openharmony"
++        "openbsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-win32-arm64-msvc": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.16.tgz",
+-      "integrity": "sha512-/LH6WfjDRXXJz/p5xl4TmU+jpcnwcxbKEQBW/GZE0JHfN0lGIyTtsUEGaQ/q/GikkGJ2yLKe6pwm7AnEWO8pdw==",
++    "node_modules/@typescript/typescript-openbsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-openbsd-x64/-/typescript-openbsd-x64-7.0.2.tgz",
++      "integrity": "sha512-yX7s+Q0Dln0Dt9tEzZsAjXXR/+ytBM7AlglaqyeMPxQszJ1JhlJdZ6jLA+IzldHtflX81em7lDao1xXu+aRRkg==",
+       "cpu": [
+-        "arm64"
++        "x64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+-        "win32"
++        "openbsd"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/binding-win32-x64-msvc": {
+-      "version": "1.2.16",
+-      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.16.tgz",
+-      "integrity": "sha512-1lv1KvX0Z871zfk7vw+dnXMMnHNyDwMzWG8Kv3HxDXMOhzCX4SHc7HK319fInP0i+0p9D8brkfzL7pJOaGl+tw==",
++    "node_modules/@typescript/typescript-sunos-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-sunos-x64/-/typescript-sunos-x64-7.0.2.tgz",
++      "integrity": "sha512-dLJDGaLZ1D4HPQn62u1n8mBDkJREwMsAkCdkwd4Ieqw+x3TUyTsqY0YiBCtE6H6OzzgGk3iuZ3vFWRS+E8/d1g==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "license": "MIT",
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "sunos"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-win32-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-win32-arm64/-/typescript-win32-arm64-7.0.2.tgz",
++      "integrity": "sha512-Gyl1Vy6OsWesLzmq+EP0Fb7b4Nid5232AvcA2SFcdYreldpNtYFFofPjnt62y9hQy7VTaZp65ICJjuAQRaVcIQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
+       "optional": true,
+       "os": [
+         "win32"
+       ],
+       "engines": {
+-        "node": "^20.19.0 || >=22.12.0"
++        "node": ">=16.20.0"
+       }
+     },
+-    "node_modules/@rolldown/pluginutils": {
+-      "version": "1.0.1",
+-      "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
+-      "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
++    "node_modules/@typescript/typescript-win32-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-win32-x64/-/typescript-win32-x64-7.0.2.tgz",
++      "integrity": "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g==",
++      "cpu": [
++        "x64"
++      ],
+       "dev": true,
+-      "license": "MIT"
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
+     },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+@@ -334,6 +1099,13 @@
+         }
+       }
+     },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +1116,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +1163,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1453,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -789,6 +1602,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1640,41 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-7.0.2.tgz",
++      "integrity": "sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc"
++      },
++      "engines": {
++        "node": ">=16.20.0"
++      },
++      "optionalDependencies": {
++        "@typescript/typescript-aix-ppc64": "7.0.2",
++        "@typescript/typescript-darwin-arm64": "7.0.2",
++        "@typescript/typescript-darwin-x64": "7.0.2",
++        "@typescript/typescript-freebsd-arm64": "7.0.2",
++        "@typescript/typescript-freebsd-x64": "7.0.2",
++        "@typescript/typescript-linux-arm": "7.0.2",
++        "@typescript/typescript-linux-arm64": "7.0.2",
++        "@typescript/typescript-linux-loong64": "7.0.2",
++        "@typescript/typescript-linux-mips64el": "7.0.2",
++        "@typescript/typescript-linux-ppc64": "7.0.2",
++        "@typescript/typescript-linux-riscv64": "7.0.2",
++        "@typescript/typescript-linux-s390x": "7.0.2",
++        "@typescript/typescript-linux-x64": "7.0.2",
++        "@typescript/typescript-netbsd-arm64": "7.0.2",
++        "@typescript/typescript-netbsd-x64": "7.0.2",
++        "@typescript/typescript-openbsd-arm64": "7.0.2",
++        "@typescript/typescript-openbsd-x64": "7.0.2",
++        "@typescript/typescript-sunos-x64": "7.0.2",
++        "@typescript/typescript-win32-arm64": "7.0.2",
++        "@typescript/typescript-win32-x64": "7.0.2"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..745c372 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,20 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "tsc --noEmit -p . && vite build",
++    "typecheck": "tsc --noEmit -p ."
+   },
+   "dependencies": {
+     "react": "19.3.1",
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "4.3.5",
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "4.3.5",
++    "typescript": "7.0.2",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..a20d97d 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,353 @@
++import { useCallback, useEffect, useMemo, useState } from "react";
++import { ApiError, api, clearSession, loadSession, onUnauthorized, saveSession, type CalendarEvent } from "./api";
++import AuthDialog from "./components/AuthDialog";
++import EventDetails from "./components/EventDetails";
++import EventForm from "./components/EventForm";
++import MonthView from "./components/MonthView";
++import TimeGridView, { weekDays } from "./components/TimeGridView";
++import {
++  fromDateParam,
++  periodTitle,
++  shiftCursor,
++  startOfDay,
++  toDateParam,
++  visibleRange,
++  type ViewMode,
++} from "./dates";
++
++type Dialog =
++  | { kind: "auth"; mode: "login" | "register" }
++  | { kind: "details"; event: CalendarEvent }
++  | { kind: "create"; start?: Date }
++  | { kind: "edit"; event: CalendarEvent }
++  | null;
++
++const VIEWS: ViewMode[] = ["month", "week", "day"];
++
++function readUrlState(): { view: ViewMode; cursor: Date } {
++  const params = new URLSearchParams(window.location.search);
++  const v = params.get("view");
++  const view = VIEWS.includes(v as ViewMode) ? (v as ViewMode) : "month";
++  const cursor = fromDateParam(params.get("date")) ?? startOfDay(new Date());
++  return { view, cursor };
++}
++
++function defaultCreateStart(cursor: Date): Date {
++  const now = new Date();
++  const base = startOfDay(cursor);
++  if (base.getTime() === startOfDay(now).getTime()) {
++    return new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1);
++  }
++  return new Date(base.getFullYear(), base.getMonth(), base.getDate(), 9);
++}
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const initial = useMemo(readUrlState, []);
++  const [view, setView] = useState<ViewMode>(initial.view);
++  const [cursor, setCursor] = useState<Date>(initial.cursor);
++  const [session, setSession] = useState(loadSession);
++  const [events, setEvents] = useState<CalendarEvent[]>([]);
++  const [loading, setLoading] = useState(false);
++  const [loadError, setLoadError] = useState<string | null>(null);
++  const [reloadKey, setReloadKey] = useState(0);
++  const [dialog, setDialog] = useState<Dialog>(null);
++  const [toast, setToast] = useState<string | null>(null);
++
++  const signOutLocal = useCallback((message?: string) => {
++    clearSession();
++    setSession(null);
++    setDialog((d) => (d && (d.kind === "create" || d.kind === "edit") ? null : d));
++    if (message) setToast(message);
++  }, []);
++
++  useEffect(() => {
++    onUnauthorized(() => signOutLocal("Your session has expired. Please sign in again."));
++    return () => onUnauthorized(null);
++  }, [signOutLocal]);
++
++  useEffect(() => {
++    if (loadSession()) api.me().catch(() => {});
++  }, []);
++
++  useEffect(() => {
++    const params = new URLSearchParams();
++    params.set("view", view);
++    params.set("date", toDateParam(cursor));
++    const url = `${window.location.pathname}?${params}`;
++    if (url !== `${window.location.pathname}${window.location.search}`) {
++      window.history.replaceState(null, "", url);
++    }
++  }, [view, cursor]);
++
++  const range = useMemo(() => visibleRange(view, cursor), [view, cursor]);
++
++  useEffect(() => {
++    let cancelled = false;
++    setLoading(true);
++    setLoadError(null);
++    api
++      .listEvents(range.start.toISOString(), range.end.toISOString())
++      .then((res) => {
++        if (!cancelled) setEvents(res.items);
++      })
++      .catch((err) => {
++        if (!cancelled) setLoadError(err instanceof ApiError ? err.message : "Could not load events.");
++      })
++      .finally(() => {
++        if (!cancelled) setLoading(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [range, reloadKey]);
++
++  useEffect(() => {
++    if (!toast) return;
++    const t = setTimeout(() => setToast(null), 3500);
++    return () => clearTimeout(t);
++  }, [toast]);
++
++  useEffect(() => {
++    const onKey = (e: KeyboardEvent) => {
++      if (dialog) return;
++      const target = e.target as HTMLElement;
++      if (target.closest("input, textarea, select, [contenteditable]")) return;
++      if (e.metaKey || e.ctrlKey || e.altKey) return;
++      if (e.key === "ArrowLeft") setCursor((c) => shiftCursor(view, c, -1));
++      else if (e.key === "ArrowRight") setCursor((c) => shiftCursor(view, c, 1));
++      else if (e.key === "t") setCursor(startOfDay(new Date()));
++      else if (e.key === "m") setView("month");
++      else if (e.key === "w") setView("week");
++      else if (e.key === "d") setView("day");
++    };
++    window.addEventListener("keydown", onKey);
++    return () => window.removeEventListener("keydown", onKey);
++  }, [dialog, view]);
++
++  const reload = () => setReloadKey((k) => k + 1);
++
++  const handleSignedIn = (token: string, username: string) => {
++    saveSession(token, username);
++    setSession({ token, username });
++    setDialog(null);
++    setToast(`Signed in as ${username}`);
++  };
++
++  const handleSignOut = async () => {
++    await api.logout().catch(() => undefined);
++    signOutLocal("Signed out");
++  };
++
++  const goToDay = (day: Date) => {
++    setCursor(startOfDay(day));
++    setView("day");
++  };
++
++  const openEvent = async (event: CalendarEvent) => {
++    setDialog({ kind: "details", event });
++    try {
++      const fresh = await api.getEvent(event.id);
++      setDialog((d) => (d?.kind === "details" && d.event.id === fresh.id ? { kind: "details", event: fresh } : d));
++    } catch (err) {
++      if (err instanceof ApiError && err.status === 404) {
++        setDialog(null);
++        setToast("That event no longer exists.");
++        reload();
++      }
++    }
++  };
++
++  return (
++    <div className="flex h-screen flex-col bg-slate-100 text-slate-900">
++      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 shadow-sm">
++        <div className="flex items-center gap-2">
++          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-7 w-7 text-indigo-600" aria-hidden="true">
++            <rect x="3" y="4" width="18" height="18" rx="2" />
++            <path d="M16 2v4M8 2v4M3 10h18" />
++          </svg>
++          <h1 className="text-xl font-bold tracking-tight">Event Calendar</h1>
++        </div>
++        <div className="flex items-center gap-2">
++          {session ? (
++            <>
++              <span className="text-sm text-slate-600">
++                Signed in as <span className="font-semibold text-slate-900" data-testid="current-user">{session.username}</span>
++              </span>
++              <button
++                type="button"
++                onClick={handleSignOut}
++                className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
++              >
++                Sign out
++              </button>
++            </>
++          ) : (
++            <>
++              <button
++                type="button"
++                onClick={() => setDialog({ kind: "auth", mode: "login" })}
++                className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
++              >
++                Sign in
++              </button>
++              <button
++                type="button"
++                onClick={() => setDialog({ kind: "auth", mode: "register" })}
++                className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-500"
++              >
++                Register
++              </button>
++            </>
++          )}
++        </div>
++      </header>
++
++      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
++        <div className="flex items-center gap-2">
++          <button
++            type="button"
++            onClick={() => setCursor(startOfDay(new Date()))}
++            className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
++          >
++            Today
++          </button>
++          <div className="flex">
++            <button
++              type="button"
++              onClick={() => setCursor((c) => shiftCursor(view, c, -1))}
++              aria-label={`Previous ${view}`}
++              title={`Previous ${view}`}
++              className="rounded-l-md border border-slate-300 bg-white px-2.5 py-1.5 text-slate-700 hover:bg-slate-50"
++            >
++              <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4" aria-hidden="true">
++                <path fillRule="evenodd" d="M12.79 5.23a.75.75 0 0 1-.02 1.06L8.832 10l3.938 3.71a.75.75 0 1 1-1.04 1.08l-4.5-4.25a.75.75 0 0 1 0-1.08l4.5-4.25a.75.75 0 0 1 1.06.02Z" clipRule="evenodd" />
++              </svg>
++            </button>
++            <button
++              type="button"
++              onClick={() => setCursor((c) => shiftCursor(view, c, 1))}
++              aria-label={`Next ${view}`}
++              title={`Next ${view}`}
++              className="-ml-px rounded-r-md border border-slate-300 bg-white px-2.5 py-1.5 text-slate-700 hover:bg-slate-50"
++            >
++              <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4" aria-hidden="true">
++                <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clipRule="evenodd" />
++              </svg>
++            </button>
++          </div>
++          <h2 className="ml-2 text-lg font-semibold" aria-live="polite">
++            {periodTitle(view, cursor)}
++          </h2>
++          {loading && <span className="text-xs text-slate-500">Loading…</span>}
++        </div>
++        <div className="flex items-center gap-2">
++          <div className="flex rounded-md border border-slate-300 bg-white p-0.5" role="group" aria-label="Calendar view">
++            {VIEWS.map((v) => (
++              <button
++                key={v}
++                type="button"
++                onClick={() => setView(v)}
++                aria-pressed={view === v}
++                className={`rounded px-3 py-1 text-sm font-medium capitalize ${
++                  view === v ? "bg-indigo-600 text-white" : "text-slate-700 hover:bg-slate-100"
++                }`}
++              >
++                {v}
++              </button>
++            ))}
++          </div>
++          {session && (
++            <button
++              type="button"
++              onClick={() => setDialog({ kind: "create", start: defaultCreateStart(cursor) })}
++              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500"
++            >
++              + New event
++            </button>
++          )}
++        </div>
++      </div>
++
++      {loadError && (
++        <div role="alert" className="mx-4 mb-3 flex items-center justify-between rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
++          <span>{loadError}</span>
++          <button type="button" onClick={reload} className="font-medium underline">
++            Retry
++          </button>
++        </div>
++      )}
++
++      <main className="min-h-0 flex-1 px-4 pb-4">
++        {view === "month" && (
++          <MonthView cursor={cursor} events={events} onSelectEvent={openEvent} onSelectDay={goToDay} />
++        )}
++        {view === "week" && (
++          <TimeGridView
++            days={weekDays(range.start)}
++            events={events}
++            onSelectEvent={openEvent}
++            onSelectDay={goToDay}
++            onCreateAt={session ? (start) => setDialog({ kind: "create", start }) : undefined}
++          />
++        )}
++        {view === "day" && (
++          <TimeGridView
++            days={[range.start]}
++            events={events}
++            onSelectEvent={openEvent}
++            onCreateAt={session ? (start) => setDialog({ kind: "create", start }) : undefined}
++          />
++        )}
++      </main>
++
++      {dialog?.kind === "auth" && (
++        <AuthDialog initialMode={dialog.mode} onClose={() => setDialog(null)} onSignedIn={handleSignedIn} />
++      )}
++      {dialog?.kind === "details" && (
++        <EventDetails
++          event={dialog.event}
++          canEdit={!!session}
++          onClose={() => setDialog(null)}
++          onEdit={() => setDialog({ kind: "edit", event: dialog.event })}
++          onDeleted={(id) => {
++            setEvents((list) => list.filter((e) => e.id !== id));
++            setDialog(null);
++            setToast("Event deleted");
++            reload();
++          }}
++        />
++      )}
++      {dialog?.kind === "create" && session && (
++        <EventForm
++          defaultStart={dialog.start}
++          onClose={() => setDialog(null)}
++          onSaved={(saved) => {
++            setDialog({ kind: "details", event: saved });
++            setToast("Event created");
++            reload();
++          }}
++        />
++      )}
++      {dialog?.kind === "edit" && session && (
++        <EventForm
++          event={dialog.event}
++          onClose={() => setDialog({ kind: "details", event: dialog.event })}
++          onSaved={(saved) => {
++            setDialog({ kind: "details", event: saved });
++            setToast("Event updated");
++            reload();
++          }}
++        />
++      )}
++
++      {toast && (
++        <div
++          role="status"
++          className="fixed bottom-4 left-1/2 z-[60] -translate-x-1/2 rounded-lg bg-slate-900 px-4 py-2 text-sm text-white shadow-lg"
++        >
++          {toast}
++        </div>
++      )}
++    </div>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..af2f4ec
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,114 @@
++export interface CalendarEvent {
++  id: number;
++  title: string;
++  description: string | null;
++  location: string | null;
++  start_time: string;
++  end_time: string;
++  created_at: string;
++  created_by: string;
++  updated_at?: string;
++}
++
++export interface EventInput {
++  title: string;
++  description: string | null;
++  location: string | null;
++  start_time: string;
++  end_time: string;
++}
++
++export type FieldErrors = Record<string, string>;
++
++export class ApiError extends Error {
++  status: number;
++  fieldErrors: FieldErrors;
++
++  constructor(status: number, message: string, fieldErrors: FieldErrors = {}) {
++    super(message);
++    this.status = status;
++    this.fieldErrors = fieldErrors;
++  }
++}
++
++const TOKEN_KEY = "calendar.token";
++const USER_KEY = "calendar.username";
++
++export function loadSession(): { token: string; username: string } | null {
++  const token = localStorage.getItem(TOKEN_KEY);
++  const username = localStorage.getItem(USER_KEY);
++  return token && username ? { token, username } : null;
++}
++
++export function saveSession(token: string, username: string) {
++  localStorage.setItem(TOKEN_KEY, token);
++  localStorage.setItem(USER_KEY, username);
++}
++
++export function clearSession() {
++  localStorage.removeItem(TOKEN_KEY);
++  localStorage.removeItem(USER_KEY);
++}
++
++let unauthorizedHandler: (() => void) | null = null;
++
++export function onUnauthorized(handler: (() => void) | null) {
++  unauthorizedHandler = handler;
++}
++
++async function request<T>(method: string, path: string, body?: unknown, auth = true): Promise<T> {
++  const headers: Record<string, string> = { Accept: "application/json" };
++  if (body !== undefined) headers["Content-Type"] = "application/json";
++  const token = localStorage.getItem(TOKEN_KEY);
++  if (auth && token) headers.Authorization = `Bearer ${token}`;
++
++  let res: Response;
++  try {
++    res = await fetch(`/api${path}`, {
++      method,
++      headers,
++      body: body === undefined ? undefined : JSON.stringify(body),
++    });
++  } catch {
++    throw new ApiError(0, "Could not reach the server. Check your connection and try again.");
++  }
++
++  if (res.status === 204) return undefined as T;
++
++  let data: unknown = null;
++  const text = await res.text();
++  if (text) {
++    try {
++      data = JSON.parse(text);
++    } catch {
++      data = null;
++    }
++  }
++
++  if (!res.ok) {
++    const obj = (data ?? {}) as { error?: string; errors?: FieldErrors };
++    if (res.status === 401 && auth && token && unauthorizedHandler) unauthorizedHandler();
++    throw new ApiError(res.status, obj.error || `Request failed (${res.status})`, obj.errors ?? {});
++  }
++  return data as T;
++}
++
++export const api = {
++  register: (username: string, password: string) =>
++    request<{ id: number; username: string }>("POST", "/auth/register", { username, password }, false),
++  login: (username: string, password: string) =>
++    request<{ token: string; username?: string }>("POST", "/auth/login", { username, password }, false),
++  logout: () => request<void>("POST", "/auth/logout"),
++  me: () => request<{ id: number; username: string }>("GET", "/auth/me"),
++  listEvents: (startDate: string, endDate: string) =>
++    request<{ items: CalendarEvent[]; total: number }>(
++      "GET",
++      `/events?start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}`,
++      undefined,
++      false,
++    ),
++  getEvent: (id: number) => request<CalendarEvent>("GET", `/events/${id}`, undefined, false),
++  createEvent: (input: EventInput) => request<CalendarEvent>("POST", "/events", input),
++  updateEvent: (id: number, input: EventInput) => request<CalendarEvent>("PUT", `/events/${id}`, input),
++  deleteEvent: (id: number) => request<void>("DELETE", `/events/${id}`),
++};
+diff --git a/frontend/src/components/AuthDialog.tsx b/frontend/src/components/AuthDialog.tsx
+new file mode 100644
+index 0000000..98e3ef3
+--- /dev/null
++++ b/frontend/src/components/AuthDialog.tsx
+@@ -0,0 +1,118 @@
++import { useState, type FormEvent } from "react";
++import { ApiError, api } from "../api";
++import Modal from "./Modal";
++
++interface AuthDialogProps {
++  initialMode: "login" | "register";
++  onClose: () => void;
++  onSignedIn: (token: string, username: string) => void;
++}
++
++const inputClass =
++  "mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 aria-[invalid=true]:border-red-500";
++
++export default function AuthDialog({ initialMode, onClose, onSignedIn }: AuthDialogProps) {
++  const [mode, setMode] = useState(initialMode);
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
++  const [busy, setBusy] = useState(false);
++
++  const switchMode = (next: "login" | "register") => {
++    setMode(next);
++    setError(null);
++    setFieldErrors({});
++  };
++
++  const submit = async (e: FormEvent) => {
++    e.preventDefault();
++    if (busy) return;
++    setBusy(true);
++    setError(null);
++    setFieldErrors({});
++    try {
++      if (mode === "register") {
++        await api.register(username, password);
++      }
++      const res = await api.login(username, password);
++      onSignedIn(res.token, res.username ?? username.trim());
++    } catch (err) {
++      if (err instanceof ApiError) {
++        setFieldErrors(err.fieldErrors);
++        setError(err.message);
++      } else {
++        setError("Something went wrong. Please try again.");
++      }
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const isLogin = mode === "login";
++
++  return (
++    <Modal title={isLogin ? "Sign in" : "Create an account"} onClose={onClose} size="sm">
++      <div className="mb-4 grid grid-cols-2 rounded-lg bg-slate-100 p-1 text-sm font-medium" role="tablist">
++        <button
++          type="button"
++          role="tab"
++          aria-selected={isLogin}
++          onClick={() => switchMode("login")}
++          className={`rounded-md py-1.5 ${isLogin ? "bg-white text-slate-900 shadow" : "text-slate-600 hover:text-slate-900"}`}
++        >
++          Sign in
++        </button>
++        <button
++          type="button"
++          role="tab"
++          aria-selected={!isLogin}
++          onClick={() => switchMode("register")}
++          className={`rounded-md py-1.5 ${!isLogin ? "bg-white text-slate-900 shadow" : "text-slate-600 hover:text-slate-900"}`}
++        >
++          Register
++        </button>
++      </div>
++      <form onSubmit={submit} noValidate className="space-y-4">
++        {error && (
++          <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
++            {error}
++          </div>
++        )}
++        <label className="block text-sm font-medium text-slate-700">
++          Username
++          <input
++            name="username"
++            autoComplete="username"
++            autoFocus
++            value={username}
++            onChange={(e) => setUsername(e.target.value)}
++            aria-invalid={!!fieldErrors.username}
++            className={inputClass}
++          />
++          {fieldErrors.username && <span className="mt-1 block text-xs text-red-600">{fieldErrors.username}</span>}
++        </label>
++        <label className="block text-sm font-medium text-slate-700">
++          Password
++          <input
++            name="password"
++            type="password"
++            autoComplete={isLogin ? "current-password" : "new-password"}
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            aria-invalid={!!fieldErrors.password}
++            className={inputClass}
++          />
++          {fieldErrors.password && <span className="mt-1 block text-xs text-red-600">{fieldErrors.password}</span>}
++        </label>
++        <button
++          type="submit"
++          disabled={busy}
++          className="w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
++        >
++          {busy ? "Please wait…" : isLogin ? "Sign in" : "Create account"}
++        </button>
++      </form>
++    </Modal>
++  );
++}
+diff --git a/frontend/src/components/EventDetails.tsx b/frontend/src/components/EventDetails.tsx
+new file mode 100644
+index 0000000..fcc56cc
+--- /dev/null
++++ b/frontend/src/components/EventDetails.tsx
+@@ -0,0 +1,118 @@
++import { useState } from "react";
++import { ApiError, api, type CalendarEvent } from "../api";
++import { formatDateTime, formatRange } from "../dates";
++import Modal from "./Modal";
++
++interface EventDetailsProps {
++  event: CalendarEvent;
++  canEdit: boolean;
++  onClose: () => void;
++  onEdit: () => void;
++  onDeleted: (id: number) => void;
++}
++
++export default function EventDetails({ event, canEdit, onClose, onEdit, onDeleted }: EventDetailsProps) {
++  const [confirming, setConfirming] = useState(false);
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  const start = new Date(event.start_time);
++  const end = new Date(event.end_time);
++
++  const doDelete = async () => {
++    setBusy(true);
++    setError(null);
++    try {
++      await api.deleteEvent(event.id);
++      onDeleted(event.id);
++    } catch (err) {
++      if (err instanceof ApiError && err.status === 404) {
++        onDeleted(event.id);
++        return;
++      }
++      setError(err instanceof ApiError ? err.message : "Could not delete the event.");
++      setBusy(false);
++    }
++  };
++
++  return (
++    <Modal title={event.title} onClose={onClose}>
++      <dl className="space-y-3 text-sm">
++        <div>
++          <dt className="font-medium text-slate-500">When</dt>
++          <dd className="text-slate-900">{formatRange(start, end)}</dd>
++        </div>
++        {event.location && (
++          <div>
++            <dt className="font-medium text-slate-500">Location</dt>
++            <dd className="whitespace-pre-wrap break-words text-slate-900">{event.location}</dd>
++          </div>
++        )}
++        {event.description && (
++          <div>
++            <dt className="font-medium text-slate-500">Description</dt>
++            <dd className="whitespace-pre-wrap break-words text-slate-900">{event.description}</dd>
++          </div>
++        )}
++        <div>
++          <dt className="font-medium text-slate-500">Created</dt>
++          <dd className="text-slate-900">
++            by <span className="font-medium">{event.created_by}</span> on {formatDateTime(new Date(event.created_at))}
++          </dd>
++        </div>
++      </dl>
++
++      {error && (
++        <div role="alert" className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
++          {error}
++        </div>
++      )}
++
++      {canEdit && !confirming && (
++        <div className="mt-6 flex justify-end gap-2">
++          <button
++            type="button"
++            onClick={() => setConfirming(true)}
++            className="rounded-md border border-red-300 bg-white px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50"
++          >
++            Delete
++          </button>
++          <button
++            type="button"
++            onClick={onEdit}
++            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500"
++          >
++            Edit
++          </button>
++        </div>
++      )}
++
++      {canEdit && confirming && (
++        <div className="mt-6 rounded-lg border border-red-200 bg-red-50 p-4" role="alertdialog" aria-label="Confirm delete">
++          <p className="text-sm text-red-800">
++            Delete <span className="font-semibold">“{event.title}”</span>? This cannot be undone.
++          </p>
++          <div className="mt-3 flex justify-end gap-2">
++            <button
++              type="button"
++              onClick={() => setConfirming(false)}
++              disabled={busy}
++              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
++            >
++              Cancel
++            </button>
++            <button
++              type="button"
++              onClick={doDelete}
++              disabled={busy}
++              autoFocus
++              className="rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500 disabled:opacity-60"
++            >
++              {busy ? "Deleting…" : "Yes, delete"}
++            </button>
++          </div>
++        </div>
++      )}
++    </Modal>
++  );
++}
+diff --git a/frontend/src/components/EventForm.tsx b/frontend/src/components/EventForm.tsx
+new file mode 100644
+index 0000000..c2de62f
+--- /dev/null
++++ b/frontend/src/components/EventForm.tsx
+@@ -0,0 +1,164 @@
++import { useState, type FormEvent } from "react";
++import { ApiError, api, type CalendarEvent } from "../api";
++import { localInputToIso, toLocalInputValue } from "../dates";
++import Modal from "./Modal";
++
++interface EventFormProps {
++  event?: CalendarEvent;
++  defaultStart?: Date;
++  onClose: () => void;
++  onSaved: (event: CalendarEvent) => void;
++}
++
++const inputClass =
++  "mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 aria-[invalid=true]:border-red-500";
++
++function FieldError({ message }: { message?: string }) {
++  if (!message) return null;
++  return <span className="mt-1 block text-xs font-normal text-red-600">{message}</span>;
++}
++
++export default function EventForm({ event, defaultStart, onClose, onSaved }: EventFormProps) {
++  const initialStart = event ? new Date(event.start_time) : (defaultStart ?? new Date());
++  const initialEnd = event ? new Date(event.end_time) : new Date(initialStart.getTime() + 60 * 60 * 1000);
++
++  const [title, setTitle] = useState(event?.title ?? "");
++  const [description, setDescription] = useState(event?.description ?? "");
++  const [location, setLocation] = useState(event?.location ?? "");
++  const [start, setStart] = useState(toLocalInputValue(initialStart));
++  const [end, setEnd] = useState(toLocalInputValue(initialEnd));
++  const [error, setError] = useState<string | null>(null);
++  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
++  const [busy, setBusy] = useState(false);
++
++  const onStartChange = (value: string) => {
++    const prevStart = new Date(start).getTime();
++    const prevEnd = new Date(end).getTime();
++    const nextStart = new Date(value).getTime();
++    setStart(value);
++    if (!Number.isNaN(prevStart) && !Number.isNaN(prevEnd) && !Number.isNaN(nextStart)) {
++      const duration = prevEnd - prevStart;
++      if (duration > 0) setEnd(toLocalInputValue(new Date(nextStart + duration)));
++    }
++  };
++
++  const submit = async (e: FormEvent) => {
++    e.preventDefault();
++    if (busy) return;
++    setBusy(true);
++    setError(null);
++    setFieldErrors({});
++    const input = {
++      title,
++      description: description.trim() ? description : null,
++      location: location.trim() ? location : null,
++      start_time: localInputToIso(start),
++      end_time: localInputToIso(end),
++    };
++    try {
++      const saved = event ? await api.updateEvent(event.id, input) : await api.createEvent(input);
++      onSaved(saved);
++    } catch (err) {
++      if (err instanceof ApiError) {
++        setFieldErrors(err.fieldErrors);
++        setError(err.message);
++      } else {
++        setError("Something went wrong. Please try again.");
++      }
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
++
++  return (
++    <Modal title={event ? "Edit event" : "New event"} onClose={onClose}>
++      <form onSubmit={submit} noValidate className="space-y-4">
++        {error && (
++          <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
++            {error}
++          </div>
++        )}
++        <label className="block text-sm font-medium text-slate-700">
++          Title <span className="text-red-500">*</span>
++          <input
++            name="title"
++            autoFocus
++            value={title}
++            onChange={(e) => setTitle(e.target.value)}
++            aria-invalid={!!fieldErrors.title}
++            className={inputClass}
++          />
++          <FieldError message={fieldErrors.title} />
++        </label>
++        <div className="grid gap-4 sm:grid-cols-2">
++          <label className="block text-sm font-medium text-slate-700">
++            Starts <span className="text-red-500">*</span>
++            <input
++              name="start_time"
++              type="datetime-local"
++              value={start}
++              onChange={(e) => onStartChange(e.target.value)}
++              aria-invalid={!!fieldErrors.start_time}
++              className={inputClass}
++            />
++            <FieldError message={fieldErrors.start_time} />
++          </label>
++          <label className="block text-sm font-medium text-slate-700">
++            Ends <span className="text-red-500">*</span>
++            <input
++              name="end_time"
++              type="datetime-local"
++              value={end}
++              onChange={(e) => setEnd(e.target.value)}
++              aria-invalid={!!fieldErrors.end_time}
++              className={inputClass}
++            />
++            <FieldError message={fieldErrors.end_time} />
++          </label>
++        </div>
++        <p className="-mt-2 text-xs text-slate-500">Times are in your local time zone ({tz}).</p>
++        <label className="block text-sm font-medium text-slate-700">
++          Location
++          <input
++            name="location"
++            value={location}
++            onChange={(e) => setLocation(e.target.value)}
++            aria-invalid={!!fieldErrors.location}
++            className={inputClass}
++          />
++          <FieldError message={fieldErrors.location} />
++        </label>
++        <label className="block text-sm font-medium text-slate-700">
++          Description
++          <textarea
++            name="description"
++            rows={4}
++            value={description}
++            onChange={(e) => setDescription(e.target.value)}
++            aria-invalid={!!fieldErrors.description}
++            className={inputClass}
++          />
++          <FieldError message={fieldErrors.description} />
++        </label>
++        <div className="flex justify-end gap-2 pt-2">
++          <button
++            type="button"
++            onClick={onClose}
++            className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
++          >
++            Cancel
++          </button>
++          <button
++            type="submit"
++            disabled={busy}
++            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
++          >
++            {busy ? "Saving…" : event ? "Save changes" : "Create event"}
++          </button>
++        </div>
++      </form>
++    </Modal>
++  );
++}
+diff --git a/frontend/src/components/Modal.tsx b/frontend/src/components/Modal.tsx
+new file mode 100644
+index 0000000..7c8b179
+--- /dev/null
++++ b/frontend/src/components/Modal.tsx
+@@ -0,0 +1,77 @@
++import { useEffect, useId, useRef, type ReactNode } from "react";
++
++interface ModalProps {
++  title: string;
++  onClose: () => void;
++  children: ReactNode;
++  size?: "sm" | "md" | "lg";
++}
++
++export default function Modal({ title, onClose, children, size = "md" }: ModalProps) {
++  const titleId = useId();
++  const panelRef = useRef<HTMLDivElement>(null);
++  const onCloseRef = useRef(onClose);
++  onCloseRef.current = onClose;
++
++  useEffect(() => {
++    const previouslyFocused = document.activeElement as HTMLElement | null;
++    const panel = panelRef.current;
++    if (panel && !panel.contains(document.activeElement)) {
++      const field = panel.querySelector<HTMLElement>("input, textarea, select");
++      (field ?? panel).focus();
++    }
++
++    const onKey = (e: KeyboardEvent) => {
++      if (e.key === "Escape") {
++        e.stopPropagation();
++        onCloseRef.current();
++      }
++    };
++    document.addEventListener("keydown", onKey);
++    const prevOverflow = document.body.style.overflow;
++    document.body.style.overflow = "hidden";
++    return () => {
++      document.removeEventListener("keydown", onKey);
++      document.body.style.overflow = prevOverflow;
++      previouslyFocused?.focus?.();
++    };
++  }, []);
++
++  const width = size === "sm" ? "max-w-sm" : size === "lg" ? "max-w-2xl" : "max-w-lg";
++
++  return (
++    <div
++      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4 sm:items-center"
++      onMouseDown={(e) => {
++        if (e.target === e.currentTarget) onClose();
++      }}
++    >
++      <div
++        ref={panelRef}
++        role="dialog"
++        aria-modal="true"
++        aria-labelledby={titleId}
++        tabIndex={-1}
++        className={`w-full ${width} rounded-xl bg-white shadow-2xl outline-none`}
++      >
++        <div className="flex items-center justify-between gap-4 border-b border-slate-200 px-5 py-4">
++          <h2 id={titleId} className="text-lg font-semibold text-slate-900 break-words min-w-0">
++            {title}
++          </h2>
++          <button
++            type="button"
++            data-close
++            onClick={onClose}
++            aria-label="Close"
++            className="rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
++          >
++            <svg viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5" aria-hidden="true">
++              <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
++            </svg>
++          </button>
++        </div>
++        <div className="px-5 py-4">{children}</div>
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/MonthView.tsx b/frontend/src/components/MonthView.tsx
+new file mode 100644
+index 0000000..274d8f2
+--- /dev/null
++++ b/frontend/src/components/MonthView.tsx
+@@ -0,0 +1,91 @@
++import type { CalendarEvent } from "../api";
++import { addDays, formatTime, isSameDay, startOfDay, visibleRange, weekdayLabels } from "../dates";
++import { eventsOnDay } from "./layout";
++
++interface MonthViewProps {
++  cursor: Date;
++  events: CalendarEvent[];
++  onSelectEvent: (event: CalendarEvent) => void;
++  onSelectDay: (day: Date) => void;
++}
++
++const MAX_PER_CELL = 3;
++
++export default function MonthView({ cursor, events, onSelectEvent, onSelectDay }: MonthViewProps) {
++  const { start } = visibleRange("month", cursor);
++  const days = Array.from({ length: 42 }, (_, i) => addDays(start, i));
++  const today = new Date();
++  const labels = weekdayLabels();
++
++  return (
++    <div className="flex h-full flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
++      <div className="grid grid-cols-7 border-b border-slate-200 bg-slate-50 text-center text-xs font-semibold uppercase tracking-wide text-slate-500">
++        {labels.map((label) => (
++          <div key={label} className="py-2">
++            {label}
++          </div>
++        ))}
++      </div>
++      <div className="grid flex-1 grid-cols-7 grid-rows-6">
++        {days.map((day) => {
++          const inMonth = day.getMonth() === cursor.getMonth();
++          const isToday = isSameDay(day, today);
++          const dayEvents = eventsOnDay(events, day);
++          const shown = dayEvents.slice(0, MAX_PER_CELL);
++          const hidden = dayEvents.length - shown.length;
++          return (
++            <div
++              key={day.toISOString()}
++              className={`min-h-24 border-b border-r border-slate-200 p-1 [&:nth-child(7n)]:border-r-0 ${inMonth ? "bg-white" : "bg-slate-50"}`}
++            >
++              <button
++                type="button"
++                onClick={() => onSelectDay(day)}
++                aria-label={`View ${day.toLocaleDateString(undefined, { dateStyle: "full" })}`}
++                className={`mb-1 flex h-7 w-7 items-center justify-center rounded-full text-sm hover:bg-slate-200 ${
++                  isToday
++                    ? "bg-indigo-600 font-semibold text-white hover:bg-indigo-500"
++                    : inMonth
++                      ? "text-slate-800"
++                      : "text-slate-400"
++                }`}
++              >
++                {day.getDate()}
++              </button>
++              <ul className="space-y-0.5">
++                {shown.map((event) => {
++                  const s = new Date(event.start_time);
++                  const continued = s < startOfDay(day);
++                  return (
++                    <li key={event.id}>
++                      <button
++                        type="button"
++                        onClick={() => onSelectEvent(event)}
++                        title={event.title}
++                        className="flex w-full items-center gap-1 truncate rounded bg-indigo-50 px-1.5 py-0.5 text-left text-xs text-indigo-900 hover:bg-indigo-100"
++                      >
++                        <span className="shrink-0 font-medium text-indigo-600">
++                          {continued ? "↳" : formatTime(s)}
++                        </span>
++                        <span className="truncate">{event.title}</span>
++                      </button>
++                    </li>
++                  );
++                })}
++              </ul>
++              {hidden > 0 && (
++                <button
++                  type="button"
++                  onClick={() => onSelectDay(day)}
++                  className="mt-0.5 px-1.5 text-xs font-medium text-slate-600 hover:text-indigo-700 hover:underline"
++                >
++                  +{hidden} more
++                </button>
++              )}
++            </div>
++          );
++        })}
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/TimeGridView.tsx b/frontend/src/components/TimeGridView.tsx
+new file mode 100644
+index 0000000..9b5265d
+--- /dev/null
++++ b/frontend/src/components/TimeGridView.tsx
+@@ -0,0 +1,175 @@
++import { useEffect, useRef } from "react";
++import type { CalendarEvent } from "../api";
++import { addDays, formatTime, hourLabel, isSameDay, startOfDay } from "../dates";
++import { eventsOnDay, layoutDay, spansMultipleDays } from "./layout";
++
++interface TimeGridViewProps {
++  days: Date[];
++  events: CalendarEvent[];
++  onSelectEvent: (event: CalendarEvent) => void;
++  onSelectDay?: (day: Date) => void;
++  onCreateAt?: (start: Date) => void;
++}
++
++const HOUR_HEIGHT = 48;
++const HOURS = Array.from({ length: 24 }, (_, i) => i);
++
++export default function TimeGridView({ days, events, onSelectEvent, onSelectDay, onCreateAt }: TimeGridViewProps) {
++  const scrollRef = useRef<HTMLDivElement>(null);
++  const today = new Date();
++
++  useEffect(() => {
++    if (scrollRef.current) scrollRef.current.scrollTop = HOUR_HEIGHT * 7.5;
++  }, []);
++
++  const multiDay = events.filter(spansMultipleDays);
++  const timed = events.filter((e) => !spansMultipleDays(e));
++  const hasAllDay = days.some((d) => eventsOnDay(multiDay, d).length > 0);
++  const cols = days.length === 1 ? "grid-cols-[4rem_1fr]" : "grid-cols-[4rem_repeat(7,minmax(0,1fr))]";
++
++  const nowMinutes = today.getHours() * 60 + today.getMinutes();
++
++  return (
++    <div className="flex h-full flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
++      <div className={`grid ${cols} border-b border-slate-200 bg-slate-50`}>
++        <div />
++        {days.map((day) => {
++          const isToday = isSameDay(day, today);
++          const label = (
++            <>
++              <span className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
++                {day.toLocaleDateString(undefined, { weekday: "short" })}
++              </span>
++              <span
++                className={`mx-auto mt-0.5 flex h-8 w-8 items-center justify-center rounded-full text-lg ${
++                  isToday ? "bg-indigo-600 font-semibold text-white" : "text-slate-800"
++                }`}
++              >
++                {day.getDate()}
++              </span>
++            </>
++          );
++          return (
++            <div key={day.toISOString()} className="border-l border-slate-200 py-2 text-center">
++              {onSelectDay ? (
++                <button
++                  type="button"
++                  onClick={() => onSelectDay(day)}
++                  className="w-full rounded hover:bg-slate-100"
++                  aria-label={`View ${day.toLocaleDateString(undefined, { dateStyle: "full" })}`}
++                >
++                  {label}
++                </button>
++              ) : (
++                label
++              )}
++            </div>
++          );
++        })}
++      </div>
++
++      {hasAllDay && (
++        <div className={`grid ${cols} border-b border-slate-200`}>
++          <div className="px-1 py-1 text-right text-[10px] uppercase text-slate-400">Multi-day</div>
++          {days.map((day) => (
++            <div key={day.toISOString()} className="space-y-0.5 border-l border-slate-200 p-1">
++              {eventsOnDay(multiDay, day).map((event) => (
++                <button
++                  key={event.id}
++                  type="button"
++                  onClick={() => onSelectEvent(event)}
++                  title={event.title}
++                  className="block w-full truncate rounded bg-indigo-600 px-1.5 py-0.5 text-left text-xs font-medium text-white hover:bg-indigo-500"
++                >
++                  {event.title}
++                </button>
++              ))}
++            </div>
++          ))}
++        </div>
++      )}
++
++      <div ref={scrollRef} className="flex-1 overflow-y-auto">
++        <div className={`relative grid ${cols}`} style={{ height: HOUR_HEIGHT * 24 }}>
++          <div className="relative">
++            {HOURS.map((h) => (
++              <div
++                key={h}
++                className="absolute right-2 -translate-y-1/2 text-[11px] text-slate-400"
++                style={{ top: h * HOUR_HEIGHT }}
++              >
++                {h === 0 ? "" : hourLabel(h)}
++              </div>
++            ))}
++          </div>
++          {days.map((day) => {
++            const segments = layoutDay(eventsOnDay(timed, day), day);
++            const dayStart = startOfDay(day);
++            return (
++              <div key={day.toISOString()} className="relative border-l border-slate-200">
++                {HOURS.map((h) => (
++                  <div
++                    key={h}
++                    onClick={
++                      onCreateAt
++                        ? () => onCreateAt(new Date(day.getFullYear(), day.getMonth(), day.getDate(), h))
++                        : undefined
++                    }
++                    className={`absolute inset-x-0 border-t border-slate-100 ${onCreateAt ? "cursor-pointer hover:bg-indigo-50/50" : ""}`}
++                    style={{ top: h * HOUR_HEIGHT, height: HOUR_HEIGHT }}
++                  />
++                ))}
++                {isSameDay(day, today) && (
++                  <div
++                    className="pointer-events-none absolute inset-x-0 z-20 border-t-2 border-red-500"
++                    style={{ top: (nowMinutes / 60) * HOUR_HEIGHT }}
++                  >
++                    <div className="-mt-[5px] -ml-1 h-2 w-2 rounded-full bg-red-500" />
++                  </div>
++                )}
++                {segments.map((seg) => {
++                  const startMin = (seg.start.getTime() - dayStart.getTime()) / 60000;
++                  const endMin = Math.min((seg.end.getTime() - dayStart.getTime()) / 60000, 24 * 60);
++                  const top = (startMin / 60) * HOUR_HEIGHT;
++                  const height = Math.max(((endMin - startMin) / 60) * HOUR_HEIGHT, 20);
++                  const width = 100 / seg.columns;
++                  const s = new Date(seg.event.start_time);
++                  const e = new Date(seg.event.end_time);
++                  return (
++                    <button
++                      key={seg.event.id}
++                      type="button"
++                      onClick={() => onSelectEvent(seg.event)}
++                      title={`${seg.event.title} (${formatTime(s)} – ${formatTime(e)})`}
++                      className="absolute z-10 overflow-hidden rounded-md border border-white bg-indigo-100 px-1.5 py-0.5 text-left text-xs text-indigo-900 shadow-sm hover:z-30 hover:bg-indigo-200"
++                      style={{
++                        top,
++                        height,
++                        left: `calc(${seg.column * width}% + 2px)`,
++                        width: `calc(${width}% - 4px)`,
++                      }}
++                    >
++                      <span className="block truncate font-semibold">{seg.event.title}</span>
++                      {height >= 36 && (
++                        <span className="block truncate text-indigo-700">
++                          {formatTime(s)} – {formatTime(e)}
++                        </span>
++                      )}
++                      {height >= 52 && seg.event.location && (
++                        <span className="block truncate text-indigo-700">{seg.event.location}</span>
++                      )}
++                    </button>
++                  );
++                })}
++              </div>
++            );
++          })}
++        </div>
++      </div>
++    </div>
++  );
++}
++
++export function weekDays(start: Date): Date[] {
++  return Array.from({ length: 7 }, (_, i) => addDays(start, i));
++}
+diff --git a/frontend/src/components/layout.ts b/frontend/src/components/layout.ts
+new file mode 100644
+index 0000000..8258ee0
+--- /dev/null
++++ b/frontend/src/components/layout.ts
+@@ -0,0 +1,77 @@
++import type { CalendarEvent } from "../api";
++import { addDays, startOfDay } from "../dates";
++
++export interface DaySegment {
++  event: CalendarEvent;
++  start: Date;
++  end: Date;
++  column: number;
++  columns: number;
++}
++
++export function eventsOnDay(events: CalendarEvent[], day: Date): CalendarEvent[] {
++  const dayStart = startOfDay(day).getTime();
++  const dayEnd = addDays(startOfDay(day), 1).getTime();
++  return events.filter((e) => {
++    const s = new Date(e.start_time).getTime();
++    const en = new Date(e.end_time).getTime();
++    return s < dayEnd && (en > dayStart || (en === s && s >= dayStart));
++  });
++}
++
++export function spansMultipleDays(event: CalendarEvent): boolean {
++  const s = new Date(event.start_time);
++  const e = new Date(event.end_time);
++  const endDay = startOfDay(new Date(e.getTime() - 1));
++  return endDay.getTime() > startOfDay(s).getTime();
++}
++
++export function layoutDay(events: CalendarEvent[], day: Date): DaySegment[] {
++  const dayStart = startOfDay(day);
++  const dayEnd = addDays(dayStart, 1);
++  const segments = events
++    .map((event) => {
++      const s = new Date(event.start_time);
++      const e = new Date(event.end_time);
++      return {
++        event,
++        start: s < dayStart ? dayStart : s,
++        end: e > dayEnd ? dayEnd : e,
++        column: 0,
++        columns: 1,
++      };
++    })
++    .sort((a, b) => a.start.getTime() - b.start.getTime() || b.end.getTime() - a.end.getTime());
++
++  const minVisualMs = 20 * 60 * 1000;
++  const visualEnd = (seg: DaySegment) => Math.max(seg.end.getTime(), seg.start.getTime() + minVisualMs);
++
++  let cluster: DaySegment[] = [];
++  let colEnds: number[] = [];
++  let clusterEnd = -Infinity;
++
++  const flush = () => {
++    for (const seg of cluster) seg.columns = colEnds.length;
++    cluster = [];
++    colEnds = [];
++  };
++
++  for (const seg of segments) {
++    if (seg.start.getTime() >= clusterEnd) {
++      flush();
++      clusterEnd = -Infinity;
++    }
++    let col = colEnds.findIndex((end) => end <= seg.start.getTime());
++    if (col === -1) {
++      col = colEnds.length;
++      colEnds.push(visualEnd(seg));
++    } else {
++      colEnds[col] = visualEnd(seg);
++    }
++    seg.column = col;
++    cluster.push(seg);
++    clusterEnd = Math.max(clusterEnd, visualEnd(seg));
++  }
++  flush();
++  return segments;
++}
+diff --git a/frontend/src/dates.ts b/frontend/src/dates.ts
+new file mode 100644
+index 0000000..359ee57
+--- /dev/null
++++ b/frontend/src/dates.ts
+@@ -0,0 +1,142 @@
++export type ViewMode = "month" | "week" | "day";
++
++export const WEEK_STARTS_ON = 0;
++
++export function startOfDay(d: Date): Date {
++  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
++}
++
++export function addDays(d: Date, n: number): Date {
++  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n, d.getHours(), d.getMinutes());
++}
++
++export function addMonths(d: Date, n: number): Date {
++  const target = new Date(d.getFullYear(), d.getMonth() + n, 1);
++  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
++  return new Date(target.getFullYear(), target.getMonth(), Math.min(d.getDate(), lastDay));
++}
++
++export function startOfWeek(d: Date): Date {
++  const day = startOfDay(d);
++  const diff = (day.getDay() - WEEK_STARTS_ON + 7) % 7;
++  return addDays(day, -diff);
++}
++
++export function startOfMonth(d: Date): Date {
++  return new Date(d.getFullYear(), d.getMonth(), 1);
++}
++
++export function isSameDay(a: Date, b: Date): boolean {
++  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
++}
++
++export function visibleRange(view: ViewMode, cursor: Date): { start: Date; end: Date } {
++  if (view === "day") {
++    const start = startOfDay(cursor);
++    return { start, end: addDays(start, 1) };
++  }
++  if (view === "week") {
++    const start = startOfWeek(cursor);
++    return { start, end: addDays(start, 7) };
++  }
++  const start = startOfWeek(startOfMonth(cursor));
++  return { start, end: addDays(start, 42) };
++}
++
++export function shiftCursor(view: ViewMode, cursor: Date, dir: 1 | -1): Date {
++  if (view === "day") return addDays(cursor, dir);
++  if (view === "week") return addDays(cursor, 7 * dir);
++  return addMonths(cursor, dir);
++}
++
++export function periodTitle(view: ViewMode, cursor: Date): string {
++  if (view === "month") {
++    return cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
++  }
++  if (view === "day") {
++    return cursor.toLocaleDateString(undefined, {
++      weekday: "long",
++      month: "long",
++      day: "numeric",
++      year: "numeric",
++    });
++  }
++  const start = startOfWeek(cursor);
++  const end = addDays(start, 6);
++  const sameYear = start.getFullYear() === end.getFullYear();
++  const sameMonth = sameYear && start.getMonth() === end.getMonth();
++  const startText = start.toLocaleDateString(undefined, {
++    month: "short",
++    day: "numeric",
++    year: sameYear ? undefined : "numeric",
++  });
++  const endText = end.toLocaleDateString(undefined, {
++    month: sameMonth ? undefined : "short",
++    day: "numeric",
++    year: "numeric",
++  });
++  return `${startText} – ${endText}`;
++}
++
++export function toDateParam(d: Date): string {
++  const pad = (n: number) => String(n).padStart(2, "0");
++  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
++}
++
++export function fromDateParam(value: string | null): Date | null {
++  if (!value) return null;
++  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
++  if (!m) return null;
++  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
++  return Number.isNaN(d.getTime()) ? null : d;
++}
++
++export function toLocalInputValue(d: Date): string {
++  const pad = (n: number) => String(n).padStart(2, "0");
++  return `${toDateParam(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
++}
++
++export function localInputToIso(value: string): string {
++  if (!value) return "";
++  const d = new Date(value);
++  if (Number.isNaN(d.getTime())) return value;
++  return d.toISOString();
++}
++
++export function formatTime(d: Date): string {
++  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
++}
++
++export function formatDateTime(d: Date): string {
++  return d.toLocaleString(undefined, {
++    weekday: "short",
++    month: "short",
++    day: "numeric",
++    year: "numeric",
++    hour: "numeric",
++    minute: "2-digit",
++  });
++}
++
++export function formatRange(start: Date, end: Date): string {
++  if (isSameDay(start, end)) {
++    return `${start.toLocaleDateString(undefined, {
++      weekday: "long",
++      month: "long",
++      day: "numeric",
++      year: "numeric",
++    })}, ${formatTime(start)} – ${formatTime(end)}`;
++  }
++  return `${formatDateTime(start)} – ${formatDateTime(end)}`;
++}
++
++export function weekdayLabels(): string[] {
++  const start = startOfWeek(new Date());
++  return Array.from({ length: 7 }, (_, i) =>
++    addDays(start, i).toLocaleDateString(undefined, { weekday: "short" }),
++  );
++}
++
++export function hourLabel(hour: number): string {
++  return new Date(2000, 0, 1, hour).toLocaleTimeString(undefined, { hour: "numeric" });
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..c2a145c 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
++import { StrictMode } from "react";
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <StrictMode>
++    <App />
++  </StrictMode>,
++);
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..b0f5411
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,18 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "noFallthroughCasesInSwitch": true,
++    "isolatedModules": true,
++    "skipLibCheck": true,
++    "noEmit": true,
++    "types": ["vite/client"]
++  },
++  "include": ["src", "vite.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

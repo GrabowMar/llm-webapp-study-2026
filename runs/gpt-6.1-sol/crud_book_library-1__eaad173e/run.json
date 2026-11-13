@@ -1,0 +1,596 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 810,
+  "completed_at": "2026-11-10T11:48:31.808061+00:00",
+  "condition_id": 101,
+  "condition_label": "openai/gpt-6.1-sol",
+  "config_fingerprint": "af02c61142ec4ff3be33b9dff1fdd2dd5223a66b0e7d1ffb3ef19fc09ed8a279",
+  "cost_usd": 0.897650424,
+  "duration": 1719.506343,
+  "fingerprints": {
+    "config_fingerprint": "af02c61142ec4ff3be33b9dff1fdd2dd5223a66b0e7d1ffb3ef19fc09ed8a279",
+    "prompt_hash": "ce52fc12a7042caa09641b6267712f43dbf819b3cf7f6b0bbe25c8c8bf2f75ec",
+    "run_fingerprint": "bbb19f06333e293e0a3e5e7f4110dd94e63167de7555a00d6210bc448efc7e7f",
+    "task_hash": "8da2cbfcebe21e1efe8c1296d88b3a8fc19c7bbb26f3806793b855095890f870",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "eaad173e-32e2-4b26-ad62-f55848f7856b",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "openai/gpt-6.1-sol",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study-or@2",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-10T11:47:49.498162+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 685,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 12,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 105,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 103,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "books.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "books.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "books.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "books.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "books.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "books.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "books.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "books.create.invalid.too_long",
+          "ms": 3,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"author\":\"llmlab author\",\"average_rating\":null,\"created_at\":\"2026-11-10T11:48:22.267Z\",\"id\":14,\"isbn\":\"yyyyyyyyyyyyyyyyyyyyy\",\"review_count\":0,\"title\":\"llmlab title\",\"year\":1000}\n",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "books.get.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.replace",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "books.replace.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "books.replace",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "books.replace.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "books.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "books.replace.invalid.missing",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "books.replace",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "books.replace.invalid.too_long",
+          "ms": 3,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"author\":\"llmlab author\",\"average_rating\":null,\"created_at\":\"2026-11-10T11:48:22.296Z\",\"id\":19,\"isbn\":\"yyyyyyyyyyyyyyyyyyyyy\",\"review_count\":0,\"title\":\"llmlab title\",\"year\":1000}\n",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "books.delete.ok",
+          "ms": 5,
+          "note": null,
+          "observed": {
+            "status": 204
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "books.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "books.delete.anon_401",
+          "ms": 6,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "reviews.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "reviews.list.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "reviews.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "reviews.create.ok",
+          "ms": 5,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "reviews.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "reviews.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "reviews.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "reviews.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "reviews.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "reviews.create.invalid.too_long",
+          "ms": 3,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"book_id\":26,\"comment\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "books.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "books.average_rating",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 20,
+        "agent_pass_rate": 0.85,
+        "agent_passed": 17,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 4,
+            "passed": 4
+          },
+          "functional": {
+            "n": 10,
+            "passed": 10
+          },
+          "validation": {
+            "n": 6,
+            "passed": 3
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.85,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 2,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.85
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-89",
+          "endpoint": "books.list",
+          "evidence": "tautology payloads returned no extra rows",
+          "id": "probe.books.sqli",
+          "kind": "sqli_boolean",
+          "skip_reason": null,
+          "status": "not_exploited"
+        },
+        {
+          "cwe": "cwe-79",
+          "endpoint": "reviews.create",
+          "evidence": "store request answered 409",
+          "id": "probe.reviews.xss",
+          "kind": "xss_stored",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 931,
+  "loc_model": 931,
+  "model": "OpenAI: GPT-6.1 Sol",
+  "model_id": "openai/gpt-6.1-sol",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "bbb19f06333e293e0a3e5e7f4110dd94e63167de7555a00d6210bc448efc7e7f",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-10T11:19:52.301718+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "c1057fff-7029-4c29-9597-2a164b4e01db",
+  "task": "crud_book_library@1",
+  "tokens_used": 2744046,
+  "tree_hash": "39a38d72b0d3af1790d233c6b9c93ee35cf90cae809ee95088745499bbeffd64",
+  "truncated": false,
+  "unit": "task:crud_book_library@1",
+  "usable": true
+}

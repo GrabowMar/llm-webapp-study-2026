@@ -1,0 +1,1127 @@
+{
+ "adherence": {
+  "checker_version": 1,
+  "detected": {
+   "auth": {
+    "confidence": "medium",
+    "evidence": [
+     "runtime:login:bearer",
+     "runtime:tester"
+    ],
+    "value": "bearer"
+   },
+   "backend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:backend/requirements.txt:flask",
+     "import:backend/app.py:flask",
+     "import:backend/auth.py:flask",
+     "import:backend/db.py:flask",
+     "import:backend/errors.py:flask"
+    ],
+    "value": "flask"
+   },
+   "database": {
+    "confidence": "medium",
+    "evidence": [
+     "import:backend/db.py:sqlite3"
+    ],
+    "value": "sqlite"
+   },
+   "frontend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:frontend/package.json:react",
+     "import:frontend/src/App.tsx:react",
+     "import:frontend/src/auth.tsx:react",
+     "import:frontend/src/components/AppShell.tsx:react",
+     "import:frontend/src/components/ui.tsx:react",
+     "import:frontend/src/main.tsx:react",
+     "import:frontend/src/pages/CustomerDetailPage.tsx:react",
+     "import:frontend/src/pages/CustomerFormPage.tsx:react"
+    ],
+    "value": "react"
+   },
+   "styling": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:tailwindcss",
+     "classes:share=0.98"
+    ],
+    "value": "tailwind"
+   }
+  },
+  "deviations": [],
+  "hallucinated": [],
+  "packages": [
+   {
+    "declared_in": ".e2e/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "jsdom",
+    "pinned": false,
+    "version": "^26.1.0"
+   },
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "flask",
+    "pinned": true,
+    "version": "3.1.3"
+   },
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "gunicorn",
+    "pinned": true,
+    "version": "26.2.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react-dom",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react-router-dom",
+    "pinned": false,
+    "version": "^7.18.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@tailwindcss/vite",
+    "pinned": false,
+    "version": "^4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@types/react",
+    "pinned": false,
+    "version": "^19.3.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@types/react-dom",
+    "pinned": false,
+    "version": "^19.3.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@vitejs/plugin-react",
+    "pinned": true,
+    "version": "6.2.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "tailwindcss",
+    "pinned": false,
+    "version": "^4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "typescript",
+    "pinned": false,
+    "version": "^5.9.3"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "vite",
+    "pinned": true,
+    "version": "8.3.5"
+   }
+  ],
+  "sbom_blob": "dc1c71c1c9738bd92a9974594285924832471c5cee5abd20f6b9dd018adbb43c",
+  "status": "compliant",
+  "style_metrics": {
+   "component_library_imports": {},
+   "css_files": 1,
+   "css_modules": 0,
+   "tailwind_class_share": 0.9816
+  },
+  "unpinned": [
+   "@tailwindcss/vite",
+   "@types/react",
+   "@types/react-dom",
+   "jsdom",
+   "react-router-dom",
+   "tailwindcss",
+   "typescript"
+  ]
+ },
+ "created_at": "2026-11-11T17:33:08.118805+00:00",
+ "eval_level": "security",
+ "eval_suite": "eval-v2@2",
+ "id": 1210,
+ "mode": "full",
+ "result": {
+  "auth_mode": "contract_bearer",
+  "checks": [
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "health",
+    "ms": 10,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "index_served",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "spa_fallback",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.register",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "auth.register.ok",
+    "ms": 102,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.login",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "auth.login.ok",
+    "ms": 100,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "customers.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "customers.list.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "customers.list",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "customers.list.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "pagination",
+    "endpoint": "customers.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "customers.list.page_size",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "filter",
+    "endpoint": "customers.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "customers.list.search",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "customers.create",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "customers.create.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "customers.create",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "customers.create.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "negative",
+    "endpoint": "customers.create",
+    "expected": {
+     "status": [
+      409
+     ]
+    },
+    "id": "customers.create.duplicate",
+    "ms": 1,
+    "note": "status 400",
+    "observed": {
+     "body": "{\"details\":[{\"field\":\"email\",\"message\":\"A customer with this email already exists.\"}],\"error\":\"Please fix the highlighted fields.\",\"errors\":{\"email\":\"A customer with this email already exists.\"},\"fields\":{\"email\":\"A customer with this email already exists.\"},\"message\":\"Please fix the highlighted fie",
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "functional",
+    "endpoint": "customers.get",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "customers.get.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "customers.get",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "customers.get.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "customers.replace",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "customers.replace.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "customers.replace",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "customers.replace.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "customers.delete",
+    "expected": {
+     "status": [
+      204
+     ]
+    },
+    "id": "customers.delete.ok",
+    "ms": 2,
+    "note": "status 200",
+    "observed": {
+     "body": "{\"id\":12,\"status\":\"deleted\"}\n",
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "auth",
+    "endpoint": "customers.delete",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "customers.delete.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "interactions.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "interactions.list.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "interactions.list",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "interactions.list.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "interactions.create",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "interactions.create.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "interactions.create",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "interactions.create.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "customers.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "customers.create.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "customers.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "customers.create.invalid.too_long",
+    "ms": 2,
+    "note": "name: status 201 | email: status 201",
+    "observed": {
+     "body": "{\"company\":\"llmlab company\",\"created_at\":\"2026-11-11T17:35:23.524513Z\",\"email\":\"llmlab00815c72@example.com\",\"id\":19,\"interaction_count\":0,\"last_contacted_at\":null,\"name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"notes\":\"llmlab notes\",\"ph",
+     "requests": [
+      {
+       "label": "name",
+       "ok": false,
+       "status": 201
+      },
+      {
+       "label": "email",
+       "ok": false,
+       "status": 201
+      },
+      {
+       "label": "notes",
+       "ok": true,
+       "status": 400
+      },
+      {
+       "label": "company",
+       "ok": true,
+       "status": 400
+      }
+     ],
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "customers.replace",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "customers.replace.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "customers.replace",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "customers.replace.invalid.too_long",
+    "ms": 8,
+    "note": "name: status 200 | notes: status 200 | company: status 200",
+    "observed": {
+     "body": "{\"company\":\"llmlab company\",\"created_at\":\"2026-11-11T17:35:23.537150Z\",\"email\":\"llmlab893925e4@example.com\",\"id\":22,\"interaction_count\":0,\"last_contacted_at\":null,\"name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"notes\":\"llmlab notes\",\"ph",
+     "requests": [
+      {
+       "label": "name",
+       "ok": false,
+       "status": 200
+      },
+      {
+       "label": "email",
+       "ok": true,
+       "status": 400
+      },
+      {
+       "label": "notes",
+       "ok": false,
+       "status": 200
+      },
+      {
+       "label": "company",
+       "ok": false,
+       "status": 200
+      }
+     ],
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "interactions.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "interactions.create.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "interactions.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "interactions.create.invalid.too_long",
+    "ms": 3,
+    "note": "status 201",
+    "observed": {
+     "body": "{\"customer_id\":24,\"id\":2,\"kind\":\"call\",\"logged_by\":\"useradeff7e42\",\"logged_by_id\":3,\"occurred_at\":\"2025-12-19T15:00:00.000000Z\",\"summary\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "interactions.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "interactions.create.invalid.enum",
+    "ms": 2,
+    "note": "status 201",
+    "observed": {
+     "body": "{\"customer_id\":25,\"id\":3,\"kind\":\"notlisted\",\"logged_by\":\"useradeff7e42\",\"logged_by_id\":3,\"occurred_at\":\"2026-05-13T09:30:00.000000Z\",\"summary\":\"llmlab summary\"}\n",
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "persistence",
+    "endpoint": "customers.get",
+    "expected": null,
+    "id": "customers.get.persists",
+    "ms": null,
+    "note": "actor user_a could not log in: register answered 400",
+    "observed": null,
+    "overlay": false,
+    "skipped_due_to": [
+     "auth:user_a"
+    ],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "skipped"
+   }
+  ],
+  "compiler_version": 2,
+  "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+  "flaky_checks": [],
+  "measured": true,
+  "metrics": {
+   "agent_checks": 27,
+   "agent_pass_rate": 0.7407407407407407,
+   "agent_passed": 20,
+   "baseline_pass_rate": 0.0,
+   "by_category": {
+    "auth": {
+     "n": 7,
+     "passed": 7
+    },
+    "filter": {
+     "n": 1,
+     "passed": 1
+    },
+    "functional": {
+     "n": 9,
+     "passed": 8
+    },
+    "negative": {
+     "n": 1,
+     "passed": 0
+    },
+    "pagination": {
+     "n": 1,
+     "passed": 1
+    },
+    "persistence": {
+     "n": 1,
+     "passed": 0
+    },
+    "validation": {
+     "n": 7,
+     "passed": 3
+    }
+   },
+   "common_pass_rate": null,
+   "infra_ok": true,
+   "over_baseline": 0.7407407407407407,
+   "probes_exploited": 0,
+   "probes_skipped": 2,
+   "probes_tested": 0,
+   "regression_pass_rate": null,
+   "sec_pass": null,
+   "slot_pass_rate": null,
+   "stated_pass_rate": 0.9285714285714286,
+   "unstated_pass_rate": 0.5384615384615384
+  },
+  "not_measured_reason": null,
+  "plan_sha256": "42d22aa56cd99a38f43332e58a5051414e3d75a7bd8eeff7200ab3978d543537",
+  "probes": [
+   {
+    "cwe": "cwe-89",
+    "endpoint": "customers.list",
+    "evidence": "actor user_a could not log in (register answered 400)",
+    "id": "probe.customers.sqli",
+    "kind": "sqli_boolean",
+    "skip_reason": "precondition_failed",
+    "status": "skipped"
+   },
+   {
+    "cwe": "cwe-79",
+    "endpoint": "customers.create",
+    "evidence": "actor user_a could not log in (register answered 400)",
+    "id": "probe.customers.xss",
+    "kind": "xss_stored",
+    "skip_reason": "precondition_failed",
+    "status": "skipped"
+   }
+  ],
+  "skipped": [],
+  "tester_version": 2
+ },
+ "stages": {
+  "adherence": {
+   "detail": {
+    "record_status": "compliant",
+    "runtime": true
+   },
+   "seconds": 1.637,
+   "status": "ok"
+  },
+  "build": {
+   "detail": {
+    "attempts": [
+     {
+      "attempt": 1,
+      "infra_suspected": false,
+      "ok": true
+     }
+    ],
+    "base_images": {
+     "pkg:docker/node@24-slim?digest=sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c&platform=linux%2Famd64": "sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c",
+     "pkg:docker/python@3.13-slim?digest=sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1&platform=linux%2Famd64": "sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1"
+    },
+    "build_context": {
+     "locks": [
+      {
+       "ecosystem": "npm",
+       "lock": ".e2e/package-lock.json",
+       "manifest": ".e2e/package.json",
+       "reason": null,
+       "source": "tree",
+       "status": "complete"
+      },
+      {
+       "ecosystem": "pypi",
+       "lock": "backend/requirements.lock",
+       "manifest": "backend/requirements.txt",
+       "reason": null,
+       "source": "starter",
+       "status": "complete"
+      },
+      {
+       "ecosystem": "npm",
+       "lock": "frontend/package-lock.json",
+       "manifest": "frontend/package.json",
+       "reason": null,
+       "source": "tree",
+       "status": "complete"
+      }
+     ],
+     "notes": [
+      "tree: 33 files written verbatim"
+     ]
+    },
+    "build_key": "9edd5adaeacda4ce3d57d5502970db390ec3da09029ec11e5da3ac6097f870fa",
+    "cache_hit": false,
+    "cpu_seconds": 5.222,
+    "image_bytes": 186938023,
+    "image_id": "sha256:e02a438cf7bd7a2ad995272bedfec0cd57dc8e0d15297848ac9e8ed79827a695",
+    "image_tag": "llmlab/sample:9edd5adaeacda4ce3d57d550-2de02ba99d1f",
+    "peak_memory_bytes": 388063232,
+    "prepare_seconds": 0.052,
+    "queue_seconds": 0.029,
+    "seconds": 7.07
+   },
+   "seconds": 7.559,
+   "status": "ok"
+  },
+  "lock": {
+   "detail": {
+    "files": [],
+    "packages": {
+     "npm": 123,
+     "pip": 8
+    },
+    "resolved_at": "2026-11-10T21:16:55.085102+00:00",
+    "source": "model"
+   },
+   "seconds": 0.001,
+   "status": "ok"
+  },
+  "probes": {
+   "detail": {
+    "n": 2,
+    "tested": 0
+   },
+   "status": "ok"
+  },
+  "start": {
+   "detail": {
+    "credentials_ref": "208759523b4e7f560389d259b444de83cddf364ccf27e5c634ae69e0f1b33f7f"
+   },
+   "seconds": 2.274,
+   "status": "ok"
+  },
+  "tester": {
+   "detail": {
+    "attempts": 1,
+    "checks_adjusted": 2,
+    "checks_skipped": 0,
+    "compiler_version": 2,
+    "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+    "image_override": false,
+    "only_checks": null,
+    "overlay": false,
+    "plan_sha256": "42d22aa56cd99a38f43332e58a5051414e3d75a7bd8eeff7200ab3978d543537",
+    "probe_rules_version": 2,
+    "probes": null,
+    "tester_rules_version": 3,
+    "tester_version": 2,
+    "upstream": false
+   },
+   "seconds": 5.108,
+   "status": "ok"
+  }
+ },
+ "status": "measured"
+}

@@ -1,0 +1,654 @@
+{
+  "category": "gaming",
+  "features": [
+    "auth",
+    "ownership",
+    "admin",
+    "sort",
+    "filter"
+  ],
+  "pinned_ref": "gaming_leaderboard@1#dce1f7a0f643",
+  "prose": "Build a game leaderboard with a JSON API under `/api` and a web frontend. Signed-in players submit scores; anyone sees players ranked by their best score, all-time, this week or today. The admin hides implausible scores.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/leaderboard` ranks players by their best visible score in a period; each player appears once (query parameters: `period`, `limit`, `player`).\n- `POST /api/scores` stores a score for the signed-in player and returns it with the player's all-time `rank` and `personal_best` (true when it is now their best).\n- `GET /api/scores` lists the signed-in player's submissions, newest first, with `best_score`.\n- `GET /api/admin/scores` lists every score, newest first, for the admin (query parameters: `page`, `page_size`).\n- `POST /api/admin/scores/{id}/toggle` hides a score from the leaderboard or shows it again, for the admin.\n\nData:\n\n- A score is returned as an object with `id`, `score`, `achieved_at`, `is_hidden`, `player`.\n- `GET /api/leaderboard` returns `{\"items\": [...], \"total\": n}`; each item in `items` is an object with `rank`, `player`, `score` and `achieved_at`.\n- `POST /api/scores` returns the score with `rank` and `personal_best` as well.\n- `GET /api/scores` returns `{\"items\": [...], \"best_score\": ...}`; each item in `items` is a score.\n- `GET /api/admin/scores` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n}`; each item in `items` is a score.\n\nRules:\n\n- A score always belongs to the signed-in player who submits it.\n- Hidden scores are left out of the leaderboard, ranks and best scores.\n- `achieved_at` is set by the server.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- A leaderboard table (rank, player, score, date) with the top three marked and the signed-in player's row highlighted, period tabs, a player search and a refresh button.\n- A score form that shows the new rank and a 'New personal best!' message.\n- The player's recent submissions and best score.\n- For the admin: every score with a hide/show button.",
+  "ref": "gaming_leaderboard@1",
+  "slug": "gaming_leaderboard",
+  "structured": {
+    "acceptance": [],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "gaming",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "leaderboard.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/leaderboard",
+        "query": [
+          {
+            "default": "all",
+            "enum": [
+              "all",
+              "week",
+              "today"
+            ],
+            "max": null,
+            "name": "period",
+            "required": false,
+            "semantics": "filter",
+            "type": "enum"
+          },
+          {
+            "default": 10,
+            "enum": null,
+            "max": 100.0,
+            "name": "limit",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "player",
+            "required": false,
+            "semantics": "filter",
+            "type": "string"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "achieved_at": {
+                    "type": "string"
+                  },
+                  "player": {
+                    "type": "string"
+                  },
+                  "rank": {
+                    "type": "integer"
+                  },
+                  "score": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "rank",
+                  "player",
+                  "score"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "scores.submit",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/scores",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "score": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "score"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "achieved_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "is_hidden": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "personal_best": {
+              "type": "boolean"
+            },
+            "player": {
+              "type": "string"
+            },
+            "rank": {
+              "type": "integer"
+            },
+            "score": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "score",
+            "player",
+            "rank",
+            "personal_best"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "scores.mine",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/scores",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "best_score": [
+              "integer",
+              "null"
+            ],
+            "items": {
+              "items": {
+                "properties": {
+                  "achieved_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "is_hidden": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "player": {
+                    "type": "string"
+                  },
+                  "score": {
+                    "maximum": 1000000000,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "score",
+                  "player"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items",
+            "best_score"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [],
+        "id": "admin.scores",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/admin/scores",
+        "query": [
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "achieved_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "is_hidden": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "player": {
+                    "type": "string"
+                  },
+                  "score": {
+                    "maximum": 1000000000,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "score",
+                  "player"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "admin.scores.hide",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/admin/scores/{id}/toggle",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "achieved_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "is_hidden": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "player": {
+              "type": "string"
+            },
+            "score": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "score",
+            "player"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": 1000000000.0,
+            "max_length": null,
+            "min": 0.0,
+            "name": "score",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "achieved_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          },
+          {
+            "default": false,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "is_hidden",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "bool",
+            "unique": false
+          }
+        ],
+        "name": "Score",
+        "owned_by_user": true,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "ownership",
+      "admin",
+      "sort",
+      "filter"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-915",
+        "endpoint": "scores.submit",
+        "id": "probe.scores.mass_assignment",
+        "kind": "mass_assignment",
+        "params": {
+          "field": "achieved_at"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-89",
+        "endpoint": "leaderboard.get",
+        "id": "probe.leaderboard.sqli",
+        "kind": "sqli_boolean",
+        "params": {
+          "param": "player"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-798",
+        "endpoint": null,
+        "id": "probe.leaderboard.default_admin",
+        "kind": "default_credential",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Submit game scores and rank players by their best score, all-time or for recent periods.",
+    "surfaces": [
+      "cwe-862",
+      "cwe-285",
+      "cwe-20",
+      "cwe-915",
+      "cwe-89",
+      "cwe-79",
+      "cwe-798"
+    ],
+    "title": "Game leaderboard",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "leaderboard.get"
+        ],
+        "id": "ui.board",
+        "text": "A leaderboard table (rank, player, score, date) with the top three marked and the signed-in player's row highlighted, period tabs, a player search and a refresh button."
+      },
+      {
+        "endpoints": [
+          "scores.submit"
+        ],
+        "id": "ui.submit",
+        "text": "A score form that shows the new rank and a 'New personal best!' message."
+      },
+      {
+        "endpoints": [
+          "scores.mine"
+        ],
+        "id": "ui.mine",
+        "text": "The player's recent submissions and best score."
+      },
+      {
+        "endpoints": [
+          "admin.scores",
+          "admin.scores.hide"
+        ],
+        "id": "ui.admin",
+        "text": "For the admin: every score with a hide/show button."
+      }
+    ]
+  },
+  "structured_hash": "38053a290d7f1e3cef44e9a1c4f2394a5d3cb26b93dd253c8346585595b736a1",
+  "summary": "Submit game scores and rank players by their best score, all-time or for recent periods.",
+  "surfaces": [
+    "cwe-862",
+    "cwe-285",
+    "cwe-20",
+    "cwe-915",
+    "cwe-89",
+    "cwe-79",
+    "cwe-798"
+  ],
+  "task_hash": "254f35d70c4074de19db9a4816bff38b2d50b404f87ed7e5e2b4dfc535a2e83c",
+  "title": "Game leaderboard",
+  "variant": "standard",
+  "version": 1
+}

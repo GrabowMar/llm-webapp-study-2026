@@ -1,0 +1,804 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 616,
+  "completed_at": "2026-11-10T15:43:52.734598+00:00",
+  "condition_id": 99,
+  "condition_label": "local-opencode-go/minimax-m3",
+  "config_fingerprint": "ad8cdca211d4a1ef3bb62878ca9efd701ce09bf92062391bb651b3e2481c5fb8",
+  "cost_usd": 0.0,
+  "duration": 555.839943,
+  "fingerprints": {
+    "config_fingerprint": "ad8cdca211d4a1ef3bb62878ca9efd701ce09bf92062391bb651b3e2481c5fb8",
+    "prompt_hash": "948a431c16fc2e929494fb1d31c15758a7e4d3b9ea4032188cfe47ccd202552b",
+    "run_fingerprint": "9399577eff908da9f8068c2d602d18b56745b8e9574b1dc3dca313fd05de1b4e",
+    "task_hash": "5b6248e7435550f2a0c5ef4614976b0c224d1d89f589df4362233a4c619c1be7",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "bff3a1df-24f1-4e2c-a540-bf778b93788b",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/minimax-m3",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-10T15:43:33.407263+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 726,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 12,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 72,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 58,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "subs.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "subs.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "subs.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "subs.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "subs.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "subs.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "subs.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "subs.create.invalid.too_long",
+          "ms": 3,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"created_at\":\"2026-11-10T15:43:46Z\",\"customer_name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"failed_payment_count\":0,\"id\":2,\"monthly_am",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "subs.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "subs.create.invalid.enum",
+          "ms": 6,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"created_at\":\"2026-11-10T15:43:46Z\",\"customer_name\":\"llmlab customer_name\",\"failed_payment_count\":0,\"id\":3,\"monthly_amount\":1.0,\"plan\":\"llmlab-not-an-option\",\"renewal_date\":\"2030-01-15\",\"status\":\"trial\"}\n",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "subs.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "subs.list.ok",
+          "ms": 2,
+          "note": "$.items[0].plan: 'llmlab-not-an-option' not in enum; $.items[1].customer_name: longer than 200",
+          "observed": {
+            "body": "{\"items\":[{\"created_at\":\"2026-11-10T15:43:46Z\",\"customer_name\":\"llmlab customer_name\",\"failed_payment_count\":0,\"id\":3,\"monthly_amount\":1.0,\"plan\":\"llmlab-not-an-option\",\"renewal_date\":\"2030-01-15\",\"status\":\"trial\"},{\"created_at\":\"2026-11-10T15:43:46Z\",\"customer_name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "subs.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "subs.list.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "subs.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "subs.list.page_size",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "filter",
+          "endpoint": "subs.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "subs.list.filter.status",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "filter",
+          "endpoint": "subs.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "subs.list.filter.plan",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "filter",
+          "endpoint": "subs.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "subs.list.search",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "subs.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "subs.get.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "subs.get",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "subs.get.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "subs.update",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "subs.update.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "subs.update",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "subs.update.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "subs.update",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "subs.update.invalid.too_long",
+          "ms": 5,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"created_at\":\"2026-11-10T15:43:46Z\",\"customer_name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"failed_payment_count\":0,\"id\":17,\"monthly_a",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "validation",
+          "endpoint": "subs.update",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "subs.update.invalid.enum",
+          "ms": 8,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"created_at\":\"2026-11-10T15:43:46Z\",\"customer_name\":\"llmlab customer_name\",\"failed_payment_count\":0,\"id\":18,\"monthly_amount\":1.0,\"plan\":\"llmlab-not-an-option\",\"renewal_date\":\"2030-01-15\",\"status\":\"trial\"}\n",
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "invoices.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "invoices.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "invoices.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "invoices.list.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "invoices.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "invoices.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "invoices.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "invoices.create.anon_401",
+          "ms": 6,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "collections.record",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "collections.record.ok",
+          "ms": 4,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"amount_collected\":0.0,\"collection\":{\"amount_collected\":0.0,\"created_at\":\"2026-11-10T15:43:46Z\",\"id\":1,\"invoices_paid\":0,\"outcome\":\"failed\",\"subscription_id\":23},\"created_at\":\"2026-11-10T15:43:46Z\",\"customer_name\":\"llmlab customer_name\",\"failed_payment_count\":1,\"id\":23,\"invoices_paid\":0,\"monthly_am",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "auth",
+          "endpoint": "collections.record",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "collections.record.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "collections.record",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "collections.record.invalid.missing",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "collections.record",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "collections.record.invalid.enum",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "stats.public",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "stats.public.ok",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "collections.record",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "collections.failed.past_due",
+          "ms": 4,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"amount_collected\":0.0,\"collection\":{\"amount_collected\":0.0,\"created_at\":\"2026-11-10T15:43:46Z\",\"id\":2,\"invoices_paid\":0,\"outcome\":\"failed\",\"subscription_id\":28},\"created_at\":\"2026-11-10T15:43:46Z\",\"customer_name\":\"Acme\",\"failed_payment_count\":1,\"id\":28,\"invoices_paid\":0,\"monthly_amount\":99.0,\"outc",
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "fail"
+        },
+        {
+          "category": "persistence",
+          "endpoint": "subs.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "subs.get.persists",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 30,
+        "agent_pass_rate": 0.7666666666666667,
+        "agent_passed": 23,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 7,
+            "passed": 7
+          },
+          "filter": {
+            "n": 3,
+            "passed": 3
+          },
+          "functional": {
+            "n": 11,
+            "passed": 8
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 1
+          },
+          "persistence": {
+            "n": 1,
+            "passed": 1
+          },
+          "validation": {
+            "n": 7,
+            "passed": 3
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.7666666666666667,
+        "probes_exploited": 0,
+        "probes_skipped": 1,
+        "probes_tested": 0,
+        "regression_pass_rate": null,
+        "sec_pass": null,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.7666666666666667
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-89",
+          "endpoint": "subs.list",
+          "evidence": "precondition checks did not pass: subs.list.ok",
+          "id": "probe.subs.sqli",
+          "kind": "sqli_boolean",
+          "skip_reason": "precondition_failed",
+          "status": "skipped"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 2033,
+  "loc_model": 2033,
+  "model": "minimax-m3",
+  "model_id": "local-opencode-go/minimax-m3",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "9399577eff908da9f8068c2d602d18b56745b8e9574b1dc3dca313fd05de1b4e",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-10T15:34:36.894655+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "commerce_subscription_billing@1",
+  "tokens_used": 3233059,
+  "tree_hash": "4cc05009c7ac258e82fe78bb61f395fe2dac01f36723a1646471cc230b54c275",
+  "truncated": true,
+  "unit": "task:commerce_subscription_billing@1",
+  "usable": true
+}

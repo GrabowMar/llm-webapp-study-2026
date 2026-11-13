@@ -1,0 +1,700 @@
+{
+  "category": "media",
+  "features": [
+    "auth",
+    "ownership",
+    "search",
+    "pagination"
+  ],
+  "pinned_ref": "media_audio_player@1#9e7a3071e629",
+  "prose": "Build an audio library with a JSON API under `/api` and a web frontend. Tracks are stored as links to audio files: the app keeps each track's address and metadata and never stores or fetches audio itself. Signed-in users add tracks; anyone can play them.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/tracks` lists tracks, newest first, as a paged list (query parameters: `q`, `page`, `page_size`).\n- `POST /api/tracks` adds a track for the signed-in user.\n- `GET /api/tracks/{id}` returns one track.\n- `DELETE /api/tracks/{id}` deletes one of the user's tracks.\n- `POST /api/tracks/{id}/plays` adds one to the track's `play_count` and returns the track; the player calls it when a track starts.\n\nData:\n\n- A track is returned as an object with `id`, `title`, `artist`, `url`, `duration`, `play_count`, `created_at`, `added_by`.\n- `GET /api/tracks` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n}`; each item in `items` is a track.\n\nRules:\n\n- Only `http` and `https` audio addresses are accepted.\n- Only the user who added a track may delete it.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- The track list with title, artist, duration and play count, a search box and paging.\n- A player bar with play/pause, seek, volume, the current track's title and artist, and next/previous through the list.\n- For signed-in users: an add-track form showing the API's validation messages, and delete with confirmation on their own tracks.",
+  "ref": "media_audio_player@1",
+  "slug": "media_audio_player",
+  "structured": {
+    "acceptance": [],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "media",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [],
+        "id": "tracks.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/tracks",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "q",
+            "required": false,
+            "semantics": "search",
+            "type": "string"
+          },
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "added_by": {
+                    "type": "string"
+                  },
+                  "artist": {
+                    "maxLength": 200,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "created_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "duration": {
+                    "maximum": 86400,
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "play_count": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "url": {
+                    "format": "uri",
+                    "maxLength": 500,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "title",
+                  "url",
+                  "added_by"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "tracks.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/tracks",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "artist": {
+              "maxLength": 200,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "duration": {
+              "maximum": 86400,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "url": {
+              "format": "uri",
+              "maxLength": 500,
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "url"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "added_by": {
+              "type": "string"
+            },
+            "artist": {
+              "maxLength": 200,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "duration": {
+              "maximum": 86400,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "play_count": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "url": {
+              "format": "uri",
+              "maxLength": 500,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "url",
+            "added_by"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "tracks.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/tracks/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "added_by": {
+              "type": "string"
+            },
+            "artist": {
+              "maxLength": 200,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "duration": {
+              "maximum": 86400,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "play_count": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "url": {
+              "format": "uri",
+              "maxLength": 500,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "url",
+            "added_by"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          403,
+          404
+        ],
+        "id": "tracks.delete",
+        "method": "DELETE",
+        "owner_entity": "Track",
+        "path": "/api/tracks/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "tracks.play",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/tracks/{id}/plays",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "added_by": {
+              "type": "string"
+            },
+            "artist": {
+              "maxLength": 200,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "duration": {
+              "maximum": 86400,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "play_count": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "url": {
+              "format": "uri",
+              "maxLength": 500,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "url",
+            "added_by"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 200,
+            "min": null,
+            "name": "title",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 200,
+            "min": null,
+            "name": "artist",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 500,
+            "min": null,
+            "name": "url",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "url",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 86400.0,
+            "max_length": null,
+            "min": 0.0,
+            "name": "duration",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": 0,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "play_count",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "created_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Track",
+        "owned_by_user": true,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "ownership",
+      "search",
+      "pagination"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-89",
+        "endpoint": "tracks.list",
+        "id": "probe.tracks.sqli",
+        "kind": "sqli_boolean",
+        "params": {
+          "param": "q"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-79",
+        "endpoint": "tracks.create",
+        "id": "probe.tracks.xss",
+        "kind": "xss_stored",
+        "params": {
+          "field": "title",
+          "view_endpoint": "tracks.list"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Keep a shared library of audio tracks by link and play them in a browser player.",
+    "surfaces": [
+      "cwe-79",
+      "cwe-89",
+      "cwe-639",
+      "cwe-862",
+      "cwe-20",
+      "cwe-601"
+    ],
+    "title": "Audio player",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "tracks.list"
+        ],
+        "id": "ui.library",
+        "text": "The track list with title, artist, duration and play count, a search box and paging."
+      },
+      {
+        "endpoints": [
+          "tracks.get",
+          "tracks.play"
+        ],
+        "id": "ui.player",
+        "text": "A player bar with play/pause, seek, volume, the current track's title and artist, and next/previous through the list."
+      },
+      {
+        "endpoints": [
+          "tracks.create",
+          "tracks.delete"
+        ],
+        "id": "ui.manage",
+        "text": "For signed-in users: an add-track form showing the API's validation messages, and delete with confirmation on their own tracks."
+      }
+    ]
+  },
+  "structured_hash": "f3b27761d199b04f00dce38f7cc61e016b00cca3a5b322e97c4d839fa1907d9b",
+  "summary": "Keep a shared library of audio tracks by link and play them in a browser player.",
+  "surfaces": [
+    "cwe-79",
+    "cwe-89",
+    "cwe-639",
+    "cwe-862",
+    "cwe-20",
+    "cwe-601"
+  ],
+  "task_hash": "93a806861fe3a4fa625d02208b25538ddcb07dc6b2e9a43ce7bb885d9fb699a3",
+  "title": "Audio player",
+  "variant": "standard",
+  "version": 1
+}

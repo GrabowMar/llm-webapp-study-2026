@@ -1,0 +1,452 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 498,
+  "completed_at": "2026-11-09T18:46:59.834294+00:00",
+  "condition_id": 81,
+  "condition_label": "local-anthropic/claude-sonnet-5-5",
+  "config_fingerprint": "16f7f0d53bb01b83bd6339b4b880f80ba2d0e298e2e4655fd58a811b62e25131",
+  "cost_usd": 0.0,
+  "duration": 309.404001,
+  "fingerprints": {
+    "config_fingerprint": "16f7f0d53bb01b83bd6339b4b880f80ba2d0e298e2e4655fd58a811b62e25131",
+    "prompt_hash": "1539ffc9c2a166ce380cb0a82b777e5d4b1b817918032090e6100cc7d1e4061a",
+    "run_fingerprint": "d746a678d83d0b6d62e4f827afe9ab8b17ebe00a0442013ab0ba1b409b16144c",
+    "task_hash": "6e61cc555984f2c082d731c9095b5a77ec995a646cdc3963f07f8036c1f45680",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "6238f698-7de4-4ca3-91c0-963c9aaff832",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-anthropic/claude-sonnet-5-5",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-09T18:46:39.737388+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 589,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 61,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 121,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 146,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "xml.check",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "xml.check.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "xml.check",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "xml.check.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "xml.check",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "xml.check.invalid.too_long",
+          "ms": 3,
+          "note": "status 200",
+          "observed": {
+            "body": "{\"column\":1,\"error\":\"syntax error\",\"line\":1,\"root_element\":null,\"valid\":false}\n",
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "validations.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "validations.create.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "validations.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "validations.create.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "validations.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "validations.create.invalid.missing",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "validations.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "validations.create.invalid.too_long",
+          "ms": 4,
+          "note": "status 201",
+          "observed": {
+            "body": "{\"column\":1,\"created_at\":\"2026-11-09T18:46:54.569821Z\",\"error\":\"syntax error\",\"id\":2,\"line\":1,\"root_element\":null,\"valid\":false,\"xml_preview\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "status": 201
+          },
+          "skipped_due_to": [],
+          "status": "fail"
+        },
+        {
+          "category": "functional",
+          "endpoint": "validations.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "validations.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "validations.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "validations.list.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "validations.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "validations.list.page_size",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "validations.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "validations.delete.ok",
+          "ms": 3,
+          "note": null,
+          "observed": {
+            "status": 204
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "validations.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "validations.delete.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "validations.delete",
+          "expected": {
+            "status": [
+              404
+            ]
+          },
+          "id": "validations.delete.other_user",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 404
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "xml.check",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "xml.check.invalid_position",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "skipped_due_to": [],
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 16,
+        "agent_pass_rate": 0.875,
+        "agent_passed": 14,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 3,
+            "passed": 3
+          },
+          "functional": {
+            "n": 7,
+            "passed": 7
+          },
+          "ownership": {
+            "n": 1,
+            "passed": 1
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 1
+          },
+          "validation": {
+            "n": 4,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 0.875,
+        "probes_exploited": 0,
+        "probes_skipped": 0,
+        "probes_tested": 1,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 0.875
+      },
+      "not_measured_reason": null,
+      "probes": [
+        {
+          "cwe": "cwe-611",
+          "endpoint": "xml.check",
+          "evidence": "status 200; no entity expansion",
+          "id": "probe.xml.xxe",
+          "kind": "xxe",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 847,
+  "loc_model": 847,
+  "model": "claude-sonnet-5-5",
+  "model_id": "local-anthropic/claude-sonnet-5-5",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "d746a678d83d0b6d62e4f827afe9ab8b17ebe00a0442013ab0ba1b409b16144c",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-09T18:41:50.430293+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "afed1882-2d75-41ad-982c-1d1ddfd043ff",
+  "task": "validation_xml_checker@1",
+  "tokens_used": 459719,
+  "tree_hash": "2ab0214158abc74c25bf664d6a95e7ad486f947c5968757d752e7887077b317a",
+  "truncated": false,
+  "unit": "task:validation_xml_checker@1",
+  "usable": true
+}

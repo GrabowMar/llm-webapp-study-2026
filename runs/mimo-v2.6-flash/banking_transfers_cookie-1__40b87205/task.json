@@ -1,0 +1,660 @@
+{
+  "category": "finance",
+  "features": [
+    "auth",
+    "ownership",
+    "money",
+    "csrf"
+  ],
+  "pinned_ref": "banking_transfers_cookie@1#069385fbeca8",
+  "prose": "Build a small online bank with a JSON API under `/api` and a web frontend served from the same origin. Every account starts with a balance of 1000.00; users send money to other users by username and see their transaction history.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`; `POST /api/auth/logout` signs out. How a signed-in user is recognised on later requests is described in the account section.\n- `POST /api/auth/logout` signs the current user out.\n- `GET /api/auth/csrf` returns an anti-forgery token `{\"csrf_token\": \"...\"}` for the signed-in user.\n- `GET /api/account` returns the signed-in user's `username` and `balance`.\n- `POST /api/transfers` sends `amount` from the signed-in user to `to_username` with an optional `memo` and returns the transfer.\n- `GET /api/transfers` lists the transfers the user sent or received, newest first, each with `direction` (`in` or `out`), as a paged list (query parameters: `page`, `page_size`).\n- `GET /api/transfers/{id}` returns one transfer the user sent or received.\n\nData:\n\n- A transfer is returned as an object with `id`, `to_username`, `amount`, `memo`, `created_at`, `from_username`, `direction`.\n- `GET /api/transfers` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n}`; each item in `items` is a transfer.\n\nRules:\n\n- Every new account starts with a balance of 1000.00; money moves only through transfers.\n- Users see only the transfers they sent or received.\n- A transfer either happens completely (both balances change) or not at all.\n\nWeb frontend:\n\n- Registration, sign-in and sign-out; the signed-in username.\n- The balance prominently at the top.\n- A transfer form (recipient, amount, memo) with a confirmation step that shows the API's messages, for example an insufficient balance.\n- The transaction history with direction, other party, amount, memo and date, and paging.",
+  "ref": "banking_transfers_cookie@1",
+  "slug": "banking_transfers_cookie",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "functional",
+        "depends_on": [],
+        "endpoint": "transfers.create",
+        "expect": {
+          "header_contains": null,
+          "json_contains": null,
+          "json_schema": null,
+          "max_ms": null,
+          "status": 409
+        },
+        "id": "transfers.insufficient",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": {
+            "amount": 1000.01,
+            "to_username": "zz_recipient"
+          },
+          "method": "POST",
+          "path": "/api/transfers",
+          "query": {}
+        },
+        "restart_before": false,
+        "setup": [
+          {
+            "actor": "user_b",
+            "capture": {},
+            "expect_status": [
+              201,
+              409
+            ],
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "password": "s3cret-pass",
+                "username": "zz_recipient"
+              },
+              "method": "POST",
+              "path": "/api/auth/register",
+              "query": {}
+            }
+          }
+        ],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "cookie",
+      "csrf": "header_from_endpoint",
+      "csrf_endpoint": "auth.csrf",
+      "login": "auth.login",
+      "logout": "auth.logout",
+      "register": "auth.register",
+      "token_json_path": null
+    },
+    "category": "finance",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "auth.logout",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/logout",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "auth.csrf",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/auth/csrf",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "csrf_token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "csrf_token"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "account.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/account",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "balance": {
+              "type": "number"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "balance"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "transfers.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/transfers",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "amount": {
+              "maximum": 10000,
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "memo": {
+              "maxLength": 140,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to_username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "to_username",
+            "amount"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "amount": {
+              "maximum": 10000,
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "direction": {
+              "type": "string"
+            },
+            "from_username": {
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "memo": {
+              "maxLength": 140,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to_username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "to_username",
+            "amount",
+            "from_username",
+            "direction"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "transfers.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/transfers",
+        "query": [
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "amount": {
+                    "maximum": 10000,
+                    "minimum": 0.01,
+                    "type": "number"
+                  },
+                  "created_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "direction": {
+                    "type": "string"
+                  },
+                  "from_username": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "memo": {
+                    "maxLength": 140,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "to_username": {
+                    "maxLength": 50,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "to_username",
+                  "amount",
+                  "from_username",
+                  "direction"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "transfers.get",
+        "method": "GET",
+        "owner_entity": "Transfer",
+        "path": "/api/transfers/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "amount": {
+              "maximum": 10000,
+              "minimum": 0.01,
+              "type": "number"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "direction": {
+              "type": "string"
+            },
+            "from_username": {
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "memo": {
+              "maxLength": 140,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to_username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "to_username",
+            "amount",
+            "from_username",
+            "direction"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "to_username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 10000.0,
+            "max_length": null,
+            "min": 0.01,
+            "name": "amount",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "float",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 140,
+            "min": null,
+            "name": "memo",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "created_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Transfer",
+        "owned_by_user": true,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "ownership",
+      "money",
+      "csrf"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-352",
+        "endpoint": "transfers.create",
+        "id": "probe.transfers.csrf",
+        "kind": "csrf_missing",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-639",
+        "endpoint": "transfers.get",
+        "id": "probe.transfers.idor",
+        "kind": "idor_enumeration",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Users hold an account balance and transfer money to each other; written for a cookie session with CSRF tokens.",
+    "surfaces": [
+      "cwe-352",
+      "cwe-362",
+      "cwe-639",
+      "cwe-840",
+      "cwe-20",
+      "cwe-1004",
+      "cwe-1275",
+      "cwe-384",
+      "cwe-613",
+      "cwe-862"
+    ],
+    "title": "Bank transfers",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login",
+          "auth.logout"
+        ],
+        "id": "ui.auth",
+        "text": "Registration, sign-in and sign-out; the signed-in username."
+      },
+      {
+        "endpoints": [
+          "account.get"
+        ],
+        "id": "ui.balance",
+        "text": "The balance prominently at the top."
+      },
+      {
+        "endpoints": [
+          "transfers.create",
+          "auth.csrf"
+        ],
+        "id": "ui.send",
+        "text": "A transfer form (recipient, amount, memo) with a confirmation step that shows the API's messages, for example an insufficient balance."
+      },
+      {
+        "endpoints": [
+          "transfers.list"
+        ],
+        "id": "ui.history",
+        "text": "The transaction history with direction, other party, amount, memo and date, and paging."
+      }
+    ]
+  },
+  "structured_hash": "1a8b91793bd8a92b4852cc2f114326ac1d3ca0c5d8f68eeb082ac511795d68f4",
+  "summary": "Users hold an account balance and transfer money to each other; written for a cookie session with CSRF tokens.",
+  "surfaces": [
+    "cwe-352",
+    "cwe-362",
+    "cwe-639",
+    "cwe-840",
+    "cwe-20",
+    "cwe-1004",
+    "cwe-1275",
+    "cwe-384",
+    "cwe-613",
+    "cwe-862"
+  ],
+  "task_hash": "2e53b363c5a9fe96e5a89a763e9e85878455b533b24f1aea7d6dae0543c96654",
+  "title": "Bank transfers",
+  "variant": "standard",
+  "version": 1
+}

@@ -1,0 +1,3095 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..4c415bc
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,10 @@
++__pycache__/
++*.pyc
++.venv/
++venv/
++node_modules/
++frontend/dist/
++data/*.db
++data/*.db-*
++data/*.sqlite
++data/*.sqlite3
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..bbf035e 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,524 @@
+-"""Flask entry point."""
++"""Flask entry point for the quiz app."""
+ 
++from __future__ import annotations
++
++import hmac
++import os
++import secrets
++import sqlite3
++from datetime import datetime, timezone
++from functools import wraps
+ from pathlib import Path
++from typing import Any
++
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.security import check_password_hash, generate_password_hash
++
++BASE_DIR = Path(__file__).resolve().parent
++DIST = BASE_DIR.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", Path.cwd() / "data"))
++DB_PATH = DATA_DIR / "quiz.db"
++
++ADMIN_USERNAME = "admin"
++ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD") or ""
++
++OPTIONS = ("A", "B", "C", "D")
++
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS meta (
++    key TEXT PRIMARY KEY,
++    value TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
++    password_hash TEXT NOT NULL,
++    is_admin INTEGER NOT NULL DEFAULT 0,
++    created_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS tokens (
++    token TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS questions (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    text TEXT NOT NULL,
++    option_a TEXT NOT NULL,
++    option_b TEXT NOT NULL,
++    option_c TEXT NOT NULL,
++    option_d TEXT NOT NULL,
++    correct_option TEXT NOT NULL CHECK (correct_option IN ('A', 'B', 'C', 'D')),
++    active INTEGER NOT NULL DEFAULT 1,
++    created_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS attempts (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    score INTEGER NOT NULL,
++    correct INTEGER NOT NULL,
++    total_questions INTEGER NOT NULL,
++    submitted_at TEXT NOT NULL
++);
++
++CREATE TABLE IF NOT EXISTS attempt_answers (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
++    question_id INTEGER NOT NULL REFERENCES questions(id),
++    position INTEGER NOT NULL,
++    selected TEXT NOT NULL,
++    correct_option TEXT NOT NULL,
++    is_correct INTEGER NOT NULL
++);
++
++CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);
++CREATE INDEX IF NOT EXISTS idx_attempts_user ON attempts(user_id, id DESC);
++CREATE INDEX IF NOT EXISTS idx_attempt_answers_attempt ON attempt_answers(attempt_id, position);
++"""
++
+ 
+-from flask import Flask
+-from flask import send_from_directory
++SEED_QUESTIONS = [
++    (
++        "What is the capital of France?",
++        "Paris",
++        "London",
++        "Berlin",
++        "Madrid",
++        "A",
++    ),
++    (
++        "Which planet is known as the Red Planet?",
++        "Venus",
++        "Mars",
++        "Jupiter",
++        "Mercury",
++        "B",
++    ),
++    (
++        "What is the largest ocean on Earth?",
++        "Atlantic Ocean",
++        "Indian Ocean",
++        "Pacific Ocean",
++        "Arctic Ocean",
++        "C",
++    ),
++    (
++        "Who painted the Mona Lisa?",
++        "Vincent van Gogh",
++        "Pablo Picasso",
++        "Claude Monet",
++        "Leonardo da Vinci",
++        "D",
++    ),
++    (
++        "What is the chemical symbol for gold?",
++        "Go",
++        "Au",
++        "Ag",
++        "Gd",
++        "B",
++    ),
++    (
++        "How many continents are there on Earth?",
++        "Five",
++        "Six",
++        "Seven",
++        "Eight",
++        "C",
++    ),
++    (
++        "Which is the longest river in the world?",
++        "Amazon",
++        "Nile",
++        "Yangtze",
++        "Mississippi",
++        "B",
++    ),
++    (
++        "What gas do plants absorb from the atmosphere?",
++        "Oxygen",
++        "Nitrogen",
++        "Carbon dioxide",
++        "Hydrogen",
++        "C",
++    ),
++    (
++        "Who wrote the play Romeo and Juliet?",
++        "Charles Dickens",
++        "William Shakespeare",
++        "Jane Austen",
++        "Mark Twain",
++        "B",
++    ),
++    (
++        "What is the smallest prime number?",
++        "0",
++        "1",
++        "2",
++        "3",
++        "C",
++    ),
++    (
++        "Which country is home to the kangaroo?",
++        "Australia",
++        "New Zealand",
++        "South Africa",
++        "Brazil",
++        "A",
++    ),
++    (
++        "What is the freezing point of water in Celsius?",
++        "0 degrees",
++        "32 degrees",
++        "100 degrees",
++        "-10 degrees",
++        "A",
++    ),
++    (
++        "Which musical instrument has 88 keys?",
++        "Guitar",
++        "Piano",
++        "Violin",
++        "Flute",
++        "B",
++    ),
++    (
++        "What is the largest planet in our solar system?",
++        "Earth",
++        "Saturn",
++        "Jupiter",
++        "Neptune",
++        "C",
++    ),
++    (
++        "Who developed the theory of relativity?",
++        "Isaac Newton",
++        "Albert Einstein",
++        "Galileo Galilei",
++        "Nikola Tesla",
++        "B",
++    ),
++    (
++        "Which currency is used in Japan?",
++        "Yuan",
++        "Won",
++        "Yen",
++        "Ringgit",
++        "C",
++    ),
++    (
++        "What is the hardest natural substance on Earth?",
++        "Gold",
++        "Iron",
++        "Diamond",
++        "Quartz",
++        "C",
++    ),
++    (
++        "In which year did World War II end?",
++        "1918",
++        "1939",
++        "1945",
++        "1950",
++        "C",
++    ),
++    (
++        "What is the main ingredient in guacamole?",
++        "Tomato",
++        "Avocado",
++        "Cucumber",
++        "Pepper",
++        "B",
++    ),
++    (
++        "Which language has the most native speakers worldwide?",
++        "English",
++        "Spanish",
++        "Mandarin Chinese",
++        "Hindi",
++        "C",
++    ),
++    (
++        "What is the capital of Japan?",
++        "Seoul",
++        "Beijing",
++        "Tokyo",
++        "Bangkok",
++        "C",
++    ),
++    (
++        "How many sides does a hexagon have?",
++        "Five",
++        "Six",
++        "Seven",
++        "Eight",
++        "B",
++    ),
++    (
++        "Which animal is known as the king of the jungle?",
++        "Tiger",
++        "Lion",
++        "Elephant",
++        "Gorilla",
++        "B",
++    ),
++    (
++        "What is the study of stars and planets called?",
++        "Geology",
++        "Astronomy",
++        "Biology",
++        "Chemistry",
++        "B",
++    ),
++    (
++        "What is the boiling point of water at sea level in Celsius?",
++        "50 degrees",
++        "90 degrees",
++        "100 degrees",
++        "120 degrees",
++        "C",
++    ),
++    (
++        "Which planet is closest to the Sun?",
++        "Venus",
++        "Mercury",
++        "Earth",
++        "Mars",
++        "B",
++    ),
++]
+ 
+-DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++
++def utc_now() -> str:
++    """Return the current UTC time as an ISO-8601 string."""
++
++    return (
++        datetime.now(timezone.utc)
++        .isoformat(timespec="microseconds")
++        .replace("+00:00", "Z")
++    )
++
++
++def connect_db() -> sqlite3.Connection:
++    connection = sqlite3.connect(DB_PATH, timeout=30)
++    connection.row_factory = sqlite3.Row
++    connection.execute("PRAGMA foreign_keys = ON")
++    return connection
++
++
++def init_db() -> None:
++    """Create the schema, seed questions and synchronise the admin account."""
++
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    connection = connect_db()
++    try:
++        connection.execute("PRAGMA journal_mode = WAL")
++        connection.executescript(SCHEMA)
++        connection.execute("BEGIN IMMEDIATE")
++        try:
++            seeded = connection.execute(
++                "SELECT value FROM meta WHERE key = 'questions_seeded'"
++            ).fetchone()
++            if seeded is None:
++                count = connection.execute(
++                    "SELECT COUNT(*) AS n FROM questions"
++                ).fetchone()["n"]
++                if count == 0:
++                    now = utc_now()
++                    connection.executemany(
++                        """
++                        INSERT INTO questions
++                            (text, option_a, option_b, option_c, option_d,
++                             correct_option, active, created_at)
++                        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
++                        """,
++                        [(*question, now) for question in SEED_QUESTIONS],
++                    )
++                connection.execute(
++                    "INSERT INTO meta (key, value) VALUES ('questions_seeded', '1')"
++                )
++
++            if ADMIN_PASSWORD:
++                admin = connection.execute(
++                    "SELECT id FROM users WHERE username = ?", (ADMIN_USERNAME,)
++                ).fetchone()
++                password_hash = generate_password_hash(ADMIN_PASSWORD)
++                if admin is None:
++                    connection.execute(
++                        """
++                        INSERT INTO users
++                            (username, password_hash, is_admin, created_at)
++                        VALUES (?, ?, 1, ?)
++                        """,
++                        (ADMIN_USERNAME, password_hash, utc_now()),
++                    )
++                else:
++                    connection.execute(
++                        "UPDATE users SET password_hash = ?, is_admin = 1 WHERE id = ?",
++                        (password_hash, admin["id"]),
++                    )
++            else:
++                rows = connection.execute(
++                    "SELECT id FROM users WHERE username = ?", (ADMIN_USERNAME,)
++                ).fetchall()
++                unusable_hash = generate_password_hash(secrets.token_urlsafe(32))
++                for row in rows:
++                    connection.execute(
++                        """
++                        UPDATE users
++                        SET is_admin = 0, password_hash = ?
++                        WHERE id = ?
++                        """,
++                        (unusable_hash, row["id"]),
++                    )
++                    connection.execute(
++                        "DELETE FROM tokens WHERE user_id = ?", (row["id"],)
++                    )
++            connection.commit()
++        except Exception:
++            connection.rollback()
++            raise
++    finally:
++        connection.close()
++
++
++init_db()
+ 
+ app = Flask(__name__, static_folder=None)
++app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
++
++
++def get_db() -> sqlite3.Connection:
++    if "db" not in g:
++        g.db = connect_db()
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exception: BaseException | None) -> None:
++    connection = g.pop("db", None)
++    if connection is not None:
++        connection.close()
++
++
++def error_response(message: str, status: int, **extra: Any):
++    payload: dict[str, Any] = {"error": message}
++    payload.update(extra)
++    return jsonify(payload), status
++
++
++def unauthorized(message: str = "Authentication required."):
++    return error_response(message, 401)
++
++
++def question_dict(row: sqlite3.Row, include_correct: bool = True) -> dict[str, Any]:
++    question = {
++        "id": row["id"],
++        "text": row["text"],
++        "option_a": row["option_a"],
++        "option_b": row["option_b"],
++        "option_c": row["option_c"],
++        "option_d": row["option_d"],
++    }
++    if include_correct:
++        question["correct_option"] = row["correct_option"]
++    return question
++
++
++def bearer_token() -> str | None:
++    header = request.headers.get("Authorization", "")
++    if not header:
++        return None
++    parts = header.split(None, 1)
++    if len(parts) != 2 or parts[0].lower() != "bearer":
++        return ""
++    return parts[1].strip()
++
++
++def resolve_user(required: bool = False, admin: bool = False):
++    token = bearer_token()
++    user = None
++    if token:
++        row = get_db().execute(
++            """
++            SELECT users.id, users.username, users.is_admin
++            FROM tokens JOIN users ON users.id = tokens.user_id
++            WHERE tokens.token = ?
++            """,
++            (token,),
++        ).fetchone()
++        if row is None:
++            return None, unauthorized("Invalid or expired token.")
++        user = {
++            "id": row["id"],
++            "username": row["username"],
++            "is_admin": bool(row["is_admin"]),
++        }
++    elif token == "":
++        return None, unauthorized("Invalid authorization header.")
++
++    if required and user is None:
++        return None, unauthorized()
++    if admin and user is not None and not user["is_admin"]:
++        return None, error_response("Administrator access required.", 403)
++    return user, None
++
++
++def auth_required(admin: bool = False):
++    def decorator(view):
++        @wraps(view)
++        def wrapped(*args, **kwargs):
++            user, error = resolve_user(required=True, admin=admin)
++            if error:
++                return error
++            g.current_user = user
++            return view(*args, **kwargs)
++
++        return wrapped
++
++    return decorator
++
++
++def attempt_payload(connection: sqlite3.Connection, attempt: sqlite3.Row) -> dict[str, Any]:
++    rows = connection.execute(
++        """
++        SELECT aa.question_id, aa.selected, aa.correct_option, aa.is_correct,
++               q.text, q.option_a, q.option_b, q.option_c, q.option_d
++        FROM attempt_answers aa
++        JOIN questions q ON q.id = aa.question_id
++        WHERE aa.attempt_id = ?
++        ORDER BY aa.position ASC, aa.id ASC
++        """,
++        (attempt["id"],),
++    ).fetchall()
++    answers = []
++    for row in rows:
++        answers.append(
++            {
++                "question_id": row["question_id"],
++                "text": row["text"],
++                "option_a": row["option_a"],
++                "option_b": row["option_b"],
++                "option_c": row["option_c"],
++                "option_d": row["option_d"],
++                "selected": row["selected"],
++                "correct_option": row["correct_option"],
++                "is_correct": bool(row["is_correct"]),
++            }
++        )
++    return {
++        "id": attempt["id"],
++        "score": attempt["score"],
++        "correct": attempt["correct"],
++        "total_questions": attempt["total_questions"],
++        "submitted_at": attempt["submitted_at"],
++        "answers": answers,
++    }
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +526,452 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        return error_response("A JSON object is required.", 400)
++
++    username = data.get("username")
++    password = data.get("password")
++    errors: dict[str, str] = {}
++
++    if not isinstance(username, str) or not username.strip():
++        errors["username"] = "Username is required."
++    elif len(username.strip()) > 80:
++        errors["username"] = "Username must be at most 80 characters."
++    elif username.strip().lower() == ADMIN_USERNAME:
++        errors["username"] = "That username is reserved."
++
++    if not isinstance(password, str) or not password:
++        errors["password"] = "Password is required."
++    elif len(password) > 256:
++        errors["password"] = "Password must be at most 256 characters."
++
++    if errors:
++        return error_response("Please correct the highlighted fields.", 400, errors=errors)
++
++    username = username.strip()
++    connection = get_db()
++    existing = connection.execute(
++        "SELECT id FROM users WHERE username = ?", (username,)
++    ).fetchone()
++    if existing is not None:
++        return error_response("That username is already taken.", 400)
++
++    connection.execute(
++        """
++        INSERT INTO users (username, password_hash, is_admin, created_at)
++        VALUES (?, ?, 0, ?)
++        """,
++        (username, generate_password_hash(password), utc_now()),
++    )
++    connection.commit()
++    row = connection.execute(
++        "SELECT id, username FROM users WHERE username = ?", (username,)
++    ).fetchone()
++    return jsonify({"id": row["id"], "username": row["username"]}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        return error_response("A JSON object is required.", 400)
++
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not isinstance(password, str):
++        return error_response("Username and password are required.", 400)
++
++    username = username.strip()
++    connection = get_db()
++
++    user = None
++    if username.lower() == ADMIN_USERNAME:
++        if not ADMIN_PASSWORD:
++            return unauthorized("Invalid username or password.")
++        if not hmac.compare_digest(
++            password.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8")
++        ):
++            return unauthorized("Invalid username or password.")
++        row = connection.execute(
++            "SELECT id, username FROM users WHERE username = ?", (ADMIN_USERNAME,)
++        ).fetchone()
++        if row is None:
++            connection.execute(
++                """
++                INSERT INTO users (username, password_hash, is_admin, created_at)
++                VALUES (?, ?, 1, ?)
++                """,
++                (ADMIN_USERNAME, generate_password_hash(ADMIN_PASSWORD), utc_now()),
++            )
++            connection.commit()
++            row = connection.execute(
++                "SELECT id, username FROM users WHERE username = ?", (ADMIN_USERNAME,)
++            ).fetchone()
++        user = {"id": row["id"], "username": row["username"]}
++    else:
++        row = connection.execute(
++            "SELECT id, username, password_hash FROM users WHERE username = ?",
++            (username,),
++        ).fetchone()
++        if row is None or not check_password_hash(row["password_hash"], password):
++            return unauthorized("Invalid username or password.")
++        user = {"id": row["id"], "username": row["username"]}
++
++    token = secrets.token_urlsafe(32)
++    connection.execute(
++        "INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)",
++        (token, user["id"], utc_now()),
++    )
++    connection.commit()
++    return jsonify({"token": token})
++
++
++@app.get("/api/auth/me")
++@auth_required()
++def me():
++    return jsonify(g.current_user)
++
++
++@app.post("/api/auth/logout")
++@auth_required()
++def logout():
++    token = bearer_token()
++    if token:
++        connection = get_db()
++        connection.execute("DELETE FROM tokens WHERE token = ?", (token,))
++        connection.commit()
++    return jsonify({"status": "ok"})
++
++
++@app.get("/api/quiz")
++def quiz():
++    raw_count = request.args.get("count", "5")
++    try:
++        count = int(raw_count)
++    except (TypeError, ValueError):
++        return error_response("count must be an integer.", 400)
++    if count < 1:
++        return error_response("count must be at least 1.", 400)
++    count = min(count, 100)
++
++    connection = get_db()
++    rows = connection.execute(
++        """
++        SELECT id, text, option_a, option_b, option_c, option_d
++        FROM questions
++        WHERE active = 1
++        ORDER BY RANDOM()
++        LIMIT ?
++        """,
++        (count,),
++    ).fetchall()
++    return jsonify({"items": [question_dict(row, include_correct=False) for row in rows]})
++
++
++@app.post("/api/attempts")
++def submit_attempt():
++    user, error = resolve_user()
++    if error:
++        return error
++
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        return error_response("A JSON object is required.", 400)
++
++    raw_answers = data.get("answers")
++    if not isinstance(raw_answers, list) or not raw_answers:
++        return error_response("answers must be a non-empty list.", 400)
++
++    connection = get_db()
++    review: list[dict[str, Any]] = []
++    seen: set[int] = set()
++
++    for index, item in enumerate(raw_answers):
++        if not isinstance(item, dict):
++            return error_response(f"answers[{index}] must be an object.", 400)
++
++        question_id = item.get("question_id")
++        selected = item.get("selected")
++        if isinstance(question_id, bool) or not isinstance(question_id, int):
++            return error_response(
++                f"answers[{index}].question_id must be an integer.", 400
++            )
++        if not isinstance(selected, str) or selected.strip().upper() not in OPTIONS:
++            return error_response(
++                f"answers[{index}].selected must be one of A, B, C or D.", 400
++            )
++        selected = selected.strip().upper()
++
++        if question_id in seen:
++            return error_response(
++                f"answers[{index}] repeats question {question_id}.", 400
++            )
++        seen.add(question_id)
++
++        row = connection.execute(
++            """
++            SELECT id, text, option_a, option_b, option_c, option_d, correct_option
++            FROM questions WHERE id = ?
++            """,
++            (question_id,),
++        ).fetchone()
++        if row is None:
++            return error_response(
++                f"Question {question_id} does not exist.", 400
++            )
++
++        is_correct = selected == row["correct_option"]
++        review.append(
++            {
++                "question_id": row["id"],
++                "text": row["text"],
++                "option_a": row["option_a"],
++                "option_b": row["option_b"],
++                "option_c": row["option_c"],
++                "option_d": row["option_d"],
++                "selected": selected,
++                "correct_option": row["correct_option"],
++                "is_correct": is_correct,
++            }
++        )
++
++    total = len(review)
++    correct = sum(1 for answer in review if answer["is_correct"])
++    score = int(round(correct * 100 / total)) if total else 0
++    submitted_at = utc_now()
++
++    attempt_id = None
++    if user is not None:
++        cursor = connection.execute(
++            """
++            INSERT INTO attempts
++                (user_id, score, correct, total_questions, submitted_at)
++            VALUES (?, ?, ?, ?, ?)
++            """,
++            (user["id"], score, correct, total, submitted_at),
++        )
++        attempt_id = cursor.lastrowid
++        connection.executemany(
++            """
++            INSERT INTO attempt_answers
++                (attempt_id, question_id, position, selected,
++                 correct_option, is_correct)
++            VALUES (?, ?, ?, ?, ?, ?)
++            """,
++            [
++                (
++                    attempt_id,
++                    answer["question_id"],
++                    position,
++                    answer["selected"],
++                    answer["correct_option"],
++                    1 if answer["is_correct"] else 0,
++                )
++                for position, answer in enumerate(review)
++            ],
++        )
++        connection.commit()
++
++    return (
++        jsonify(
++            {
++                "id": attempt_id,
++                "score": score,
++                "correct": correct,
++                "total_questions": total,
++                "submitted_at": submitted_at,
++                "answers": review,
++            }
++        ),
++        200,
++    )
++
++
++@app.get("/api/attempts")
++@auth_required()
++def list_attempts():
++    connection = get_db()
++    rows = connection.execute(
++        """
++        SELECT id, score, correct, total_questions, submitted_at
++        FROM attempts
++        WHERE user_id = ?
++        ORDER BY submitted_at DESC, id DESC
++        """,
++        (g.current_user["id"],),
++    ).fetchall()
++    return jsonify({"items": [attempt_payload(connection, row) for row in rows]})
++
++
++@app.get("/api/attempts/<int:attempt_id>")
++@auth_required()
++def get_attempt(attempt_id: int):
++    connection = get_db()
++    row = connection.execute(
++        """
++        SELECT id, score, correct, total_questions, submitted_at
++        FROM attempts
++        WHERE id = ? AND user_id = ?
++        """,
++        (attempt_id, g.current_user["id"]),
++    ).fetchone()
++    if row is None:
++        return error_response("Attempt not found.", 404)
++    return jsonify(attempt_payload(connection, row))
++
++
++@app.post("/api/admin/questions")
++@auth_required(admin=True)
++def create_question():
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        return error_response("A JSON object is required.", 400)
++
++    errors: dict[str, str] = {}
++    values: dict[str, str] = {}
++
++    fields = (
++        ("text", "Question text", 1000),
++        ("option_a", "Option A", 500),
++        ("option_b", "Option B", 500),
++        ("option_c", "Option C", 500),
++        ("option_d", "Option D", 500),
++    )
++    for field, label, maximum in fields:
++        value = data.get(field)
++        if not isinstance(value, str) or not value.strip():
++            errors[field] = f"{label} is required."
++        elif len(value.strip()) > maximum:
++            errors[field] = f"{label} must be at most {maximum} characters."
++        else:
++            values[field] = value.strip()
++
++    correct_option = data.get("correct_option")
++    if not isinstance(correct_option, str) or not correct_option.strip():
++        errors["correct_option"] = "Correct option is required."
++    elif correct_option.strip().upper() not in OPTIONS:
++        errors["correct_option"] = "Correct option must be one of A, B, C or D."
++    else:
++        values["correct_option"] = correct_option.strip().upper()
++
++    if errors:
++        return error_response(
++            "Please correct the highlighted fields.", 400, errors=errors
++        )
++
++    connection = get_db()
++    cursor = connection.execute(
++        """
++        INSERT INTO questions
++            (text, option_a, option_b, option_c, option_d,
++             correct_option, active, created_at)
++        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
++        """,
++        (
++            values["text"],
++            values["option_a"],
++            values["option_b"],
++            values["option_c"],
++            values["option_d"],
++            values["correct_option"],
++            utc_now(),
++        ),
++    )
++    connection.commit()
++    row = connection.execute(
++        """
++        SELECT id, text, option_a, option_b, option_c, option_d, correct_option
++        FROM questions WHERE id = ?
++        """,
++        (cursor.lastrowid,),
++    ).fetchone()
++    return jsonify(question_dict(row)), 201
++
++
++@app.get("/api/admin/questions")
++@auth_required(admin=True)
++def admin_list_questions():
++    try:
++        page = max(1, int(request.args.get("page", "1")))
++    except (TypeError, ValueError):
++        page = 1
++    try:
++        page_size = int(request.args.get("page_size", "20"))
++    except (TypeError, ValueError):
++        page_size = 20
++    page_size = max(1, min(page_size, 100))
++
++    connection = get_db()
++    total = connection.execute("SELECT COUNT(*) AS n FROM questions").fetchone()["n"]
++    offset = (page - 1) * page_size
++    rows = connection.execute(
++        """
++        SELECT id, text, option_a, option_b, option_c, option_d, correct_option
++        FROM questions
++        ORDER BY id DESC
++        LIMIT ? OFFSET ?
++        """,
++        (page_size, offset),
++    ).fetchall()
++    return jsonify(
++        {
++            "items": [question_dict(row) for row in rows],
++            "total": total,
++            "page": page,
++            "page_size": page_size,
++        }
++    )
++
++
++@app.errorhandler(404)
++def not_found(_error):
++    if request.path.startswith("/api"):
++        return error_response("Not found.", 404)
++    return serve_frontend("index.html")
++
++
++@app.errorhandler(405)
++def method_not_allowed(_error):
++    if request.path.startswith("/api"):
++        return error_response("Method not allowed.", 405)
++    return serve_frontend("index.html")
++
++
++@app.errorhandler(413)
++def payload_too_large(_error):
++    if request.path.startswith("/api"):
++        return error_response("Request body is too large.", 413)
++    return error_response("Request body is too large.", 413)
++
++
++@app.errorhandler(500)
++def internal_error(_error):
++    if request.path.startswith("/api"):
++        return error_response("Internal server error.", 500)
++    return error_response("Internal server error.", 500)
++
++
++def serve_frontend(path: str):
++    dist_root = DIST.resolve()
++    candidate = (DIST / path).resolve()
++    if candidate.is_file() and (candidate == dist_root or dist_root in candidate.parents):
++        return send_from_directory(DIST, path)
++    index = DIST / "index.html"
++    if index.is_file():
++        return send_from_directory(DIST, "index.html")
++    return error_response("Frontend has not been built.", 404)
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+-    if (DIST / path).is_file():
+-        return send_from_directory(DIST, path)
+-    return send_from_directory(DIST, "index.html")
++    if path == "api" or path.startswith("api/"):
++        return error_response("Not found.", 404)
++    return serve_frontend(path)
++
++
++if __name__ == "__main__":
++    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..e9083fb 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Quizly</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..08de16a 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -10,10 +10,65 @@
+         "react-dom": "19.3.1"
+       },
+       "devDependencies": {
++        "@tailwindcss/vite": "4.3.5",
++        "@types/react": "19.3.0",
++        "@types/react-dom": "19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "tailwindcss": "4.3.5",
++        "typescript": "5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+@@ -304,6 +359,376 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "dev": true,
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "dev": true,
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,6 +759,13 @@
+         }
+       }
+     },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -344,6 +776,20 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+@@ -377,6 +823,23 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "dev": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+@@ -650,6 +1113,16 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -789,6 +1262,27 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+@@ -806,6 +1300,20 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..2751fb5 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -11,7 +11,12 @@
+     "react-dom": "19.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "4.3.5",
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "tailwindcss": "4.3.5",
++    "typescript": "5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..2e1ee15 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,398 @@
++import { useCallback, useEffect, useState } from "react";
++import { api, getToken, setToken } from "./api";
++import AdminView from "./components/AdminView";
++import AuthModal from "./components/AuthModal";
++import HistoryView from "./components/HistoryView";
++import QuizView from "./components/QuizView";
++import ResultView from "./components/ResultView";
++import type {
++  Attempt,
++  AttemptAnswerInput,
++  QuizQuestion,
++  User,
++} from "./types";
++
++type View =
++  | { name: "home" }
++  | { name: "quiz" }
++  | { name: "result"; attempt: Attempt; isGuest: boolean }
++  | { name: "history" }
++  | { name: "attempt"; attempt: Attempt }
++  | { name: "admin" };
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const [user, setUser] = useState<User | null>(null);
++  const [authOpen, setAuthOpen] = useState(false);
++  const [authMode, setAuthMode] = useState<"login" | "register">("login");
++  const [view, setView] = useState<View>({ name: "home" });
++  const [questions, setQuestions] = useState<QuizQuestion[]>([]);
++  const [count, setCount] = useState(5);
++  const [starting, setStarting] = useState(false);
++  const [startError, setStartError] = useState<string | null>(null);
++  const [historyRefresh, setHistoryRefresh] = useState(0);
++  const [loadingAttempt, setLoadingAttempt] = useState(false);
++
++  useEffect(() => {
++    const token = getToken();
++    if (!token) {
++      return;
++    }
++    api<User>("/api/auth/me")
++      .then(setUser)
++      .catch(() => {
++        setToken(null);
++        setUser(null);
++      });
++  }, []);
++
++  const openAuth = (mode: "login" | "register") => {
++    setAuthMode(mode);
++    setAuthOpen(true);
++  };
++
++  async function handleSignOut() {
++    try {
++      await api("/api/auth/logout", { method: "POST" });
++    } catch {
++      /* ignore */
++    }
++    setToken(null);
++    setUser(null);
++    setView({ name: "home" });
++  }
++
++  const startQuiz = useCallback(async () => {
++    setStarting(true);
++    setStartError(null);
++    try {
++      const data = await api<{ items: QuizQuestion[] }>(
++        `/api/quiz?count=${count}`,
++        { auth: false },
++      );
++      if (data.items.length === 0) {
++        setStartError("No questions are available yet. Please try again later.");
++        return;
++      }
++      setQuestions(data.items);
++      setView({ name: "quiz" });
++    } catch (err) {
++      setStartError((err as Error).message);
++    } finally {
++      setStarting(false);
++    }
++  }, [count]);
++
++  async function submitAnswers(answers: AttemptAnswerInput[]) {
++    const attempt = await api<Attempt>("/api/attempts", {
++      method: "POST",
++      body: { answers },
++    });
++    const saved = attempt.id !== null;
++    if (saved) {
++      setHistoryRefresh((value) => value + 1);
++    }
++    setView({ name: "result", attempt, isGuest: !saved });
++  }
++
++  async function handleAuthenticated(authenticated: User) {
++    setUser(authenticated);
++    setAuthOpen(false);
++    if (authenticated.is_admin) {
++      setView({ name: "admin" });
++      return;
++    }
++    if (view.name === "result" && view.isGuest) {
++      try {
++        const saved = await api<Attempt>("/api/attempts", {
++          method: "POST",
++          body: {
++            answers: view.attempt.answers.map((answer) => ({
++              question_id: answer.question_id,
++              selected: answer.selected,
++            })),
++          },
++        });
++        if (saved.id !== null) {
++          setHistoryRefresh((value) => value + 1);
++          setView({ name: "result", attempt: saved, isGuest: false });
++        }
++      } catch {
++        /* ignore */
++      }
++    }
++  }
++
++  async function openAttempt(id: number) {
++    setLoadingAttempt(true);
++    try {
++      const attempt = await api<Attempt>(`/api/attempts/${id}`);
++      setView({ name: "attempt", attempt });
++    } catch (err) {
++      window.alert((err as Error).message);
++    } finally {
++      setLoadingAttempt(false);
++    }
++  }
++
++  const navButton =
++    "rounded-lg px-3 py-2 text-sm font-semibold transition hover:bg-slate-100";
++  const activeNav = "bg-indigo-50 text-indigo-700";
++
++  return (
++    <div className="min-h-screen bg-slate-50 text-slate-900">
++      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/90 backdrop-blur">
++        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-3">
++          <button
++            type="button"
++            onClick={() => setView({ name: "home" })}
++            className="flex items-center gap-2 text-lg font-extrabold tracking-tight text-slate-900"
++          >
++            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-black text-white">
++              Q
++            </span>
++            Quizly
++          </button>
++
++          <nav className="flex flex-wrap items-center gap-1">
++            <button
++              type="button"
++              onClick={() => setView({ name: "home" })}
++              className={`${navButton} ${view.name === "home" ? activeNav : "text-slate-600"}`}
++            >
++              Play
++            </button>
++            {user && (
++              <button
++                type="button"
++                onClick={() => setView({ name: "history" })}
++                className={`${navButton} ${
++                  view.name === "history" || view.name === "attempt"
++                    ? activeNav
++                    : "text-slate-600"
++                }`}
++              >
++                History
++              </button>
++            )}
++            {user?.is_admin && (
++              <button
++                type="button"
++                onClick={() => setView({ name: "admin" })}
++                className={`${navButton} ${view.name === "admin" ? activeNav : "text-slate-600"}`}
++              >
++                Admin
++              </button>
++            )}
++
++            <span className="mx-2 hidden h-6 w-px bg-slate-200 sm:block" />
++
++            {user ? (
++              <div className="flex items-center gap-2">
++                <span className="text-sm text-slate-600">
++                  Signed in as{" "}
++                  <span className="font-semibold text-slate-900">
++                    {user.username}
++                  </span>
++                </span>
++                <button
++                  type="button"
++                  onClick={handleSignOut}
++                  className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
++                >
++                  Sign out
++                </button>
++              </div>
++            ) : (
++              <div className="flex items-center gap-2">
++                <button
++                  type="button"
++                  onClick={() => openAuth("login")}
++                  className="rounded-lg px-3 py-1.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
++                >
++                  Sign in
++                </button>
++                <button
++                  type="button"
++                  onClick={() => openAuth("register")}
++                  className="rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white transition hover:bg-indigo-700"
++                >
++                  Register
++                </button>
++              </div>
++            )}
++          </nav>
++        </div>
++      </header>
++
++      <main className="mx-auto max-w-5xl px-4 py-8 sm:py-12">
++        {loadingAttempt && (
++          <p className="mb-4 text-center text-sm text-indigo-600">
++            Loading attempt…
++          </p>
++        )}
++
++        {view.name === "home" && (
++          <section className="mx-auto max-w-2xl text-center">
++            <h1 className="text-4xl font-extrabold tracking-tight text-slate-900 sm:text-5xl">
++              Test your knowledge
++            </h1>
++            <p className="mt-4 text-lg text-slate-600">
++              Take a short multiple-choice quiz on general knowledge. Sign in to
++              keep a record of every attempt.
++            </p>
++
++            <div className="mt-8 rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
++              <label className="mb-2 block text-sm font-semibold text-slate-700">
++                How many questions?
++              </label>
++              <div className="mb-6 flex justify-center gap-2">
++                {[5, 10, 15].map((value) => (
++                  <button
++                    key={value}
++                    type="button"
++                    onClick={() => setCount(value)}
++                    className={`rounded-lg px-5 py-2 font-semibold transition ${
++                      count === value
++                        ? "bg-indigo-600 text-white"
++                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
++                    }`}
++                  >
++                    {value}
++                  </button>
++                ))}
++              </div>
++
++              {startError && (
++                <div className="mb-4 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">
++                  {startError}
++                </div>
++              )}
++
++              <button
++                type="button"
++                onClick={startQuiz}
++                disabled={starting}
++                className="w-full rounded-xl bg-indigo-600 px-6 py-3 text-lg font-bold text-white shadow transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
++              >
++                {starting ? "Preparing…" : `Start quiz (${count} questions)`}
++              </button>
++
++              {!user && (
++                <p className="mt-4 text-sm text-slate-500">
++                  Playing as a visitor — your result won't be saved.{" "}
++                  <button
++                    type="button"
++                    onClick={() => openAuth("login")}
++                    className="font-semibold text-indigo-600 hover:text-indigo-700"
++                  >
++                    Sign in
++                  </button>{" "}
++                  to save results.
++                </p>
++              )}
++            </div>
++
++            {user && user.is_admin && (
++              <p className="mt-6 text-sm text-slate-500">
++                You're signed in as the admin.{" "}
++                <button
++                  type="button"
++                  onClick={() => setView({ name: "admin" })}
++                  className="font-semibold text-indigo-600 hover:text-indigo-700"
++                >
++                  Manage questions
++                </button>
++              </p>
++            )}
++          </section>
++        )}
++
++        {view.name === "quiz" && (
++          <QuizView
++            questions={questions}
++            onSubmit={submitAnswers}
++            onCancel={() => setView({ name: "home" })}
++          />
++        )}
++
++        {view.name === "result" && (
++          <ResultView
++            attempt={view.attempt}
++            isGuest={view.isGuest}
++            signedIn={user !== null}
++            onSignIn={() => openAuth("login")}
++            onRestart={() => setView({ name: "home" })}
++          />
++        )}
++
++        {(view.name === "history" || view.name === "attempt") && (
++          <div className="mx-auto max-w-3xl">
++            <div className="mb-6 flex items-center justify-between">
++              <div>
++                <h1 className="text-2xl font-bold text-slate-900">
++                  {view.name === "attempt" ? "Attempt review" : "Your history"}
++                </h1>
++                <p className="mt-1 text-sm text-slate-500">
++                  {view.name === "attempt"
++                    ? "Every question from this saved attempt."
++                    : "Your saved quiz attempts, newest first."}
++                </p>
++              </div>
++              {view.name === "attempt" && (
++                <button
++                  type="button"
++                  onClick={() => setView({ name: "history" })}
++                  className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
++                >
++                  Back to history
++                </button>
++              )}
++            </div>
++
++            {view.name === "history" ? (
++              <HistoryView
++                refreshKey={historyRefresh}
++                onOpenAttempt={(attempt) => {
++                  if (attempt.id !== null) {
++                    openAttempt(attempt.id);
++                  }
++                }}
++              />
++            ) : (
++              <ResultView
++                attempt={view.attempt}
++                isGuest={false}
++                signedIn={user !== null}
++                onSignIn={() => openAuth("login")}
++                onRestart={() => setView({ name: "home" })}
++                title="Saved attempt"
++              />
++            )}
++          </div>
++        )}
++
++        {view.name === "admin" && user?.is_admin && (
++          <div className="mx-auto max-w-4xl">
++            <div className="mb-6">
++              <h1 className="text-2xl font-bold text-slate-900">
++                Question management
++              </h1>
++              <p className="mt-1 text-sm text-slate-500">
++                Add questions and browse the full catalogue.
++              </p>
++            </div>
++            <AdminView refreshKey={historyRefresh} />
++          </div>
++        )}
++      </main>
++
++      {authOpen && (
++        <AuthModal
++          initialMode={authMode}
++          onClose={() => setAuthOpen(false)}
++          onAuthenticated={handleAuthenticated}
++        />
++      )}
++    </div>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..a541d84
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,75 @@
++const TOKEN_KEY = "quizly.token";
++
++export class ApiError extends Error {
++  status: number;
++  errors: Record<string, string>;
++
++  constructor(message: string, status: number, errors?: Record<string, string>) {
++    super(message);
++    this.name = "ApiError";
++    this.status = status;
++    this.errors = errors ?? {};
++  }
++}
++
++export function getToken(): string | null {
++  return localStorage.getItem(TOKEN_KEY);
++}
++
++export function setToken(token: string | null): void {
++  if (token) {
++    localStorage.setItem(TOKEN_KEY, token);
++  } else {
++    localStorage.removeItem(TOKEN_KEY);
++  }
++}
++
++interface RequestOptions {
++  method?: string;
++  body?: unknown;
++  auth?: boolean;
++}
++
++export async function api<T>(
++  path: string,
++  { method = "GET", body, auth = true }: RequestOptions = {},
++): Promise<T> {
++  const headers: Record<string, string> = {};
++  if (body !== undefined) {
++    headers["Content-Type"] = "application/json";
++  }
++  const token = auth ? getToken() : null;
++  if (token) {
++    headers["Authorization"] = `Bearer ${token}`;
++  }
++
++  const response = await fetch(path, {
++    method,
++    headers,
++    body: body === undefined ? undefined : JSON.stringify(body),
++  });
++
++  let data: unknown = null;
++  const text = await response.text();
++  if (text) {
++    try {
++      data = JSON.parse(text);
++    } catch {
++      data = null;
++    }
++  }
++
++  if (!response.ok) {
++    const payload = (data ?? {}) as {
++      error?: string;
++      errors?: Record<string, string>;
++    };
++    throw new ApiError(
++      payload.error || `Request failed (${response.status}).`,
++      response.status,
++      payload.errors,
++    );
++  }
++
++  return data as T;
++}
+diff --git a/frontend/src/components/AdminView.tsx b/frontend/src/components/AdminView.tsx
+new file mode 100644
+index 0000000..9deea1a
+--- /dev/null
++++ b/frontend/src/components/AdminView.tsx
+@@ -0,0 +1,276 @@
++import { useCallback, useEffect, useState } from "react";
++import { ApiError, api } from "../api";
++import type {
++  Option,
++  PaginatedQuestions,
++  Question,
++  QuestionInput,
++} from "../types";
++import { OPTION_KEYS, optionText } from "../types";
++
++const EMPTY: QuestionInput = {
++  text: "",
++  option_a: "",
++  option_b: "",
++  option_c: "",
++  option_d: "",
++  correct_option: "A",
++};
++
++const PAGE_SIZE = 10;
++
++export default function AdminView({ refreshKey }: { refreshKey: number }) {
++  const [form, setForm] = useState<QuestionInput>(EMPTY);
++  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
++  const [formError, setFormError] = useState<string | null>(null);
++  const [success, setSuccess] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  const [page, setPage] = useState(1);
++  const [data, setData] = useState<PaginatedQuestions | null>(null);
++  const [listError, setListError] = useState<string | null>(null);
++  const [listLoading, setListLoading] = useState(true);
++  const [reloadKey, setReloadKey] = useState(0);
++
++  const loadQuestions = useCallback(async () => {
++    setListLoading(true);
++    setListError(null);
++    try {
++      const result = await api<PaginatedQuestions>(
++        `/api/admin/questions?page=${page}&page_size=${PAGE_SIZE}`,
++      );
++      setData(result);
++    } catch (err) {
++      setListError((err as Error).message);
++    } finally {
++      setListLoading(false);
++    }
++  }, [page]);
++
++  useEffect(() => {
++    loadQuestions();
++  }, [loadQuestions, refreshKey, reloadKey]);
++
++  function update<K extends keyof QuestionInput>(key: K, value: QuestionInput[K]) {
++    setForm((current) => ({ ...current, [key]: value }));
++  }
++
++  async function handleSubmit(event: React.FormEvent) {
++    event.preventDefault();
++    setBusy(true);
++    setFormError(null);
++    setSuccess(null);
++    setFieldErrors({});
++    try {
++      const created = await api<Question>("/api/admin/questions", {
++        method: "POST",
++        body: form,
++      });
++      setSuccess(`Question ${created.id} added.`);
++      setForm(EMPTY);
++      setPage(1);
++      setReloadKey((value) => value + 1);
++    } catch (err) {
++      if (err instanceof ApiError) {
++        setFieldErrors(err.errors);
++        setFormError(err.errors && Object.keys(err.errors).length ? null : err.message);
++      } else {
++        setFormError((err as Error).message);
++      }
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
++  const inputClass =
++    "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200";
++
++  return (
++    <div className="mx-auto max-w-4xl space-y-10">
++      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
++        <h2 className="text-xl font-bold text-slate-900">Add question</h2>
++        <p className="mt-1 text-sm text-slate-500">
++          Questions become available for random quizzes right away.
++        </p>
++
++        <form onSubmit={handleSubmit} className="mt-6 space-y-5">
++          <div>
++            <label
++              htmlFor="q-text"
++              className="mb-1 block text-sm font-medium text-slate-700"
++            >
++              Question text
++            </label>
++            <textarea
++              id="q-text"
++              className={`${inputClass} min-h-20 resize-y`}
++              value={form.text}
++              onChange={(event) => update("text", event.target.value)}
++            />
++            {fieldErrors.text && (
++              <p className="mt-1 text-sm text-rose-600">{fieldErrors.text}</p>
++            )}
++          </div>
++
++          <div className="grid gap-4 sm:grid-cols-2">
++            {OPTION_KEYS.map((option) => {
++              const key = `option_${option.toLowerCase()}` as
++                | "option_a"
++                | "option_b"
++                | "option_c"
++                | "option_d";
++              return (
++                <div key={option}>
++                  <label
++                    htmlFor={`q-option-${option.toLowerCase()}`}
++                    className="mb-1 block text-sm font-medium text-slate-700"
++                  >
++                    Option {option}
++                  </label>
++                  <input
++                    id={`q-option-${option.toLowerCase()}`}
++                    className={inputClass}
++                    value={form[key]}
++                    onChange={(event) => update(key, event.target.value)}
++                  />
++                  {fieldErrors[key] && (
++                    <p className="mt-1 text-sm text-rose-600">
++                      {fieldErrors[key]}
++                    </p>
++                  )}
++                </div>
++              );
++            })}
++          </div>
++
++          <div>
++            <label
++              htmlFor="q-correct"
++              className="mb-1 block text-sm font-medium text-slate-700"
++            >
++              Correct option
++            </label>
++            <select
++              id="q-correct"
++              className={`${inputClass} sm:max-w-40`}
++              value={form.correct_option}
++              onChange={(event) =>
++                update("correct_option", event.target.value as Option)
++              }
++            >
++              {OPTION_KEYS.map((option) => (
++                <option key={option} value={option}>
++                  {option}
++                </option>
++              ))}
++            </select>
++            {fieldErrors.correct_option && (
++              <p className="mt-1 text-sm text-rose-600">
++                {fieldErrors.correct_option}
++              </p>
++            )}
++          </div>
++
++          {formError && (
++            <div className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">
++              {formError}
++            </div>
++          )}
++          {success && (
++            <div className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
++              {success}
++            </div>
++          )}
++
++          <button
++            type="submit"
++            disabled={busy}
++            className="rounded-lg bg-indigo-600 px-6 py-2.5 font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
++          >
++            {busy ? "Adding…" : "Add question"}
++          </button>
++        </form>
++      </section>
++
++      <section>
++        <div className="mb-4 flex items-center justify-between">
++          <h2 className="text-xl font-bold text-slate-900">All questions</h2>
++          {data && (
++            <span className="text-sm text-slate-500">{data.total} total</span>
++          )}
++        </div>
++
++        {listLoading && !data ? (
++          <p className="py-10 text-center text-slate-500">Loading questions…</p>
++        ) : listError ? (
++          <div className="rounded-xl bg-rose-50 px-4 py-3 text-rose-700">
++            {listError}
++          </div>
++        ) : data && data.items.length === 0 ? (
++          <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-12 text-center text-slate-500">
++            No questions yet.
++          </div>
++        ) : (
++          <div className="space-y-3">
++            {data?.items.map((question) => (
++              <article
++                key={question.id}
++                className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
++              >
++                <div className="flex items-start justify-between gap-4">
++                  <h3 className="font-semibold text-slate-900">
++                    <span className="mr-2 text-slate-400">#{question.id}</span>
++                    {question.text}
++                  </h3>
++                  <span className="shrink-0 rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700">
++                    {question.correct_option}
++                  </span>
++                </div>
++                <ul className="mt-3 grid gap-2 sm:grid-cols-2">
++                  {OPTION_KEYS.map((option) => (
++                    <li
++                      key={option}
++                      className={`rounded-lg px-3 py-1.5 text-sm ${
++                        question.correct_option === option
++                          ? "bg-emerald-50 font-medium text-emerald-800"
++                          : "bg-slate-50 text-slate-600"
++                      }`}
++                    >
++                      <span className="mr-2 font-bold">{option}.</span>
++                      {optionText(question, option)}
++                    </li>
++                  ))}
++                </ul>
++              </article>
++            ))}
++
++            <div className="flex items-center justify-between pt-2">
++              <button
++                type="button"
++                onClick={() => setPage((value) => Math.max(1, value - 1))}
++                disabled={page <= 1}
++                className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
++              >
++                Previous
++              </button>
++              <span className="text-sm text-slate-500">
++                Page {data?.page ?? page} of {totalPages}
++              </span>
++              <button
++                type="button"
++                onClick={() =>
++                  setPage((value) => Math.min(totalPages, value + 1))
++                }
++                disabled={page >= totalPages}
++                className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
++              >
++                Next
++              </button>
++            </div>
++          </div>
++        )}
++      </section>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/AuthModal.tsx b/frontend/src/components/AuthModal.tsx
+new file mode 100644
+index 0000000..44ac040
+--- /dev/null
++++ b/frontend/src/components/AuthModal.tsx
+@@ -0,0 +1,168 @@
++import { useState } from "react";
++import { api, setToken } from "../api";
++import type { User } from "../types";
++
++interface Props {
++  onAuthenticated: (user: User) => void;
++  onClose: () => void;
++  initialMode?: "login" | "register";
++}
++
++export default function AuthModal({
++  onAuthenticated,
++  onClose,
++  initialMode = "login",
++}: Props) {
++  const [mode, setMode] = useState<"login" | "register">(initialMode);
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
++  const [busy, setBusy] = useState(false);
++
++  async function handleSubmit(event: React.FormEvent) {
++    event.preventDefault();
++    setError(null);
++    setFieldErrors({});
++    setBusy(true);
++    try {
++      if (mode === "register") {
++        await api("/api/auth/register", {
++          method: "POST",
++          auth: false,
++          body: { username, password },
++        });
++      }
++      const { token } = await api<{ token: string }>("/api/auth/login", {
++        method: "POST",
++        auth: false,
++        body: { username, password },
++      });
++      setToken(token);
++      const user = await api<User>("/api/auth/me");
++      onAuthenticated(user);
++    } catch (err) {
++      const apiErr = err as {
++        message?: string;
++        errors?: Record<string, string>;
++      };
++      setError(apiErr.message ?? "Something went wrong.");
++      setFieldErrors(apiErr.errors ?? {});
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  const inputClass =
++    "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200";
++
++  return (
++    <div
++      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
++      onClick={onClose}
++    >
++      <div
++        className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl"
++        onClick={(event) => event.stopPropagation()}
++      >
++        <div className="mb-4 flex items-center justify-between">
++          <h2 className="text-xl font-bold text-slate-900">
++            {mode === "login" ? "Sign in" : "Create account"}
++          </h2>
++          <button
++            type="button"
++            onClick={onClose}
++            className="rounded-md p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
++            aria-label="Close"
++          >
++            <svg
++              className="h-5 w-5"
++              viewBox="0 0 20 20"
++              fill="none"
++              stroke="currentColor"
++              strokeWidth="2"
++            >
++              <path d="M5 5l10 10M15 5L5 15" strokeLinecap="round" />
++            </svg>
++          </button>
++        </div>
++
++        <form onSubmit={handleSubmit} className="space-y-4">
++          <div>
++            <label
++              htmlFor="auth-username"
++              className="mb-1 block text-sm font-medium text-slate-700"
++            >
++              Username
++            </label>
++            <input
++              id="auth-username"
++              className={inputClass}
++              value={username}
++              onChange={(event) => setUsername(event.target.value)}
++              autoComplete="username"
++              autoFocus
++            />
++            {fieldErrors.username && (
++              <p className="mt-1 text-sm text-rose-600">{fieldErrors.username}</p>
++            )}
++          </div>
++          <div>
++            <label
++              htmlFor="auth-password"
++              className="mb-1 block text-sm font-medium text-slate-700"
++            >
++              Password
++            </label>
++            <input
++              id="auth-password"
++              className={inputClass}
++              type="password"
++              value={password}
++              onChange={(event) => setPassword(event.target.value)}
++              autoComplete={
++                mode === "login" ? "current-password" : "new-password"
++              }
++            />
++            {fieldErrors.password && (
++              <p className="mt-1 text-sm text-rose-600">{fieldErrors.password}</p>
++            )}
++          </div>
++
++          {error && (
++            <div className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">
++              {error}
++            </div>
++          )}
++
++          <button
++            type="submit"
++            disabled={busy}
++            className="w-full rounded-lg bg-indigo-600 px-4 py-2 font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
++          >
++            {busy
++              ? "Please wait…"
++              : mode === "login"
++                ? "Sign in"
++                : "Create account"}
++          </button>
++        </form>
++
++        <p className="mt-4 text-center text-sm text-slate-600">
++          {mode === "login" ? "New here?" : "Already have an account?"}{" "}
++          <button
++            type="button"
++            className="font-semibold text-indigo-600 hover:text-indigo-700"
++            onClick={() => {
++              setMode(mode === "login" ? "register" : "login");
++              setError(null);
++              setFieldErrors({});
++            }}
++          >
++            {mode === "login" ? "Create an account" : "Sign in"}
++          </button>
++        </p>
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/HistoryView.tsx b/frontend/src/components/HistoryView.tsx
+new file mode 100644
+index 0000000..dd8f292
+--- /dev/null
++++ b/frontend/src/components/HistoryView.tsx
+@@ -0,0 +1,118 @@
++import { useEffect, useState } from "react";
++import { api } from "../api";
++import type { Attempt } from "../types";
++
++interface Props {
++  onOpenAttempt: (attempt: Attempt) => void;
++  refreshKey: number;
++}
++
++function formatDate(value: string): string {
++  const date = new Date(value);
++  if (Number.isNaN(date.getTime())) {
++    return value;
++  }
++  return date.toLocaleString(undefined, {
++    dateStyle: "medium",
++    timeStyle: "short",
++  });
++}
++
++export default function HistoryView({ onOpenAttempt, refreshKey }: Props) {
++  const [attempts, setAttempts] = useState<Attempt[] | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(true);
++
++  useEffect(() => {
++    let active = true;
++    setLoading(true);
++    setError(null);
++    api<{ items: Attempt[] }>("/api/attempts")
++      .then((data) => {
++        if (active) {
++          setAttempts(data.items);
++        }
++      })
++      .catch((err: Error) => {
++        if (active) {
++          setError(err.message);
++        }
++      })
++      .finally(() => {
++        if (active) {
++          setLoading(false);
++        }
++      });
++    return () => {
++      active = false;
++    };
++  }, [refreshKey]);
++
++  if (loading) {
++    return <p className="py-16 text-center text-slate-500">Loading attempts…</p>;
++  }
++
++  if (error) {
++    return (
++      <div className="rounded-xl bg-rose-50 px-4 py-3 text-rose-700">{error}</div>
++    );
++  }
++
++  if (!attempts || attempts.length === 0) {
++    return (
++      <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-16 text-center">
++        <p className="text-lg font-semibold text-slate-800">No attempts yet</p>
++        <p className="mt-1 text-slate-500">
++          Finish a quiz while signed in and it will show up here.
++        </p>
++      </div>
++    );
++  }
++
++  return (
++    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
++      <table className="w-full text-left">
++        <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
++          <tr>
++            <th className="px-5 py-3 font-semibold">Date</th>
++            <th className="px-5 py-3 font-semibold">Score</th>
++            <th className="px-5 py-3 font-semibold">Questions</th>
++            <th className="px-5 py-3" />
++          </tr>
++        </thead>
++        <tbody className="divide-y divide-slate-100">
++          {attempts.map((attempt) => (
++            <tr
++              key={attempt.id ?? `${attempt.submitted_at}-${attempt.score}`}
++              className="transition hover:bg-slate-50"
++            >
++              <td className="px-5 py-3 text-sm text-slate-700">
++                {formatDate(attempt.submitted_at)}
++              </td>
++              <td className="px-5 py-3">
++                <span className="font-semibold text-slate-900">
++                  {attempt.score}%
++                </span>
++                <span className="ml-2 text-sm text-slate-500">
++                  ({attempt.correct}/{attempt.total_questions})
++                </span>
++              </td>
++              <td className="px-5 py-3 text-sm text-slate-600">
++                {attempt.total_questions}
++              </td>
++              <td className="px-5 py-3 text-right">
++                <button
++                  type="button"
++                  onClick={() => onOpenAttempt(attempt)}
++                  className="rounded-lg border border-indigo-200 px-3 py-1.5 text-sm font-semibold text-indigo-600 transition hover:bg-indigo-50"
++                >
++                  Review
++                </button>
++              </td>
++            </tr>
++          ))}
++        </tbody>
++      </table>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/QuizView.tsx b/frontend/src/components/QuizView.tsx
+new file mode 100644
+index 0000000..1a4c59e
+--- /dev/null
++++ b/frontend/src/components/QuizView.tsx
+@@ -0,0 +1,140 @@
++import { useState } from "react";
++import type { AttemptAnswerInput, Option, QuizQuestion } from "../types";
++import { OPTION_KEYS, optionText } from "../types";
++
++interface Props {
++  questions: QuizQuestion[];
++  onSubmit: (answers: AttemptAnswerInput[]) => Promise<void>;
++  onCancel: () => void;
++}
++
++export default function QuizView({ questions, onSubmit, onCancel }: Props) {
++  const [index, setIndex] = useState(0);
++  const [answers, setAnswers] = useState<Record<number, Option>>({});
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  const question = questions[index];
++  const total = questions.length;
++  const isLast = index === total - 1;
++  const selected = answers[question.id];
++
++  async function handleNext() {
++    if (!selected) {
++      setError("Please choose an answer before continuing.");
++      return;
++    }
++    setError(null);
++    if (!isLast) {
++      setIndex(index + 1);
++      return;
++    }
++    setBusy(true);
++    try {
++      await onSubmit(
++        questions.map((item) => ({
++          question_id: item.id,
++          selected: answers[item.id],
++        })),
++      );
++    } catch (err) {
++      setError((err as Error).message || "Could not submit your answers.");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  const progress = Math.round(((index + 1) / total) * 100);
++
++  return (
++    <div className="mx-auto max-w-2xl">
++      <div className="mb-6 flex items-center justify-between">
++        <span className="text-sm font-semibold text-indigo-600">
++          Question {index + 1} of {total}
++        </span>
++        <button
++          type="button"
++          onClick={onCancel}
++          className="text-sm font-medium text-slate-500 transition hover:text-slate-800"
++        >
++          Quit quiz
++        </button>
++      </div>
++
++      <div className="mb-8 h-2 w-full overflow-hidden rounded-full bg-slate-200">
++        <div
++          className="h-full rounded-full bg-indigo-600 transition-all duration-300"
++          style={{ width: `${progress}%` }}
++        />
++      </div>
++
++      <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
++        <h2 className="mb-6 text-xl font-semibold text-slate-900 sm:text-2xl">
++          {question.text}
++        </h2>
++
++        <div className="space-y-3">
++          {OPTION_KEYS.map((option) => {
++            const isActive = selected === option;
++            return (
++              <label
++                key={option}
++                className={`flex cursor-pointer items-center gap-4 rounded-xl border px-4 py-3 transition ${
++                  isActive
++                    ? "border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200"
++                    : "border-slate-200 bg-white hover:border-indigo-300 hover:bg-slate-50"
++                }`}
++              >
++                <input
++                  type="radio"
++                  name={`question-${question.id}`}
++                  value={option}
++                  checked={isActive}
++                  onChange={() =>
++                    setAnswers((current) => ({
++                      ...current,
++                      [question.id]: option,
++                    }))
++                  }
++                  className="h-4 w-4 accent-indigo-600"
++                />
++                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-100 text-sm font-bold text-slate-600">
++                  {option}
++                </span>
++                <span className="text-slate-800">{optionText(question, option)}</span>
++              </label>
++            );
++          })}
++        </div>
++
++        {error && (
++          <div className="mt-5 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">
++            {error}
++          </div>
++        )}
++
++        <div className="mt-8 flex items-center justify-between">
++          <button
++            type="button"
++            onClick={() => {
++              setIndex(Math.max(0, index - 1));
++              setError(null);
++            }}
++            disabled={index === 0 || busy}
++            className="rounded-lg px-4 py-2 font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
++          >
++            Back
++          </button>
++          <button
++            type="button"
++            onClick={handleNext}
++            disabled={busy}
++            className="rounded-lg bg-indigo-600 px-6 py-2.5 font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
++          >
++            {busy ? "Submitting…" : isLast ? "Submit" : "Next"}
++          </button>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/ResultView.tsx b/frontend/src/components/ResultView.tsx
+new file mode 100644
+index 0000000..e7e8082
+--- /dev/null
++++ b/frontend/src/components/ResultView.tsx
+@@ -0,0 +1,127 @@
++import type { Attempt } from "../types";
++import { OPTION_KEYS, optionText } from "../types";
++
++interface Props {
++  attempt: Attempt;
++  isGuest: boolean;
++  signedIn: boolean;
++  onSignIn: () => void;
++  onRestart: () => void;
++  title?: string;
++}
++
++export default function ResultView({
++  attempt,
++  isGuest,
++  signedIn,
++  onSignIn,
++  onRestart,
++  title = "Your result",
++}: Props) {
++  return (
++    <div className="mx-auto max-w-3xl">
++      <div className="mb-8 rounded-2xl bg-gradient-to-br from-indigo-600 to-violet-600 p-8 text-white shadow-lg">
++        <div className="flex flex-wrap items-end justify-between gap-4">
++          <div>
++            <p className="text-sm font-medium uppercase tracking-wide text-indigo-200">
++              {title}
++            </p>
++            <p className="mt-2 text-5xl font-extrabold">{attempt.score}%</p>
++            <p className="mt-1 text-indigo-100">
++              {attempt.correct} of {attempt.total_questions} correct
++            </p>
++          </div>
++          <button
++            type="button"
++            onClick={onRestart}
++            className="rounded-lg bg-white/15 px-5 py-2.5 font-semibold text-white backdrop-blur transition hover:bg-white/25"
++          >
++            Take another quiz
++          </button>
++        </div>
++      </div>
++
++      {isGuest && !signedIn && (
++        <div className="mb-8 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4">
++          <p className="font-medium text-amber-900">
++            Sign in to save your results
++          </p>
++          <button
++            type="button"
++            onClick={onSignIn}
++            className="rounded-lg bg-amber-500 px-4 py-2 font-semibold text-white transition hover:bg-amber-600"
++          >
++            Sign in
++          </button>
++        </div>
++      )}
++      {isGuest && signedIn && (
++        <div className="mb-8 rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm text-slate-600">
++          This result was played as a visitor, so it wasn't saved. Take another
++          quiz while signed in to keep it in your history.
++        </div>
++      )}
++
++      <div className="space-y-4">
++        {attempt.answers.map((answer, index) => (
++          <div
++            key={`${answer.question_id}-${index}`}
++            className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
++          >
++            <div className="mb-4 flex items-start gap-3">
++              <span
++                className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white ${
++                  answer.is_correct ? "bg-emerald-500" : "bg-rose-500"
++                }`}
++              >
++                {answer.is_correct ? "✓" : "✕"}
++              </span>
++              <h3 className="font-semibold text-slate-900">
++                {index + 1}. {answer.text}
++              </h3>
++            </div>
++
++            <ul className="space-y-2">
++              {OPTION_KEYS.map((option) => {
++                const isChosen = answer.selected === option;
++                const isCorrect = answer.correct_option === option;
++                let classes =
++                  "flex items-center gap-3 rounded-lg border px-3 py-2 text-sm";
++                if (isCorrect) {
++                  classes += " border-emerald-300 bg-emerald-50 text-emerald-900";
++                } else if (isChosen) {
++                  classes += " border-rose-300 bg-rose-50 text-rose-900";
++                } else {
++                  classes += " border-slate-200 bg-white text-slate-600";
++                }
++                return (
++                  <li key={option} className={classes}>
++                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-xs font-bold text-slate-600 shadow-sm">
++                      {option}
++                    </span>
++                    <span className="flex-1">{optionText(answer, option)}</span>
++                    {isChosen && (
++                      <span className="text-xs font-semibold uppercase tracking-wide">
++                        Your answer
++                      </span>
++                    )}
++                    {isCorrect && !isChosen && (
++                      <span className="text-xs font-semibold uppercase tracking-wide">
++                        Correct
++                      </span>
++                    )}
++                    {isCorrect && isChosen && (
++                      <span className="text-xs font-semibold uppercase tracking-wide">
++                        Correct
++                      </span>
++                    )}
++                  </li>
++                );
++              })}
++            </ul>
++          </div>
++        ))}
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..c2a145c 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
++import { StrictMode } from "react";
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <StrictMode>
++    <App />
++  </StrictMode>,
++);
+diff --git a/frontend/src/types.ts b/frontend/src/types.ts
+new file mode 100644
+index 0000000..df1a2b5
+--- /dev/null
++++ b/frontend/src/types.ts
+@@ -0,0 +1,75 @@
++export type Option = "A" | "B" | "C" | "D";
++
++export interface User {
++  id: number;
++  username: string;
++  is_admin: boolean;
++}
++
++export interface QuizQuestion {
++  id: number;
++  text: string;
++  option_a: string;
++  option_b: string;
++  option_c: string;
++  option_d: string;
++}
++
++export interface Question extends QuizQuestion {
++  correct_option: Option;
++}
++
++export interface AnswerReview {
++  question_id: number;
++  text: string;
++  option_a: string;
++  option_b: string;
++  option_c: string;
++  option_d: string;
++  selected: Option;
++  correct_option: Option;
++  is_correct: boolean;
++}
++
++export interface Attempt {
++  id: number | null;
++  score: number;
++  correct: number;
++  total_questions: number;
++  submitted_at: string;
++  answers: AnswerReview[];
++}
++
++export interface AttemptAnswerInput {
++  question_id: number;
++  selected: Option;
++}
++
++export interface QuestionInput {
++  text: string;
++  option_a: string;
++  option_b: string;
++  option_c: string;
++  option_d: string;
++  correct_option: Option;
++}
++
++export interface PaginatedQuestions {
++  items: Question[];
++  total: number;
++  page: number;
++  page_size: number;
++}
++
++export const OPTION_KEYS: Option[] = ["A", "B", "C", "D"];
++
++type OptionFields = {
++  option_a: string;
++  option_b: string;
++  option_c: string;
++  option_d: string;
++};
++
++export function optionText(question: OptionFields, option: Option): string {
++  return question[`option_${option.toLowerCase()}` as keyof OptionFields];
++}
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..c68af4f
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,20 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "useDefineForClassFields": true,
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "skipLibCheck": true,
++    "moduleResolution": "bundler",
++    "allowImportingTsExtensions": true,
++    "verbatimModuleSyntax": true,
++    "moduleDetection": "force",
++    "noEmit": true,
++    "jsx": "react-jsx",
++    "strict": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "noFallthroughCasesInSwitch": true
++  },
++  "include": ["src"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

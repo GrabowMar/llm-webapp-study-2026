@@ -1,0 +1,925 @@
+{
+ "adherence": {
+  "checker_version": 1,
+  "detected": {
+   "auth": {
+    "confidence": "medium",
+    "evidence": [
+     "runtime:login:bearer",
+     "runtime:tester"
+    ],
+    "value": "bearer"
+   },
+   "backend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:backend/requirements.txt:flask",
+     "import:backend/app.py:flask"
+    ],
+    "value": "flask"
+   },
+   "database": {
+    "confidence": "medium",
+    "evidence": [
+     "import:backend/app.py:sqlite3"
+    ],
+    "value": "sqlite"
+   },
+   "frontend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:frontend/package.json:react",
+     "import:frontend/src/Admin.tsx:react",
+     "import:frontend/src/App.tsx:react",
+     "import:frontend/src/Attempts.tsx:react",
+     "import:frontend/src/Auth.tsx:react",
+     "import:frontend/src/Quiz.tsx:react"
+    ],
+    "value": "react"
+   },
+   "styling": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:tailwindcss",
+     "classes:share=0.99"
+    ],
+    "value": "tailwind"
+   }
+  },
+  "deviations": [],
+  "hallucinated": [],
+  "packages": [
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "flask",
+    "pinned": true,
+    "version": "3.1.3"
+   },
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "gunicorn",
+    "pinned": true,
+    "version": "26.2.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@tailwindcss/vite",
+    "pinned": false,
+    "version": "^4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react-dom",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "tailwindcss",
+    "pinned": false,
+    "version": "^4.3.5"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@vitejs/plugin-react",
+    "pinned": true,
+    "version": "6.2.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "vite",
+    "pinned": true,
+    "version": "8.3.5"
+   }
+  ],
+  "sbom_blob": "10058ed451b983aec234e8e04abafde95e4e6d03e57124cb2931a4b72719588b",
+  "status": "compliant",
+  "style_metrics": {
+   "component_library_imports": {},
+   "css_files": 1,
+   "css_modules": 0,
+   "tailwind_class_share": 0.9922
+  },
+  "unpinned": [
+   "@tailwindcss/vite",
+   "tailwindcss"
+  ]
+ },
+ "created_at": "2026-11-11T16:29:14.890989+00:00",
+ "eval_level": "security",
+ "eval_suite": "eval-v2@2",
+ "id": 997,
+ "mode": "full",
+ "result": {
+  "auth_mode": "contract_bearer",
+  "checks": [
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "health",
+    "ms": 10,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "index_served",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "spa_fallback",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.register",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "auth.register.ok",
+    "ms": 102,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.login",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "auth.login.ok",
+    "ms": 102,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "quiz.draw",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "quiz.draw.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "attempts.submit",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "attempts.submit.ok",
+    "ms": 1,
+    "note": "status 200",
+    "observed": {
+     "body": "{\"answers\":[{\"correct_option\":\"D\",\"is_correct\":false,\"option_a\":\"Atlantic\",\"option_b\":\"Indian\",\"option_c\":\"Arctic\",\"option_d\":\"Pacific\",\"question_id\":3,\"selected\":\"A\",\"text\":\"What is the largest ocean on Earth?\"}],\"correct\":0,\"id\":null,\"score\":0,\"submitted_at\":\"2026-11-11T16:31:08.063027+00:00\",\"tot",
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "functional",
+    "endpoint": "attempts.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "attempts.list.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "attempts.list",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "attempts.list.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "attempts.get",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "attempts.get.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "attempts.get",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "attempts.get.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "ownership",
+    "endpoint": "attempts.get",
+    "expected": {
+     "status": [
+      404
+     ]
+    },
+    "id": "attempts.get.other_user",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 404
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "admin.questions.create",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "admin.questions.create.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "admin.questions.create",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "admin.questions.create.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "admin.questions.create",
+    "expected": {
+     "status": [
+      403
+     ]
+    },
+    "id": "admin.questions.create.non_admin_403",
+    "ms": 1,
+    "note": "status 401",
+    "observed": {
+     "body": "{\"error\":\"unauthorized\"}\n",
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "functional",
+    "endpoint": "admin.questions.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "admin.questions.list.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "admin.questions.list",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "admin.questions.list.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "admin.questions.list",
+    "expected": {
+     "status": [
+      403
+     ]
+    },
+    "id": "admin.questions.list.non_admin_403",
+    "ms": 1,
+    "note": "status 401",
+    "observed": {
+     "body": "{\"error\":\"unauthorized\"}\n",
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "pagination",
+    "endpoint": "admin.questions.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "admin.questions.list.page_size",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "quiz.draw",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "quiz.draw.hides_answer",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "acceptance",
+    "stated_in": [
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "attempts.submit",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "attempts.submit.invalid.missing",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "admin.questions.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "admin.questions.create.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "admin.questions.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "admin.questions.create.invalid.too_long",
+    "ms": 2,
+    "note": "text: status 201 | option_a: status 201 | option_b: status 201 | option_c: status 201 | option_d: status 201",
+    "observed": {
+     "body": "{\"correct_option\":\"A\",\"id\":30,\"option_a\":\"llmlab option_a\",\"option_b\":\"llmlab option_b\",\"option_c\":\"llmlab option_c\",\"option_d\":\"llmlab option_d\",\"text\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+     "requests": [
+      {
+       "label": "text",
+       "ok": false,
+       "status": 201
+      },
+      {
+       "label": "option_a",
+       "ok": false,
+       "status": 201
+      },
+      {
+       "label": "option_b",
+       "ok": false,
+       "status": 201
+      },
+      {
+       "label": "option_c",
+       "ok": false,
+       "status": 201
+      },
+      {
+       "label": "option_d",
+       "ok": false,
+       "status": 201
+      }
+     ],
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "admin.questions.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "admin.questions.create.invalid.enum",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "persistence",
+    "endpoint": "attempts.get",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "attempts.get.persists",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   }
+  ],
+  "compiler_version": 2,
+  "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+  "flaky_checks": [],
+  "measured": true,
+  "metrics": {
+   "agent_checks": 22,
+   "agent_pass_rate": 0.8181818181818182,
+   "agent_passed": 18,
+   "baseline_pass_rate": 0.0,
+   "by_category": {
+    "auth": {
+     "n": 6,
+     "passed": 4
+    },
+    "functional": {
+     "n": 9,
+     "passed": 8
+    },
+    "ownership": {
+     "n": 1,
+     "passed": 1
+    },
+    "pagination": {
+     "n": 1,
+     "passed": 1
+    },
+    "persistence": {
+     "n": 1,
+     "passed": 1
+    },
+    "validation": {
+     "n": 4,
+     "passed": 3
+    }
+   },
+   "common_pass_rate": null,
+   "infra_ok": true,
+   "over_baseline": 0.8181818181818182,
+   "probes_exploited": 0,
+   "probes_skipped": 0,
+   "probes_tested": 2,
+   "regression_pass_rate": null,
+   "sec_pass": false,
+   "slot_pass_rate": null,
+   "stated_pass_rate": 0.875,
+   "unstated_pass_rate": 0.7857142857142857
+  },
+  "not_measured_reason": null,
+  "plan_sha256": "9a9ce36e2d4cbc61f98b93c42a479acc0f9d6af28c842fd3ce8a84a700f72a5d",
+  "probes": [
+   {
+    "cwe": "cwe-639",
+    "endpoint": "attempts.get",
+    "evidence": "user_b got 404",
+    "id": "probe.attempts.idor",
+    "kind": "idor_enumeration",
+    "skip_reason": null,
+    "status": "not_exploited"
+   },
+   {
+    "cwe": "cwe-798",
+    "endpoint": null,
+    "evidence": "none of 6 default passwords accepted",
+    "id": "probe.quiz.default_admin",
+    "kind": "default_credential",
+    "skip_reason": null,
+    "status": "not_exploited"
+   }
+  ],
+  "skipped": [],
+  "tester_version": 2
+ },
+ "stages": {
+  "adherence": {
+   "detail": {
+    "record_status": "compliant",
+    "runtime": true
+   },
+   "seconds": 1.66,
+   "status": "ok"
+  },
+  "build": {
+   "detail": {
+    "attempts": [
+     {
+      "attempt": 1,
+      "infra_suspected": false,
+      "ok": true
+     }
+    ],
+    "base_images": {
+     "pkg:docker/node@24-slim?digest=sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c&platform=linux%2Famd64": "sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c",
+     "pkg:docker/python@3.13-slim?digest=sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1&platform=linux%2Famd64": "sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1"
+    },
+    "build_context": {
+     "locks": [
+      {
+       "ecosystem": "pypi",
+       "lock": "backend/requirements.lock",
+       "manifest": "backend/requirements.txt",
+       "reason": null,
+       "source": "starter",
+       "status": "complete"
+      },
+      {
+       "ecosystem": "npm",
+       "lock": "frontend/package-lock.json",
+       "manifest": "frontend/package.json",
+       "reason": null,
+       "source": "tree",
+       "status": "complete"
+      }
+     ],
+     "notes": [
+      "tree: 19 files written verbatim"
+     ]
+    },
+    "build_key": "87a786565064756918d1b56d2b386e4f35820c2dce894f265615b899d3a95501",
+    "cache_hit": false,
+    "cpu_seconds": 4.925,
+    "image_bytes": 186830960,
+    "image_id": "sha256:13886456adb06512893164352a07ded826735132719ddadd52ad25e31a33bd75",
+    "image_tag": "llmlab/sample:87a786565064756918d1b56d-890b3ecfdd37",
+    "peak_memory_bytes": 153575424,
+    "prepare_seconds": 0.042,
+    "queue_seconds": 0.029,
+    "seconds": 6.67
+   },
+   "seconds": 7.194,
+   "status": "ok"
+  },
+  "lock": {
+   "detail": {
+    "files": [],
+    "packages": {
+     "npm": 76,
+     "pip": 8
+    },
+    "resolved_at": "2026-11-10T09:27:55.643491+00:00",
+    "source": "model"
+   },
+   "seconds": 0.001,
+   "status": "ok"
+  },
+  "probes": {
+   "detail": {
+    "n": 2,
+    "tested": 2
+   },
+   "status": "ok"
+  },
+  "start": {
+   "detail": {
+    "credentials_ref": "0b6fac876823b8133b6dba2bca819ff66feb847e378c52b556b83819bec5e0c4"
+   },
+   "seconds": 2.236,
+   "status": "ok"
+  },
+  "tester": {
+   "detail": {
+    "attempts": 1,
+    "checks_adjusted": 0,
+    "checks_skipped": 0,
+    "compiler_version": 2,
+    "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+    "image_override": false,
+    "only_checks": null,
+    "overlay": false,
+    "plan_sha256": "9a9ce36e2d4cbc61f98b93c42a479acc0f9d6af28c842fd3ce8a84a700f72a5d",
+    "probe_rules_version": 2,
+    "probes": null,
+    "tester_rules_version": 3,
+    "tester_version": 2,
+    "upstream": false
+   },
+   "seconds": 6.371,
+   "status": "ok"
+  }
+ },
+ "status": "measured"
+}

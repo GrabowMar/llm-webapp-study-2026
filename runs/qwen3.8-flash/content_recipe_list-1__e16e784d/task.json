@@ -1,0 +1,860 @@
+{
+  "category": "content",
+  "features": [
+    "auth",
+    "ownership",
+    "search",
+    "filter",
+    "pagination"
+  ],
+  "pinned_ref": "content_recipe_list@1#cf486fa440e4",
+  "prose": "Build a recipe book with a JSON API under `/api` and a web frontend. Anyone can browse recipes; signed-in users add recipes and edit or delete their own.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `POST /api/recipes` adds a recipe authored by the signed-in user.\n- `GET /api/recipes` lists recipes, newest first, as a paged list without ingredients and instructions (query parameters: `category`, `q`, `page`, `page_size`).\n- `GET /api/recipes/{id}` returns the full recipe.\n- `PUT /api/recipes/{id}` replaces a recipe's fields; only its author may do this.\n- `DELETE /api/recipes/{id}` deletes a recipe; only its author may do this.\n\nData:\n\n- A recipe is returned as an object with `id`, `title`, `ingredients`, `instructions`, `category`, `prep_minutes`, `servings`, `created_at`, `author`.\n- `GET /api/recipes` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n}`; each item in `items` is an object with `id`, `title`, `category`, `prep_minutes` and `author`.\n\nRules:\n\n- Everyone may read recipes; only a recipe's author may change or delete it.\n- Ingredients keep the order they were given in.\n- On first start the app holds three to five sample recipes from at least two categories.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- Recipe cards with title, category, prep time and author, a category dropdown, a title search and paging.\n- A recipe page with the ingredients as a list and the instructions with their line breaks kept.\n- Add and edit forms with ingredient rows that can be added and removed, showing the API's validation messages; delete asks for confirmation.",
+  "ref": "content_recipe_list@1",
+  "slug": "content_recipe_list",
+  "structured": {
+    "acceptance": [],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "content",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "recipes.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/recipes",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "category": {
+              "enum": [
+                "breakfast",
+                "main",
+                "dessert",
+                "snack",
+                "drink",
+                "other",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ingredients": {
+              "items": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "minItems": 1,
+              "type": "array"
+            },
+            "instructions": {
+              "maxLength": 10000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "prep_minutes": {
+              "maximum": 1440,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "servings": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "ingredients",
+            "instructions"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "author": {
+              "type": "string"
+            },
+            "category": {
+              "enum": [
+                "breakfast",
+                "main",
+                "dessert",
+                "snack",
+                "drink",
+                "other",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "ingredients": {
+              "items": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "minItems": 1,
+              "type": "array"
+            },
+            "instructions": {
+              "maxLength": 10000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "prep_minutes": {
+              "maximum": 1440,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "servings": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "ingredients",
+            "instructions",
+            "author"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [],
+        "id": "recipes.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/recipes",
+        "query": [
+          {
+            "default": null,
+            "enum": [
+              "breakfast",
+              "main",
+              "dessert",
+              "snack",
+              "drink",
+              "other"
+            ],
+            "max": null,
+            "name": "category",
+            "required": false,
+            "semantics": "filter",
+            "type": "enum"
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "q",
+            "required": false,
+            "semantics": "search",
+            "type": "string"
+          },
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "author": {
+                    "type": "string"
+                  },
+                  "category": {
+                    "type": "string"
+                  },
+                  "id": [
+                    "integer",
+                    "string"
+                  ],
+                  "prep_minutes": [
+                    "integer",
+                    "null"
+                  ],
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "title",
+                  "category",
+                  "author"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "recipes.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/recipes/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "author": {
+              "type": "string"
+            },
+            "category": {
+              "enum": [
+                "breakfast",
+                "main",
+                "dessert",
+                "snack",
+                "drink",
+                "other",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "ingredients": {
+              "items": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "minItems": 1,
+              "type": "array"
+            },
+            "instructions": {
+              "maxLength": 10000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "prep_minutes": {
+              "maximum": 1440,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "servings": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "ingredients",
+            "instructions",
+            "author"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          400,
+          403,
+          404
+        ],
+        "id": "recipes.replace",
+        "method": "PUT",
+        "owner_entity": "Recipe",
+        "path": "/api/recipes/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "category": {
+              "enum": [
+                "breakfast",
+                "main",
+                "dessert",
+                "snack",
+                "drink",
+                "other",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ingredients": {
+              "items": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "minItems": 1,
+              "type": "array"
+            },
+            "instructions": {
+              "maxLength": 10000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "prep_minutes": {
+              "maximum": 1440,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "servings": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "ingredients",
+            "instructions"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "author": {
+              "type": "string"
+            },
+            "category": {
+              "enum": [
+                "breakfast",
+                "main",
+                "dessert",
+                "snack",
+                "drink",
+                "other",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "ingredients": {
+              "items": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "minItems": 1,
+              "type": "array"
+            },
+            "instructions": {
+              "maxLength": 10000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "prep_minutes": {
+              "maximum": 1440,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "servings": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "ingredients",
+            "instructions",
+            "author"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          403,
+          404
+        ],
+        "id": "recipes.delete",
+        "method": "DELETE",
+        "owner_entity": "Recipe",
+        "path": "/api/recipes/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 255,
+            "min": null,
+            "name": "title",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 200,
+            "min": null,
+            "name": "ingredients",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "json",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 10000,
+            "min": null,
+            "name": "instructions",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "text",
+            "unique": false
+          },
+          {
+            "default": "other",
+            "enum": [
+              "breakfast",
+              "main",
+              "dessert",
+              "snack",
+              "drink",
+              "other"
+            ],
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "category",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "enum",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 1440.0,
+            "max_length": null,
+            "min": 1.0,
+            "name": "prep_minutes",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 100.0,
+            "max_length": null,
+            "min": 1.0,
+            "name": "servings",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "int",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "created_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Recipe",
+        "owned_by_user": true,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "ownership",
+      "search",
+      "filter",
+      "pagination"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-79",
+        "endpoint": "recipes.create",
+        "id": "probe.recipes.xss",
+        "kind": "xss_stored",
+        "params": {
+          "field": "instructions",
+          "view_endpoint": "recipes.get"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-89",
+        "endpoint": "recipes.list",
+        "id": "probe.recipes.sqli",
+        "kind": "sqli_boolean",
+        "params": {
+          "param": "q"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Share recipes with ingredients and instructions, browsable by category.",
+    "surfaces": [
+      "cwe-79",
+      "cwe-89",
+      "cwe-639",
+      "cwe-862",
+      "cwe-20",
+      "cwe-915"
+    ],
+    "title": "Recipe book",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "recipes.list"
+        ],
+        "id": "ui.list",
+        "text": "Recipe cards with title, category, prep time and author, a category dropdown, a title search and paging."
+      },
+      {
+        "endpoints": [
+          "recipes.get"
+        ],
+        "id": "ui.detail",
+        "text": "A recipe page with the ingredients as a list and the instructions with their line breaks kept."
+      },
+      {
+        "endpoints": [
+          "recipes.create",
+          "recipes.replace",
+          "recipes.delete"
+        ],
+        "id": "ui.edit",
+        "text": "Add and edit forms with ingredient rows that can be added and removed, showing the API's validation messages; delete asks for confirmation."
+      }
+    ]
+  },
+  "structured_hash": "9b13136ea06f318fca83e3cd54d543b5531c660195c910e89b2202ec4e48b624",
+  "summary": "Share recipes with ingredients and instructions, browsable by category.",
+  "surfaces": [
+    "cwe-79",
+    "cwe-89",
+    "cwe-639",
+    "cwe-862",
+    "cwe-20",
+    "cwe-915"
+  ],
+  "task_hash": "39ba8ec2c17c4cb0bcb192d1be1eeefd6a186b534e832d2727dafb0d897fd945",
+  "title": "Recipe book",
+  "variant": "standard",
+  "version": 1
+}

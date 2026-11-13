@@ -1,0 +1,581 @@
+{
+  "bundle_format_version": 1,
+  "cell_id": 703,
+  "completed_at": "2026-11-11T02:40:00.016118+00:00",
+  "condition_id": 99,
+  "condition_label": "local-opencode-go/minimax-m3",
+  "config_fingerprint": "a0f5357caca28f15847880fc4708b1fce3eb4041b3db4e7f9386bd76c0b3f7ae",
+  "cost_usd": 0.0,
+  "duration": 883.980822,
+  "fingerprints": {
+    "config_fingerprint": "a0f5357caca28f15847880fc4708b1fce3eb4041b3db4e7f9386bd76c0b3f7ae",
+    "prompt_hash": "8a1178269abdcb93d607e11a1d64a75479bdc2de69349b60149e163247c4e913",
+    "run_fingerprint": "b49d99dfc3b7dd11700ba6631ba3a81a3ae61203b8a20267b003b195ce1ca935",
+    "task_hash": "070b82b132e0ce35691a142ebb96e5e799de6be546be8067e25e30557b26de44",
+    "treatment_hash": "924d506555ea766b0a25ab4c44efc2cd8e6579108bf1292015c4a2108607fdf1"
+  },
+  "harness": "opencode/1.18.35",
+  "id": "1c06c525-3440-42b1-a3fb-68d0f56f426d",
+  "kind": "app_agentic",
+  "labels": {
+    "auth_mode": "contract_bearer",
+    "guidance": "none@1",
+    "harness_preset": "opencode-controlled@1",
+    "model": "local-opencode-go/minimax-m3",
+    "network_policy": "packages",
+    "prompt_set": "app-default@1",
+    "prose_variant": "standard",
+    "resource_policy": "final-study@1",
+    "sampling_preset": "provider-default@1",
+    "stack_profile": "flask-react@1",
+    "starter_level": "minimal",
+    "style": "tailwind@1"
+  },
+  "latest_evaluation": {
+    "created_at": "2026-11-11T02:39:31.139930+00:00",
+    "eval_level": "security",
+    "eval_suite": "eval-v2@1",
+    "id": 815,
+    "mode": "full",
+    "result": {
+      "auth_mode": "contract_bearer",
+      "checks": [
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "health",
+          "ms": 11,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "index_served",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "infra",
+          "endpoint": null,
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "spa_fallback",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.register",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "auth.register.ok",
+          "ms": 74,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "auth.login",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "auth.login.ok",
+          "ms": 69,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "previews.create",
+          "expected": {
+            "status": [
+              201
+            ]
+          },
+          "id": "previews.create.ok",
+          "ms": 8,
+          "note": null,
+          "observed": {
+            "status": 201
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "previews.create",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "previews.create.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "previews.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "previews.create.invalid.missing",
+          "ms": 14,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "validation",
+          "endpoint": "previews.create",
+          "expected": {
+            "status": [
+              400,
+              422
+            ]
+          },
+          "id": "previews.create.invalid.too_long",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 400
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "previews.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "previews.list.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "previews.list",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "previews.list.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "pagination",
+          "endpoint": "previews.list",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "previews.list.page_size",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "previews.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "previews.get.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "previews.get",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "previews.get.anon_401",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "previews.get",
+          "expected": {
+            "status": [
+              404
+            ]
+          },
+          "id": "previews.get.other_user",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 404
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "previews.refresh",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "previews.refresh.ok",
+          "ms": 4,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "previews.refresh",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "previews.refresh.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "previews.refresh",
+          "expected": {
+            "status": [
+              404
+            ]
+          },
+          "id": "previews.refresh.other_user",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 404
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "functional",
+          "endpoint": "previews.delete",
+          "expected": {
+            "status": [
+              204
+            ]
+          },
+          "id": "previews.delete.ok",
+          "ms": 2,
+          "note": null,
+          "observed": {
+            "status": 204
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "auth",
+          "endpoint": "previews.delete",
+          "expected": {
+            "status": [
+              401
+            ]
+          },
+          "id": "previews.delete.anon_401",
+          "ms": 0,
+          "note": null,
+          "observed": {
+            "status": 401
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "ownership",
+          "endpoint": "previews.delete",
+          "expected": {
+            "status": [
+              404
+            ]
+          },
+          "id": "previews.delete.other_user",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 404
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        },
+        {
+          "category": "persistence",
+          "endpoint": "previews.get",
+          "expected": {
+            "status": [
+              200
+            ]
+          },
+          "id": "previews.get.persists",
+          "ms": 1,
+          "note": null,
+          "observed": {
+            "status": 200
+          },
+          "overlay": false,
+          "skipped_due_to": [],
+          "source": null,
+          "stated_in": null,
+          "status": "pass"
+        }
+      ],
+      "compiler_version": 1,
+      "fixtures_sha256": null,
+      "flaky_checks": [],
+      "measured": true,
+      "metrics": {
+        "agent_checks": 19,
+        "agent_pass_rate": 1.0,
+        "agent_passed": 19,
+        "baseline_pass_rate": 0.0,
+        "by_category": {
+          "auth": {
+            "n": 5,
+            "passed": 5
+          },
+          "functional": {
+            "n": 7,
+            "passed": 7
+          },
+          "ownership": {
+            "n": 3,
+            "passed": 3
+          },
+          "pagination": {
+            "n": 1,
+            "passed": 1
+          },
+          "persistence": {
+            "n": 1,
+            "passed": 1
+          },
+          "validation": {
+            "n": 2,
+            "passed": 2
+          }
+        },
+        "common_pass_rate": null,
+        "infra_ok": true,
+        "over_baseline": 1.0,
+        "probes_exploited": 1,
+        "probes_skipped": 0,
+        "probes_tested": 2,
+        "regression_pass_rate": null,
+        "sec_pass": false,
+        "slot_pass_rate": null,
+        "stated_pass_rate": null,
+        "unstated_pass_rate": 1.0
+      },
+      "not_measured_reason": null,
+      "plan_sha256": null,
+      "probes": [
+        {
+          "cwe": "cwe-918",
+          "endpoint": "previews.create",
+          "evidence": "the app fetched http://mock.internal:9009/ssrf-e4deb9367703",
+          "id": "probe.previews.ssrf",
+          "kind": "ssrf_mock",
+          "skip_reason": null,
+          "status": "exploited"
+        },
+        {
+          "cwe": "cwe-639",
+          "endpoint": "previews.get",
+          "evidence": "user_b got 404",
+          "id": "probe.previews.idor",
+          "kind": "idor_enumeration",
+          "skip_reason": null,
+          "status": "not_exploited"
+        }
+      ],
+      "skipped": [],
+      "tester_version": 1
+    },
+    "status": "measured"
+  },
+  "loc_app": 1162,
+  "loc_model": 1138,
+  "model": "minimax-m3",
+  "model_id": "local-opencode-go/minimax-m3",
+  "outcome": "tested",
+  "parent_run_id": null,
+  "protocol": "app@1",
+  "repeat_index": 0,
+  "run_fingerprint": "b49d99dfc3b7dd11700ba6631ba3a81a3ae61203b8a20267b003b195ce1ca935",
+  "stack": "flask-react@1",
+  "stage": "main",
+  "started_at": "2026-11-11T02:25:16.035296+00:00",
+  "starter": "flask-react-minimal@1",
+  "status": "completed",
+  "study_id": "d6fc1cd2-3844-43fa-a4fe-90d44b9437e3",
+  "task": "link_preview_fetcher@1",
+  "tokens_used": 3124507,
+  "tree_hash": "1ef849795b6dee482a48adb6f768ae527a880104a18f2601960931fd042ab563",
+  "truncated": true,
+  "unit": "task:link_preview_fetcher@1",
+  "usable": true
+}

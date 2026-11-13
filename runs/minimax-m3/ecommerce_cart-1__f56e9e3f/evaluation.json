@@ -1,0 +1,980 @@
+{
+ "adherence": {
+  "checker_version": 1,
+  "detected": {
+   "auth": {
+    "confidence": "medium",
+    "evidence": [
+     "runtime:login:bearer",
+     "runtime:tester"
+    ],
+    "value": "bearer"
+   },
+   "backend": {
+    "confidence": "high",
+    "evidence": [
+     "manifest:backend/requirements.txt:flask",
+     "import:backend/app.py:flask"
+    ],
+    "value": "flask"
+   },
+   "database": {
+    "confidence": "medium",
+    "evidence": [
+     "import:backend/app.py:sqlite3"
+    ],
+    "value": "sqlite"
+   },
+   "frontend": {
+    "confidence": "medium",
+    "evidence": [
+     "manifest:frontend/package.json:react"
+    ],
+    "value": "react"
+   },
+   "styling": {
+    "confidence": "low",
+    "evidence": [],
+    "value": null
+   }
+  },
+  "deviations": [],
+  "hallucinated": [],
+  "packages": [
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "flask",
+    "pinned": true,
+    "version": "3.1.3"
+   },
+   {
+    "declared_in": "backend/requirements.txt",
+    "ecosystem": "pypi",
+    "exists": null,
+    "name": "gunicorn",
+    "pinned": true,
+    "version": "26.2.0"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "react-dom",
+    "pinned": true,
+    "version": "19.3.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "@vitejs/plugin-react",
+    "pinned": true,
+    "version": "6.2.1"
+   },
+   {
+    "declared_in": "frontend/package.json",
+    "ecosystem": "npm",
+    "exists": null,
+    "name": "vite",
+    "pinned": true,
+    "version": "8.3.5"
+   }
+  ],
+  "sbom_blob": "e071834e1cefb7c3782d580efcac06bce179fa75a3bd5efbe8535007a90c6da5",
+  "status": "compliant",
+  "style_metrics": {
+   "component_library_imports": {},
+   "css_files": 0,
+   "css_modules": 0,
+   "tailwind_class_share": null
+  },
+  "unpinned": []
+ },
+ "created_at": "2026-11-11T17:14:20.939919+00:00",
+ "eval_level": "security",
+ "eval_suite": "eval-v2@2",
+ "id": 1157,
+ "mode": "full",
+ "result": {
+  "auth_mode": "contract_bearer",
+  "checks": [
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "health",
+    "ms": 10,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "index_served",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "infra",
+    "endpoint": null,
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "spa_fallback",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.register",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "auth.register.ok",
+    "ms": 102,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "auth.login",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "auth.login.ok",
+    "ms": 100,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "products.list",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "products.list.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "products.get",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "products.get.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "cart.get",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "cart.get.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "cart.get",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "cart.get.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "cart.add",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "cart.add.ok",
+    "ms": 2,
+    "note": "status 200",
+    "observed": {
+     "body": "{\"id\":1,\"item\":{\"id\":1,\"line_total\":15.0,\"name\":\"Canvas Tote\",\"product_id\":1,\"quantity\":1,\"unit_price\":15.0},\"items\":[{\"id\":1,\"line_total\":15.0,\"name\":\"Canvas Tote\",\"product_id\":1,\"quantity\":1,\"unit_price\":15.0}],\"line_total\":15.0,\"name\":\"Canvas Tote\",\"product_id\":1,\"quantity\":1,\"subtotal\":15.0,\"uni",
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "auth",
+    "endpoint": "cart.add",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "cart.add.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "cart.update",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "cart.update.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "cart.update",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "cart.update.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "ownership",
+    "endpoint": "cart.update",
+    "expected": {
+     "status": [
+      404
+     ]
+    },
+    "id": "cart.update.other_user",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 404
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "cart.remove",
+    "expected": {
+     "status": [
+      204
+     ]
+    },
+    "id": "cart.remove.ok",
+    "ms": 2,
+    "note": "status 200",
+    "observed": {
+     "body": "{\"items\":[],\"subtotal\":0.0}\n",
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "auth",
+    "endpoint": "cart.remove",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "cart.remove.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "ownership",
+    "endpoint": "cart.remove",
+    "expected": {
+     "status": [
+      404
+     ]
+    },
+    "id": "cart.remove.other_user",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 404
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "admin.products.create",
+    "expected": {
+     "status": [
+      201
+     ]
+    },
+    "id": "admin.products.create.ok",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "admin.products.create",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "admin.products.create.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "admin.products.create",
+    "expected": {
+     "status": [
+      403
+     ]
+    },
+    "id": "admin.products.create.non_admin_403",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 403
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "admin.products.update",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "admin.products.update.ok",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "admin.products.update",
+    "expected": {
+     "status": [
+      401
+     ]
+    },
+    "id": "admin.products.update.anon_401",
+    "ms": 0,
+    "note": null,
+    "observed": {
+     "status": 401
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "auth",
+    "endpoint": "admin.products.update",
+    "expected": {
+     "status": [
+      403
+     ]
+    },
+    "id": "admin.products.update.non_admin_403",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 403
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "minimal",
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "functional",
+    "endpoint": "cart.add",
+    "expected": {
+     "status": [
+      200
+     ]
+    },
+    "id": "cart.add.merges",
+    "ms": 2,
+    "note": null,
+    "observed": {
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "acceptance",
+    "stated_in": [
+     "standard",
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "cart.add",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "cart.add.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "admin.products.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "admin.products.create.invalid.missing",
+    "ms": 1,
+    "note": null,
+    "observed": {
+     "status": 400
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "pass"
+   },
+   {
+    "category": "validation",
+    "endpoint": "admin.products.create",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "admin.products.create.invalid.too_long",
+    "ms": 2,
+    "note": "name: status 201 | description: status 201",
+    "observed": {
+     "body": "{\"description\":\"llmlab description\",\"id\":16,\"is_active\":false,\"name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"price\":1.0,\"stock\":1}\n",
+     "requests": [
+      {
+       "label": "name",
+       "ok": false,
+       "status": 201
+      },
+      {
+       "label": "description",
+       "ok": false,
+       "status": 201
+      }
+     ],
+     "status": 201
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   },
+   {
+    "category": "validation",
+    "endpoint": "admin.products.update",
+    "expected": {
+     "status": [
+      400,
+      422
+     ]
+    },
+    "id": "admin.products.update.invalid.too_long",
+    "ms": 2,
+    "note": "name: status 200 | description: status 200",
+    "observed": {
+     "body": "{\"description\":\"llmlab description\",\"id\":18,\"is_active\":false,\"name\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\",\"price\":1.0,\"stock\":1}\n",
+     "requests": [
+      {
+       "label": "name",
+       "ok": false,
+       "status": 200
+      },
+      {
+       "label": "description",
+       "ok": false,
+       "status": 200
+      }
+     ],
+     "status": 200
+    },
+    "overlay": false,
+    "skipped_due_to": [],
+    "source": "compiler",
+    "stated_in": [
+     "exhaustive"
+    ],
+    "status": "fail"
+   }
+  ],
+  "compiler_version": 2,
+  "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+  "flaky_checks": [],
+  "measured": true,
+  "metrics": {
+   "agent_checks": 25,
+   "agent_pass_rate": 0.84,
+   "agent_passed": 21,
+   "baseline_pass_rate": 0.0,
+   "by_category": {
+    "auth": {
+     "n": 8,
+     "passed": 8
+    },
+    "functional": {
+     "n": 11,
+     "passed": 9
+    },
+    "ownership": {
+     "n": 2,
+     "passed": 2
+    },
+    "validation": {
+     "n": 4,
+     "passed": 2
+    }
+   },
+   "common_pass_rate": null,
+   "infra_ok": true,
+   "over_baseline": 0.84,
+   "probes_exploited": 0,
+   "probes_skipped": 0,
+   "probes_tested": 3,
+   "regression_pass_rate": null,
+   "sec_pass": false,
+   "slot_pass_rate": null,
+   "stated_pass_rate": 1.0,
+   "unstated_pass_rate": 0.42857142857142855
+  },
+  "not_measured_reason": null,
+  "plan_sha256": "0a75020c07839f8066f3d72d7b8b2327cc8dbb7e14134a6cd023c6aa1ebc9c90",
+  "probes": [
+   {
+    "cwe": "cwe-639",
+    "endpoint": "cart.update",
+    "evidence": "user_b got 404",
+    "id": "probe.cart.idor",
+    "kind": "idor_enumeration",
+    "skip_reason": null,
+    "status": "not_exploited"
+   },
+   {
+    "cwe": "cwe-915",
+    "endpoint": "cart.add",
+    "evidence": "unit_price not taken from the request (status 200)",
+    "id": "probe.cart.mass_assignment",
+    "kind": "mass_assignment",
+    "skip_reason": null,
+    "status": "not_exploited"
+   },
+   {
+    "cwe": "cwe-798",
+    "endpoint": null,
+    "evidence": "none of 6 default passwords accepted",
+    "id": "probe.shop.default_admin",
+    "kind": "default_credential",
+    "skip_reason": null,
+    "status": "not_exploited"
+   }
+  ],
+  "skipped": [],
+  "tester_version": 2
+ },
+ "stages": {
+  "adherence": {
+   "detail": {
+    "record_status": "compliant",
+    "runtime": true
+   },
+   "seconds": 1.622,
+   "status": "ok"
+  },
+  "build": {
+   "detail": {
+    "attempts": [
+     {
+      "attempt": 1,
+      "infra_suspected": false,
+      "ok": true
+     }
+    ],
+    "base_images": {
+     "pkg:docker/node@24-slim?digest=sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c&platform=linux%2Famd64": "sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c",
+     "pkg:docker/python@3.13-slim?digest=sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1&platform=linux%2Famd64": "sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1"
+    },
+    "build_context": {
+     "locks": [
+      {
+       "ecosystem": "pypi",
+       "lock": "backend/requirements.lock",
+       "manifest": "backend/requirements.txt",
+       "reason": null,
+       "source": "starter",
+       "status": "complete"
+      },
+      {
+       "ecosystem": "npm",
+       "lock": "frontend/package-lock.json",
+       "manifest": "frontend/package.json",
+       "reason": null,
+       "source": "starter",
+       "status": "complete"
+      }
+     ],
+     "notes": [
+      "tree: 15 files written verbatim"
+     ]
+    },
+    "build_key": "efe0e0f877cbb81c8a250b1ba93fb1617e44b2832eedf0d429daffd1c45502be",
+    "cache_hit": false,
+    "cpu_seconds": 1.383,
+    "image_bytes": 186809723,
+    "image_id": "sha256:6382fea9adc14a029c75a60199858f0f680b150e3cc65cdbe9525f1250d38ad7",
+    "image_tag": "llmlab/sample:efe0e0f877cbb81c8a250b1b-7b3b6dc569f6",
+    "peak_memory_bytes": 39309312,
+    "prepare_seconds": 0.089,
+    "queue_seconds": 0.031,
+    "seconds": 3.37
+   },
+   "seconds": 3.892,
+   "status": "ok"
+  },
+  "lock": {
+   "detail": {
+    "files": [],
+    "packages": {
+     "npm": 44,
+     "pip": 8
+    },
+    "resolved_at": "2026-11-11T07:11:44.555415+00:00",
+    "source": "model"
+   },
+   "seconds": 0.001,
+   "status": "ok"
+  },
+  "probes": {
+   "detail": {
+    "n": 3,
+    "tested": 3
+   },
+   "status": "ok"
+  },
+  "start": {
+   "detail": {
+    "credentials_ref": "282febfd82e3526e405829bc6a53e450868390b3aff678a4771720b1edc56dc1"
+   },
+   "seconds": 2.27,
+   "status": "ok"
+  },
+  "tester": {
+   "detail": {
+    "attempts": 1,
+    "checks_adjusted": 4,
+    "checks_skipped": 0,
+    "compiler_version": 2,
+    "fixtures_sha256": "848e9b09d88f740c2e1a62ecf6a8aa41812a1aeb28fcdf7aa6363c24f6a4a995",
+    "image_override": false,
+    "only_checks": null,
+    "overlay": false,
+    "plan_sha256": "0a75020c07839f8066f3d72d7b8b2327cc8dbb7e14134a6cd023c6aa1ebc9c90",
+    "probe_rules_version": 2,
+    "probes": null,
+    "tester_rules_version": 3,
+    "tester_version": 2,
+    "upstream": false
+   },
+   "seconds": 3.27,
+   "status": "ok"
+  }
+ },
+ "status": "measured"
+}

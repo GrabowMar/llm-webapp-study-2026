@@ -1,0 +1,2678 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..029bc0d
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,5 @@
++node_modules/
++frontend/dist/
++data/
++.venv/
++__pycache__/
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..2628699 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,13 +1,442 @@
+ """Flask entry point."""
+ 
++import os
++import re
++import secrets
++import sqlite3
++from datetime import datetime, timedelta, timezone
++from functools import wraps
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.exceptions import HTTPException
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", "data")).resolve()
++DB_PATH = DATA_DIR / "app.db"
++
++USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
++PASSWORD_MIN = 6
++PASSWORD_MAX = 128
++DEFAULT_PAGE_SIZE = 12
++MAX_PAGE_SIZE = 100
+ 
+ app = Flask(__name__, static_folder=None)
++app.json.sort_keys = False
++
++SCHEMA = """
++CREATE TABLE IF NOT EXISTS users (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
++    password_hash TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS tokens (
++    token TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TEXT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS recipes (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    title TEXT NOT NULL,
++    instructions TEXT NOT NULL,
++    category TEXT NOT NULL,
++    prep_minutes INTEGER NOT NULL,
++    servings INTEGER NOT NULL,
++    created_at TEXT NOT NULL,
++    author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE
++);
++CREATE INDEX IF NOT EXISTS idx_recipes_created ON recipes(created_at DESC, id DESC);
++CREATE TABLE IF NOT EXISTS ingredients (
++    recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
++    position INTEGER NOT NULL,
++    text TEXT NOT NULL,
++    PRIMARY KEY (recipe_id, position)
++);
++CREATE TABLE IF NOT EXISTS meta (
++    key TEXT PRIMARY KEY,
++    value TEXT NOT NULL
++);
++"""
++
++SAMPLE_AUTHOR = "chef"
++SAMPLE_RECIPES = [
++    {
++        "title": "Fluffy Buttermilk Pancakes",
++        "category": "Breakfast",
++        "prep_minutes": 20,
++        "servings": 4,
++        "ingredients": [
++            "200 g plain flour",
++            "1 tsp baking powder",
++            "1/2 tsp baking soda",
++            "1 tbsp sugar",
++            "Pinch of salt",
++            "300 ml buttermilk",
++            "1 egg",
++            "2 tbsp melted butter",
++        ],
++        "instructions": (
++            "Whisk the flour, baking powder, baking soda, sugar and salt in a large bowl.\n"
++            "In another bowl, beat the buttermilk, egg and melted butter.\n"
++            "Pour the wet ingredients into the dry ones and stir until just combined; a few lumps are fine.\n"
++            "Heat a lightly greased pan over medium heat and cook 1/4 cup of batter per pancake "
++            "until bubbles form, then flip and cook until golden."
++        ),
++    },
++    {
++        "title": "Classic Tomato Basil Pasta",
++        "category": "Main",
++        "prep_minutes": 25,
++        "servings": 2,
++        "ingredients": [
++            "200 g spaghetti",
++            "2 tbsp olive oil",
++            "2 garlic cloves, sliced",
++            "400 g canned chopped tomatoes",
++            "Salt and pepper",
++            "A handful of fresh basil",
++            "Grated parmesan, to serve",
++        ],
++        "instructions": (
++            "Cook the spaghetti in well-salted boiling water until al dente.\n"
++            "Meanwhile, warm the olive oil and gently fry the garlic for 1 minute.\n"
++            "Add the tomatoes, season and simmer for 10 minutes.\n"
++            "Toss the drained pasta with the sauce and torn basil.\n"
++            "Serve with parmesan."
++        ),
++    },
++    {
++        "title": "Chicken Stir-Fry",
++        "category": "Main",
++        "prep_minutes": 30,
++        "servings": 3,
++        "ingredients": [
++            "2 chicken breasts, sliced",
++            "1 red pepper, sliced",
++            "1 broccoli head, in florets",
++            "2 tbsp soy sauce",
++            "1 tbsp honey",
++            "1 tsp grated ginger",
++            "1 tbsp vegetable oil",
++        ],
++        "instructions": (
++            "Mix the soy sauce, honey and ginger in a small bowl.\n"
++            "Heat the oil in a wok over high heat and brown the chicken.\n"
++            "Add the vegetables and stir-fry for 4-5 minutes.\n"
++            "Pour in the sauce, toss to coat and serve with rice."
++        ),
++    },
++    {
++        "title": "Chocolate Chip Cookies",
++        "category": "Dessert",
++        "prep_minutes": 35,
++        "servings": 24,
++        "ingredients": [
++            "115 g butter, softened",
++            "100 g brown sugar",
++            "50 g white sugar",
++            "1 egg",
++            "1 tsp vanilla extract",
++            "180 g plain flour",
++            "1/2 tsp baking soda",
++            "150 g chocolate chips",
++        ],
++        "instructions": (
++            "Preheat the oven to 180 C and line two trays with baking paper.\n"
++            "Cream the butter and sugars, then beat in the egg and vanilla.\n"
++            "Stir in the flour and baking soda, then fold in the chocolate chips.\n"
++            "Scoop spoonfuls onto the trays and bake for 10-12 minutes.\n"
++            "Cool on the tray for 5 minutes before moving to a rack."
++        ),
++    },
++]
++
++
++class ApiError(Exception):
++    def __init__(self, status, message, errors=None):
++        super().__init__(message)
++        self.status = status
++        self.message = message
++        self.errors = errors
++
++
++def now_iso(dt=None):
++    dt = dt or datetime.now(timezone.utc)
++    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
++
++
++def connect():
++    DATA_DIR.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH, timeout=30)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys = ON")
++    conn.execute("PRAGMA busy_timeout = 30000")
++    return conn
++
++
++def get_db():
++    if "db" not in g:
++        g.db = connect()
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(_exc):
++    db = g.pop("db", None)
++    if db is not None:
++        db.close()
++
++
++def init_db():
++    conn = connect()
++    try:
++        conn.execute("PRAGMA journal_mode = WAL")
++        conn.executescript(SCHEMA)
++        conn.execute("BEGIN IMMEDIATE")
++        seeded = conn.execute("SELECT value FROM meta WHERE key = 'seeded'").fetchone()
++        if not seeded:
++            seed(conn)
++            conn.execute("INSERT INTO meta (key, value) VALUES ('seeded', '1')")
++        conn.commit()
++    finally:
++        conn.close()
++
++
++def seed(conn):
++    row = conn.execute("SELECT id FROM users WHERE username = ?", (SAMPLE_AUTHOR,)).fetchone()
++    if row:
++        user_id = row["id"]
++    else:
++        cur = conn.execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (SAMPLE_AUTHOR, generate_password_hash(secrets.token_urlsafe(32)), now_iso()),
++        )
++        user_id = cur.lastrowid
++    base = datetime.now(timezone.utc) - timedelta(hours=len(SAMPLE_RECIPES))
++    for i, recipe in enumerate(SAMPLE_RECIPES):
++        insert_recipe(conn, user_id, recipe, now_iso(base + timedelta(hours=i)))
++
++
++def insert_recipe(conn, user_id, data, created_at):
++    cur = conn.execute(
++        "INSERT INTO recipes (title, instructions, category, prep_minutes, servings, created_at, author_id)"
++        " VALUES (?, ?, ?, ?, ?, ?, ?)",
++        (
++            data["title"],
++            data["instructions"],
++            data["category"],
++            data["prep_minutes"],
++            data["servings"],
++            created_at,
++            user_id,
++        ),
++    )
++    recipe_id = cur.lastrowid
++    write_ingredients(conn, recipe_id, data["ingredients"])
++    return recipe_id
++
++
++def write_ingredients(conn, recipe_id, ingredients):
++    conn.execute("DELETE FROM ingredients WHERE recipe_id = ?", (recipe_id,))
++    conn.executemany(
++        "INSERT INTO ingredients (recipe_id, position, text) VALUES (?, ?, ?)",
++        [(recipe_id, i, text) for i, text in enumerate(ingredients)],
++    )
++
++
++# ---------- helpers ----------
++
++
++def json_body():
++    data = request.get_json(silent=True)
++    if not isinstance(data, dict):
++        raise ApiError(400, "Request body must be a JSON object.")
++    return data
++
++
++def current_user():
++    if "user" in g:
++        return g.user
++    g.user = None
++    header = request.headers.get("Authorization", "")
++    parts = header.split(None, 1)
++    if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip():
++        row = get_db().execute(
++            "SELECT u.id, u.username FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?",
++            (parts[1].strip(),),
++        ).fetchone()
++        if row:
++            g.user = {"id": row["id"], "username": row["username"]}
++            g.token = parts[1].strip()
++    return g.user
++
++
++def login_required(fn):
++    @wraps(fn)
++    def wrapper(*args, **kwargs):
++        if current_user() is None:
++            raise ApiError(401, "Authentication required.")
++        return fn(*args, **kwargs)
++
++    return wrapper
++
++
++def recipe_to_dict(row, ingredients):
++    return {
++        "id": row["id"],
++        "title": row["title"],
++        "ingredients": ingredients,
++        "instructions": row["instructions"],
++        "category": row["category"],
++        "prep_minutes": row["prep_minutes"],
++        "servings": row["servings"],
++        "created_at": row["created_at"],
++        "author": row["author"],
++    }
++
++
++RECIPE_SELECT = (
++    "SELECT r.id, r.title, r.instructions, r.category, r.prep_minutes, r.servings,"
++    " r.created_at, r.author_id, u.username AS author FROM recipes r JOIN users u ON u.id = r.author_id"
++)
++
++
++def load_recipe(recipe_id):
++    db = get_db()
++    row = db.execute(RECIPE_SELECT + " WHERE r.id = ?", (recipe_id,)).fetchone()
++    if row is None:
++        raise ApiError(404, "Recipe not found.")
++    return row
++
++
++def full_recipe(recipe_id):
++    row = load_recipe(recipe_id)
++    ingredients = [
++        r["text"]
++        for r in get_db().execute(
++            "SELECT text FROM ingredients WHERE recipe_id = ? ORDER BY position", (recipe_id,)
++        )
++    ]
++    return recipe_to_dict(row, ingredients)
++
++
++def is_int(value):
++    return isinstance(value, int) and not isinstance(value, bool)
++
++
++def validate_recipe(data):
++    errors = {}
++    clean = {}
++
++    title = data.get("title")
++    if not isinstance(title, str) or not title.strip():
++        errors["title"] = "Title is required."
++    elif len(title.strip()) > 200:
++        errors["title"] = "Title must be at most 200 characters."
++    else:
++        clean["title"] = title.strip()
++
++    category = data.get("category")
++    if not isinstance(category, str) or not category.strip():
++        errors["category"] = "Category is required."
++    elif len(category.strip()) > 50:
++        errors["category"] = "Category must be at most 50 characters."
++    else:
++        clean["category"] = category.strip()
++
++    instructions = data.get("instructions")
++    if not isinstance(instructions, str) or not instructions.strip():
++        errors["instructions"] = "Instructions are required."
++    elif len(instructions) > 20000:
++        errors["instructions"] = "Instructions must be at most 20000 characters."
++    else:
++        clean["instructions"] = instructions.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
++
++    ingredients = data.get("ingredients")
++    if not isinstance(ingredients, list) or len(ingredients) == 0:
++        errors["ingredients"] = "At least one ingredient is required."
++    elif len(ingredients) > 100:
++        errors["ingredients"] = "A recipe can have at most 100 ingredients."
++    else:
++        items = []
++        for i, item in enumerate(ingredients, start=1):
++            if not isinstance(item, str) or not item.strip():
++                errors["ingredients"] = f"Ingredient {i} must be a non-empty text."
++                break
++            if len(item.strip()) > 200:
++                errors["ingredients"] = f"Ingredient {i} must be at most 200 characters."
++                break
++            items.append(item.strip())
++        else:
++            clean["ingredients"] = items
++
++    prep = data.get("prep_minutes")
++    if prep is None:
++        errors["prep_minutes"] = "Prep time is required."
++    elif not is_int(prep) or prep < 0 or prep > 10000:
++        errors["prep_minutes"] = "Prep time must be a whole number of minutes between 0 and 10000."
++    else:
++        clean["prep_minutes"] = prep
++
++    servings = data.get("servings")
++    if servings is None:
++        errors["servings"] = "Servings is required."
++    elif not is_int(servings) or servings < 1 or servings > 1000:
++        errors["servings"] = "Servings must be a whole number between 1 and 1000."
++    else:
++        clean["servings"] = servings
++
++    if errors:
++        raise ApiError(400, "Validation failed.", errors)
++    return clean
++
++
++def parse_positive_int(name, default):
++    raw = request.args.get(name)
++    if raw is None or raw.strip() == "":
++        return default
++    try:
++        value = int(raw)
++    except ValueError:
++        raise ApiError(400, f"{name} must be a positive integer.", {name: f"{name} must be a positive integer."})
++    if value < 1:
++        raise ApiError(400, f"{name} must be a positive integer.", {name: f"{name} must be a positive integer."})
++    return value
++
++
++# ---------- error handling ----------
++
++
++@app.errorhandler(ApiError)
++def handle_api_error(err):
++    body = {"error": err.message}
++    if err.errors:
++        body["errors"] = err.errors
++    resp = jsonify(body)
++    resp.status_code = err.status
++    if err.status == 401:
++        resp.headers["WWW-Authenticate"] = "Bearer"
++    return resp
++
++
++@app.errorhandler(HTTPException)
++def handle_http_error(err):
++    if request.path.startswith("/api"):
++        resp = jsonify({"error": err.description or err.name})
++        resp.status_code = err.code or 500
++        return resp
++    return err
++
++
++@app.errorhandler(Exception)
++def handle_unexpected(err):
++    app.logger.exception("Unhandled error")
++    return jsonify({"error": "Internal server error."}), 500
++
++
++# ---------- routes ----------
+ 
+ 
+ @app.get("/api/health")
+@@ -15,9 +444,189 @@ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    data = json_body()
++    username = data.get("username")
++    password = data.get("password")
++    errors = {}
++    if not isinstance(username, str) or not username.strip():
++        errors["username"] = "Username is required."
++    elif not USERNAME_RE.match(username.strip()):
++        errors["username"] = "Username must be 3-32 characters: letters, digits, '.', '_' or '-'."
++    if not isinstance(password, str) or not password:
++        errors["password"] = "Password is required."
++    elif len(password) < PASSWORD_MIN:
++        errors["password"] = f"Password must be at least {PASSWORD_MIN} characters."
++    elif len(password) > PASSWORD_MAX:
++        errors["password"] = f"Password must be at most {PASSWORD_MAX} characters."
++    if errors:
++        raise ApiError(400, "Validation failed.", errors)
++    username = username.strip()
++    db = get_db()
++    try:
++        cur = db.execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, generate_password_hash(password), now_iso()),
++        )
++        db.commit()
++    except sqlite3.IntegrityError:
++        db.rollback()
++        raise ApiError(409, "Username is already taken.", {"username": "Username is already taken."})
++    return {"id": cur.lastrowid, "username": username}, 201
++
++
++@app.post("/api/auth/login")
++def login():
++    data = json_body()
++    username = data.get("username")
++    password = data.get("password")
++    if not isinstance(username, str) or not isinstance(password, str) or not username or not password:
++        raise ApiError(400, "Username and password are required.")
++    db = get_db()
++    row = db.execute(
++        "SELECT id, username, password_hash FROM users WHERE username = ?", (username.strip(),)
++    ).fetchone()
++    if row is None or not check_password_hash(row["password_hash"], password):
++        raise ApiError(401, "Invalid username or password.")
++    token = secrets.token_urlsafe(32)
++    db.execute(
++        "INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)", (token, row["id"], now_iso())
++    )
++    db.commit()
++    return {"token": token, "username": row["username"]}
++
++
++@app.post("/api/auth/logout")
++@login_required
++def logout():
++    db = get_db()
++    db.execute("DELETE FROM tokens WHERE token = ?", (g.token,))
++    db.commit()
++    return "", 204
++
++
++@app.get("/api/auth/me")
++@login_required
++def me():
++    return {"id": g.user["id"], "username": g.user["username"]}
++
++
++@app.get("/api/categories")
++def categories():
++    rows = get_db().execute(
++        "SELECT category FROM recipes GROUP BY category COLLATE NOCASE ORDER BY category COLLATE NOCASE"
++    ).fetchall()
++    return {"items": [r["category"] for r in rows]}
++
++
++@app.get("/api/recipes")
++def list_recipes():
++    page = parse_positive_int("page", 1)
++    page_size = min(parse_positive_int("page_size", DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
++    where = []
++    params = []
++    category = (request.args.get("category") or "").strip()
++    if category:
++        where.append("r.category = ? COLLATE NOCASE")
++        params.append(category)
++    q = (request.args.get("q") or "").strip()
++    if q:
++        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
++        where.append("r.title LIKE ? ESCAPE '\\'")
++        params.append(f"%{escaped}%")
++    clause = (" WHERE " + " AND ".join(where)) if where else ""
++    db = get_db()
++    total = db.execute("SELECT COUNT(*) FROM recipes r" + clause, params).fetchone()[0]
++    rows = db.execute(
++        "SELECT r.id, r.title, r.category, r.prep_minutes, u.username AS author"
++        " FROM recipes r JOIN users u ON u.id = r.author_id"
++        + clause
++        + " ORDER BY r.created_at DESC, r.id DESC LIMIT ? OFFSET ?",
++        params + [page_size, (page - 1) * page_size],
++    ).fetchall()
++    items = [
++        {
++            "id": r["id"],
++            "title": r["title"],
++            "category": r["category"],
++            "prep_minutes": r["prep_minutes"],
++            "author": r["author"],
++        }
++        for r in rows
++    ]
++    return {"items": items, "total": total, "page": page, "page_size": page_size}
++
++
++@app.post("/api/recipes")
++@login_required
++def create_recipe():
++    data = validate_recipe(json_body())
++    db = get_db()
++    recipe_id = insert_recipe(db, g.user["id"], data, now_iso())
++    db.commit()
++    return full_recipe(recipe_id), 201
++
++
++@app.get("/api/recipes/<int:recipe_id>")
++def get_recipe(recipe_id):
++    return full_recipe(recipe_id)
++
++
++def check_author(recipe_id):
++    row = load_recipe(recipe_id)
++    if row["author_id"] != g.user["id"]:
++        raise ApiError(403, "Only the author can change this recipe.")
++    return row
++
++
++@app.put("/api/recipes/<int:recipe_id>")
++@login_required
++def update_recipe(recipe_id):
++    check_author(recipe_id)
++    data = validate_recipe(json_body())
++    db = get_db()
++    db.execute(
++        "UPDATE recipes SET title = ?, instructions = ?, category = ?, prep_minutes = ?, servings = ?"
++        " WHERE id = ?",
++        (
++            data["title"],
++            data["instructions"],
++            data["category"],
++            data["prep_minutes"],
++            data["servings"],
++            recipe_id,
++        ),
++    )
++    write_ingredients(db, recipe_id, data["ingredients"])
++    db.commit()
++    return full_recipe(recipe_id)
++
++
++@app.delete("/api/recipes/<int:recipe_id>")
++@login_required
++def delete_recipe(recipe_id):
++    check_author(recipe_id)
++    db = get_db()
++    db.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
++    db.commit()
++    return "", 204
++
++
++@app.route("/api", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
++@app.route("/api/<path:path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
++def api_not_found(path=""):
++    raise ApiError(404, "Not found.")
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
++    if not (DIST / "index.html").is_file():
++        return "Frontend not built.", 404
+     return send_from_directory(DIST, "index.html")
++
++
++init_db()
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..943443a 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Recipe Book</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..91b8c83 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -6,19 +6,68 @@
+     "": {
+       "name": "app-frontend",
+       "dependencies": {
++        "@tailwindcss/vite": "4.3.5",
+         "react": "19.3.1",
+-        "react-dom": "19.3.1"
++        "react-dom": "19.3.1",
++        "tailwindcss": "4.3.5"
+       },
+       "devDependencies": {
++        "@types/react": "19.3.0",
++        "@types/react-dom": "19.3.0",
+         "@vitejs/plugin-react": "6.2.1",
++        "typescript": "5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+       "integrity": "sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==",
+-      "dev": true,
+       "license": "MIT",
+       "funding": {
+         "url": "https://github.com/sponsors/oxc-project"
+@@ -31,7 +80,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -48,7 +96,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -65,7 +112,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -82,7 +128,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -99,7 +144,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -116,7 +160,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -133,7 +176,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -153,7 +195,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -173,7 +214,6 @@
+       "cpu": [
+         "ppc64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -193,7 +233,6 @@
+       "cpu": [
+         "s390x"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -213,7 +252,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -233,7 +271,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -253,7 +290,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -270,7 +306,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -287,7 +322,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -301,9 +335,357 @@
+       "version": "1.0.1",
+       "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
+       "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
+-      "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,21 +716,39 @@
+         }
+       }
+     },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+       "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
+-      "dev": true,
+       "license": "Apache-2.0",
+       "engines": {
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+       "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
+-      "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=12.0.0"
+@@ -366,7 +766,6 @@
+       "version": "2.3.3",
+       "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+       "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+-      "dev": true,
+       "hasInstallScript": true,
+       "license": "MIT",
+       "optional": true,
+@@ -377,11 +776,25 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+       "integrity": "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+-      "dev": true,
+       "license": "MPL-2.0",
+       "dependencies": {
+         "detect-libc": "^2.0.3"
+@@ -414,7 +827,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -435,7 +847,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -456,7 +867,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -477,7 +887,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -498,7 +907,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -519,7 +927,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -543,7 +950,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -567,7 +973,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -591,7 +996,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -615,7 +1019,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -636,7 +1039,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -650,11 +1052,19 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+       "integrity": "sha512-uKdg2G3GNCKQn9byYOpxbGqrT2fGO5KRt5J/8b3pok8rT6qxGWF6hxMyJiEYtAf+FVyYuD9hRaDqX5uPFYJ4ZQ==",
+-      "dev": true,
+       "funding": [
+         {
+           "type": "github",
+@@ -673,14 +1083,12 @@
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
+       "integrity": "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==",
+-      "dev": true,
+       "license": "ISC"
+     },
+     "node_modules/picomatch": {
+       "version": "4.0.7",
+       "resolved": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz",
+       "integrity": "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==",
+-      "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=12"
+@@ -693,7 +1101,6 @@
+       "version": "8.5.32",
+       "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.32.tgz",
+       "integrity": "sha512-LJlKCCAUFKOuZxipUdYw1NzIITEsPcgyOG9LkvRJvuKj/bRzbuRY0ARXvL0pWGpsZvn8jku+LMep2eU0seHp8g==",
+-      "dev": true,
+       "funding": [
+         {
+           "type": "opencollective",
+@@ -743,7 +1150,6 @@
+       "version": "1.2.16",
+       "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz",
+       "integrity": "sha512-bWvlMpFKiTfDKfnK7FC2MPgPeWCf/Kpwsq49ApdW+FQaBZb6O6dZ4MAPbPUjp7hYQrw/RobqCzn64BRrQecGHw==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "@oxc-project/types": "=0.156.0",
+@@ -783,17 +1189,34 @@
+       "version": "1.2.2",
+       "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz",
+       "integrity": "sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==",
+-      "dev": true,
+       "license": "BSD-3-Clause",
+       "engines": {
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+       "integrity": "sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "fdir": "^6.5.0",
+@@ -806,11 +1229,24 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+       "integrity": "sha512-z1YpjieJ9g0ebTmQpLBv/oq9E3F9EIlOe+7LahW8SrE3LTiG3udBRUXQOlYXP9b+IC2q2phHeVxj9xGlw34OEQ==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "lightningcss": "^1.33.0",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..5e52bee 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -4,14 +4,20 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build"
++    "build": "tsc && vite build",
++    "typecheck": "tsc"
+   },
+   "dependencies": {
++    "@tailwindcss/vite": "4.3.5",
+     "react": "19.3.1",
+-    "react-dom": "19.3.1"
++    "react-dom": "19.3.1",
++    "tailwindcss": "4.3.5"
+   },
+   "devDependencies": {
++    "@types/react": "19.3.0",
++    "@types/react-dom": "19.3.0",
+     "@vitejs/plugin-react": "6.2.1",
++    "typescript": "5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..d2fc5dc 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,77 @@
++import { useAuth } from "./auth";
++import AuthPage from "./pages/AuthPage";
++import RecipeDetail from "./pages/RecipeDetail";
++import RecipeForm from "./pages/RecipeForm";
++import RecipeList from "./pages/RecipeList";
++import { Link, navigate, useLocation } from "./router";
++import { primaryButton, secondaryButton } from "./ui";
++
++function Route({ pathname, search }: { pathname: string; search: string }) {
++  if (pathname === "/") return <RecipeList search={search} />;
++  if (pathname === "/login") return <AuthPage key="login" mode="login" />;
++  if (pathname === "/register") return <AuthPage key="register" mode="register" />;
++  if (pathname === "/recipes/new") return <RecipeForm key="new" />;
++  let m = pathname.match(/^\/recipes\/(\d+)\/edit\/?$/);
++  if (m) return <RecipeForm key={`edit-${m[1]}`} id={Number(m[1])} />;
++  m = pathname.match(/^\/recipes\/(\d+)\/?$/);
++  if (m) return <RecipeDetail id={Number(m[1])} />;
++  return (
++    <div className="py-16 text-center">
++      <h1 className="mb-2 text-2xl font-semibold text-stone-900">Page not found</h1>
++      <Link to="/" className="text-amber-700 hover:underline">
++        Back to recipes
++      </Link>
++    </div>
++  );
++}
++
+ export default function App() {
+-  return <h1>App</h1>;
++  const { pathname, search } = useLocation();
++  const { username, logout } = useAuth();
++
++  return (
++    <div className="min-h-screen bg-stone-50 text-stone-900">
++      <header className="border-b border-stone-200 bg-white">
++        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-4">
++          <Link to="/" className="text-xl font-bold text-amber-700">
++            Recipe Book
++          </Link>
++          <nav className="flex flex-wrap items-center gap-3">
++            {username ? (
++              <>
++                <Link to="/recipes/new" className={primaryButton}>
++                  Add recipe
++                </Link>
++                <span className="text-sm text-stone-600">
++                  Signed in as <strong className="text-stone-900">{username}</strong>
++                </span>
++                <button
++                  type="button"
++                  className={secondaryButton}
++                  onClick={async () => {
++                    await logout();
++                    navigate("/");
++                  }}
++                >
++                  Sign out
++                </button>
++              </>
++            ) : (
++              <>
++                <Link to="/login" className={secondaryButton}>
++                  Sign in
++                </Link>
++                <Link to="/register" className={primaryButton}>
++                  Register
++                </Link>
++              </>
++            )}
++          </nav>
++        </div>
++      </header>
++      <main className="mx-auto max-w-5xl px-4 py-8">
++        <Route pathname={pathname} search={search} />
++      </main>
++    </div>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..d30580a
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,122 @@
++export type RecipeSummary = {
++  id: number;
++  title: string;
++  category: string;
++  prep_minutes: number;
++  author: string;
++};
++
++export type Recipe = RecipeSummary & {
++  ingredients: string[];
++  instructions: string;
++  servings: number;
++  created_at: string;
++};
++
++export type RecipeInput = {
++  title: string;
++  ingredients: string[];
++  instructions: string;
++  category: string;
++  prep_minutes: number | null;
++  servings: number | null;
++};
++
++export type Page<T> = {
++  items: T[];
++  total: number;
++  page: number;
++  page_size: number;
++};
++
++export class ApiError extends Error {
++  status: number;
++  fieldErrors: Record<string, string>;
++
++  constructor(status: number, message: string, fieldErrors: Record<string, string> = {}) {
++    super(message);
++    this.status = status;
++    this.fieldErrors = fieldErrors;
++  }
++}
++
++const TOKEN_KEY = "recipe-book-token";
++const USER_KEY = "recipe-book-user";
++
++export function loadSession(): { token: string; username: string } | null {
++  const token = localStorage.getItem(TOKEN_KEY);
++  const username = localStorage.getItem(USER_KEY);
++  return token && username ? { token, username } : null;
++}
++
++export function saveSession(token: string, username: string) {
++  localStorage.setItem(TOKEN_KEY, token);
++  localStorage.setItem(USER_KEY, username);
++}
++
++export function clearSession() {
++  localStorage.removeItem(TOKEN_KEY);
++  localStorage.removeItem(USER_KEY);
++}
++
++let unauthorizedHandler: (() => void) | null = null;
++
++export function onUnauthorized(handler: (() => void) | null) {
++  unauthorizedHandler = handler;
++}
++
++async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
++  const headers: Record<string, string> = { Accept: "application/json" };
++  const token = localStorage.getItem(TOKEN_KEY);
++  if (token) headers.Authorization = `Bearer ${token}`;
++  if (body !== undefined) headers["Content-Type"] = "application/json";
++  let res: Response;
++  try {
++    res = await fetch(`/api${path}`, {
++      method,
++      headers,
++      body: body === undefined ? undefined : JSON.stringify(body),
++    });
++  } catch {
++    throw new ApiError(0, "Could not reach the server. Please try again.");
++  }
++  if (res.status === 204) return undefined as T;
++  let data: unknown = null;
++  try {
++    data = await res.json();
++  } catch {
++    data = null;
++  }
++  if (!res.ok) {
++    const obj = (data && typeof data === "object" ? data : {}) as {
++      error?: string;
++      errors?: Record<string, string>;
++    };
++    if (res.status === 401 && token && path !== "/auth/login") unauthorizedHandler?.();
++    throw new ApiError(res.status, obj.error || `Request failed (${res.status}).`, obj.errors || {});
++  }
++  return data as T;
++}
++
++export const api = {
++  register: (username: string, password: string) =>
++    request<{ id: number; username: string }>("POST", "/auth/register", { username, password }),
++  login: (username: string, password: string) =>
++    request<{ token: string; username: string }>("POST", "/auth/login", { username, password }),
++  logout: () => request<void>("POST", "/auth/logout"),
++  me: () => request<{ id: number; username: string }>("GET", "/auth/me"),
++  categories: () => request<{ items: string[] }>("GET", "/categories"),
++  listRecipes: (params: { category?: string; q?: string; page?: number; page_size?: number }) => {
++    const qs = new URLSearchParams();
++    if (params.category) qs.set("category", params.category);
++    if (params.q) qs.set("q", params.q);
++    if (params.page) qs.set("page", String(params.page));
++    if (params.page_size) qs.set("page_size", String(params.page_size));
++    const s = qs.toString();
++    return request<Page<RecipeSummary>>("GET", `/recipes${s ? `?${s}` : ""}`);
++  },
++  getRecipe: (id: number) => request<Recipe>("GET", `/recipes/${id}`),
++  createRecipe: (input: RecipeInput) => request<Recipe>("POST", "/recipes", input),
++  updateRecipe: (id: number, input: RecipeInput) => request<Recipe>("PUT", `/recipes/${id}`, input),
++  deleteRecipe: (id: number) => request<void>("DELETE", `/recipes/${id}`),
++};
+diff --git a/frontend/src/auth.tsx b/frontend/src/auth.tsx
+new file mode 100644
+index 0000000..2ff7d8b
+--- /dev/null
++++ b/frontend/src/auth.tsx
+@@ -0,0 +1,49 @@
++import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
++import { api, clearSession, loadSession, onUnauthorized, saveSession } from "./api";
++
++type AuthState = {
++  username: string | null;
++  login: (username: string, password: string) => Promise<void>;
++  logout: () => Promise<void>;
++};
++
++const AuthContext = createContext<AuthState | null>(null);
++
++export function AuthProvider({ children }: { children: ReactNode }) {
++  const [username, setUsername] = useState<string | null>(() => loadSession()?.username ?? null);
++
++  useEffect(() => {
++    onUnauthorized(() => {
++      clearSession();
++      setUsername(null);
++    });
++    if (loadSession()) {
++      api
++        .me()
++        .then((u) => setUsername(u.username))
++        .catch(() => {});
++    }
++    return () => onUnauthorized(null);
++  }, []);
++
++  const login = useCallback(async (name: string, password: string) => {
++    const res = await api.login(name, password);
++    saveSession(res.token, res.username ?? name);
++    setUsername(res.username ?? name);
++  }, []);
++
++  const logout = useCallback(async () => {
++    await api.logout().catch(() => {});
++    clearSession();
++    setUsername(null);
++  }, []);
++
++  const value = useMemo(() => ({ username, login, logout }), [username, login, logout]);
++  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
++}
++
++export function useAuth() {
++  const ctx = useContext(AuthContext);
++  if (!ctx) throw new Error("useAuth must be used inside AuthProvider");
++  return ctx;
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..7ead2b0 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,13 @@
++import { StrictMode } from "react";
+ import { createRoot } from "react-dom/client";
+ import App from "./App";
++import { AuthProvider } from "./auth";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <StrictMode>
++    <AuthProvider>
++      <App />
++    </AuthProvider>
++  </StrictMode>,
++);
+diff --git a/frontend/src/pages/AuthPage.tsx b/frontend/src/pages/AuthPage.tsx
+new file mode 100644
+index 0000000..ea85586
+--- /dev/null
++++ b/frontend/src/pages/AuthPage.tsx
+@@ -0,0 +1,92 @@
++import { useState, type FormEvent } from "react";
++import { ApiError, api } from "../api";
++import { useAuth } from "../auth";
++import { Link, navigate } from "../router";
++import { ErrorBanner, Field, inputClass, primaryButton } from "../ui";
++
++export default function AuthPage({ mode }: { mode: "login" | "register" }) {
++  const { login } = useAuth();
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
++  const [busy, setBusy] = useState(false);
++  const isLogin = mode === "login";
++
++  const submit = async (e: FormEvent) => {
++    e.preventDefault();
++    setBusy(true);
++    setError(null);
++    setFieldErrors({});
++    try {
++      if (!isLogin) await api.register(username, password);
++      await login(username, password);
++      navigate("/");
++    } catch (err) {
++      if (err instanceof ApiError) {
++        setFieldErrors(err.fieldErrors);
++        setError(Object.keys(err.fieldErrors).length ? null : err.message);
++      } else {
++        setError("Something went wrong.");
++      }
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  return (
++    <div className="mx-auto max-w-sm">
++      <div className="rounded-xl border border-stone-200 bg-white p-6 shadow-sm">
++        <h1 className="mb-6 text-2xl font-semibold text-stone-900">
++          {isLogin ? "Sign in" : "Create an account"}
++        </h1>
++        <form onSubmit={submit} className="space-y-4" noValidate>
++          <ErrorBanner message={error} />
++          <Field label="Username" htmlFor="username" error={fieldErrors.username}>
++            <input
++              id="username"
++              name="username"
++              autoComplete="username"
++              className={inputClass}
++              value={username}
++              onChange={(e) => setUsername(e.target.value)}
++              required
++            />
++          </Field>
++          <Field label="Password" htmlFor="password" error={fieldErrors.password}>
++            <input
++              id="password"
++              name="password"
++              type="password"
++              autoComplete={isLogin ? "current-password" : "new-password"}
++              className={inputClass}
++              value={password}
++              onChange={(e) => setPassword(e.target.value)}
++              required
++            />
++          </Field>
++          <button type="submit" className={`${primaryButton} w-full`} disabled={busy}>
++            {busy ? "Please wait…" : isLogin ? "Sign in" : "Register"}
++          </button>
++        </form>
++        <p className="mt-4 text-center text-sm text-stone-600">
++          {isLogin ? (
++            <>
++              No account yet?{" "}
++              <Link to="/register" className="font-medium text-amber-700 hover:underline">
++                Register
++              </Link>
++            </>
++          ) : (
++            <>
++              Already have an account?{" "}
++              <Link to="/login" className="font-medium text-amber-700 hover:underline">
++                Sign in
++              </Link>
++            </>
++          )}
++        </p>
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/src/pages/RecipeDetail.tsx b/frontend/src/pages/RecipeDetail.tsx
+new file mode 100644
+index 0000000..f883086
+--- /dev/null
++++ b/frontend/src/pages/RecipeDetail.tsx
+@@ -0,0 +1,142 @@
++import { useEffect, useState } from "react";
++import { ApiError, api, type Recipe } from "../api";
++import { useAuth } from "../auth";
++import { Link, navigate } from "../router";
++import { Badge, ErrorBanner, Spinner, dangerButton, formatMinutes, secondaryButton } from "../ui";
++
++export default function RecipeDetail({ id }: { id: number }) {
++  const { username } = useAuth();
++  const [recipe, setRecipe] = useState<Recipe | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [confirming, setConfirming] = useState(false);
++  const [deleting, setDeleting] = useState(false);
++
++  useEffect(() => {
++    let cancelled = false;
++    setRecipe(null);
++    setError(null);
++    api
++      .getRecipe(id)
++      .then((r) => !cancelled && setRecipe(r))
++      .catch((err) => {
++        if (!cancelled) setError(err instanceof ApiError ? err.message : "Could not load recipe.");
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [id]);
++
++  const remove = async () => {
++    setDeleting(true);
++    setError(null);
++    try {
++      await api.deleteRecipe(id);
++      navigate("/");
++    } catch (err) {
++      setError(err instanceof ApiError ? err.message : "Could not delete recipe.");
++      setDeleting(false);
++      setConfirming(false);
++    }
++  };
++
++  if (error && !recipe) {
++    return (
++      <div className="space-y-4">
++        <ErrorBanner message={error} />
++        <Link to="/" className="text-sm font-medium text-amber-700 hover:underline">
++          ← Back to recipes
++        </Link>
++      </div>
++    );
++  }
++  if (!recipe) return <Spinner />;
++
++  const isAuthor = username !== null && username.toLowerCase() === recipe.author.toLowerCase();
++
++  return (
++    <article className="space-y-6">
++      <Link to="/" className="text-sm font-medium text-amber-700 hover:underline">
++        ← Back to recipes
++      </Link>
++      <ErrorBanner message={error} />
++      <header className="space-y-3 rounded-xl border border-stone-200 bg-white p-6 shadow-sm">
++        <Badge>{recipe.category}</Badge>
++        <h1 className="text-3xl font-bold text-stone-900">{recipe.title}</h1>
++        <dl className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-stone-600">
++          <div>
++            <dt className="inline font-medium">Prep time: </dt>
++            <dd className="inline">{formatMinutes(recipe.prep_minutes)}</dd>
++          </div>
++          <div>
++            <dt className="inline font-medium">Servings: </dt>
++            <dd className="inline">{recipe.servings}</dd>
++          </div>
++          <div>
++            <dt className="inline font-medium">Author: </dt>
++            <dd className="inline">{recipe.author}</dd>
++          </div>
++          <div>
++            <dt className="inline font-medium">Added: </dt>
++            <dd className="inline">{new Date(recipe.created_at).toLocaleDateString()}</dd>
++          </div>
++        </dl>
++        {isAuthor && (
++          <div className="flex flex-wrap gap-2 pt-2">
++            <Link to={`/recipes/${recipe.id}/edit`} className={secondaryButton}>
++              Edit
++            </Link>
++            <button type="button" className={dangerButton} onClick={() => setConfirming(true)}>
++              Delete
++            </button>
++          </div>
++        )}
++      </header>
++
++      <div className="grid gap-6 md:grid-cols-3">
++        <section className="rounded-xl border border-stone-200 bg-white p-6 shadow-sm md:col-span-1">
++          <h2 className="mb-3 text-lg font-semibold text-stone-900">Ingredients</h2>
++          <ul className="list-disc space-y-1 pl-5 text-stone-700">
++            {recipe.ingredients.map((ing, i) => (
++              <li key={i}>{ing}</li>
++            ))}
++          </ul>
++        </section>
++        <section className="rounded-xl border border-stone-200 bg-white p-6 shadow-sm md:col-span-2">
++          <h2 className="mb-3 text-lg font-semibold text-stone-900">Instructions</h2>
++          <p className="whitespace-pre-line leading-relaxed text-stone-700">{recipe.instructions}</p>
++        </section>
++      </div>
++
++      {confirming && (
++        <div
++          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
++          role="dialog"
++          aria-modal="true"
++          aria-labelledby="confirm-title"
++        >
++          <div className="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl">
++            <h2 id="confirm-title" className="mb-2 text-lg font-semibold text-stone-900">
++              Delete recipe?
++            </h2>
++            <p className="mb-6 text-sm text-stone-600">
++              “{recipe.title}” will be permanently deleted. This cannot be undone.
++            </p>
++            <div className="flex justify-end gap-2">
++              <button
++                type="button"
++                className={secondaryButton}
++                onClick={() => setConfirming(false)}
++                disabled={deleting}
++              >
++                Cancel
++              </button>
++              <button type="button" className={dangerButton} onClick={remove} disabled={deleting}>
++                {deleting ? "Deleting…" : "Delete"}
++              </button>
++            </div>
++          </div>
++        </div>
++      )}
++    </article>
++  );
++}
+diff --git a/frontend/src/pages/RecipeForm.tsx b/frontend/src/pages/RecipeForm.tsx
+new file mode 100644
+index 0000000..dd9e3c0
+--- /dev/null
++++ b/frontend/src/pages/RecipeForm.tsx
+@@ -0,0 +1,274 @@
++import { useEffect, useRef, useState, type FormEvent } from "react";
++import { ApiError, api, type RecipeInput } from "../api";
++import { useAuth } from "../auth";
++import { Link, navigate } from "../router";
++import {
++  ErrorBanner,
++  Field,
++  Spinner,
++  inputClass,
++  primaryButton,
++  secondaryButton,
++} from "../ui";
++
++type Row = { key: number; text: string };
++
++function toNumber(value: string): number | null {
++  const trimmed = value.trim();
++  if (trimmed === "") return null;
++  const n = Number(trimmed);
++  return Number.isFinite(n) ? n : null;
++}
++
++export default function RecipeForm({ id }: { id?: number }) {
++  const { username } = useAuth();
++  const editing = id !== undefined;
++  const nextKey = useRef(1);
++  const newRow = (text = ""): Row => ({ key: nextKey.current++, text });
++
++  const [title, setTitle] = useState("");
++  const [category, setCategory] = useState("");
++  const [prep, setPrep] = useState("");
++  const [servings, setServings] = useState("");
++  const [instructions, setInstructions] = useState("");
++  const [rows, setRows] = useState<Row[]>(() => [newRow()]);
++  const [categories, setCategories] = useState<string[]>([]);
++  const [loading, setLoading] = useState(editing);
++  const [saving, setSaving] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
++
++  useEffect(() => {
++    api
++      .categories()
++      .then((r) => setCategories(r.items))
++      .catch(() => {});
++  }, []);
++
++  useEffect(() => {
++    if (id === undefined) return;
++    let cancelled = false;
++    setLoading(true);
++    api
++      .getRecipe(id)
++      .then((r) => {
++        if (cancelled) return;
++        setTitle(r.title);
++        setCategory(r.category);
++        setPrep(String(r.prep_minutes));
++        setServings(String(r.servings));
++        setInstructions(r.instructions);
++        setRows(r.ingredients.length ? r.ingredients.map((t) => newRow(t)) : [newRow()]);
++        if (username && r.author.toLowerCase() !== username.toLowerCase()) {
++          setError("Only the author can edit this recipe.");
++        }
++      })
++      .catch((err) => {
++        if (!cancelled) setError(err instanceof ApiError ? err.message : "Could not load recipe.");
++      })
++      .finally(() => !cancelled && setLoading(false));
++    return () => {
++      cancelled = true;
++    };
++  }, [id]);
++
++  const updateRow = (key: number, text: string) =>
++    setRows((rs) => rs.map((r) => (r.key === key ? { ...r, text } : r)));
++  const removeRow = (key: number) =>
++    setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.key !== key) : [newRow()]));
++  const moveRow = (index: number, delta: number) =>
++    setRows((rs) => {
++      const target = index + delta;
++      if (target < 0 || target >= rs.length) return rs;
++      const copy = [...rs];
++      [copy[index], copy[target]] = [copy[target], copy[index]];
++      return copy;
++    });
++  const addRow = () => setRows((rs) => [...rs, newRow()]);
++
++  const submit = async (e: FormEvent) => {
++    e.preventDefault();
++    setSaving(true);
++    setError(null);
++    setFieldErrors({});
++    const input: RecipeInput = {
++      title,
++      category,
++      instructions,
++      prep_minutes: toNumber(prep),
++      servings: toNumber(servings),
++      ingredients: rows.map((r) => r.text).filter((t) => t.trim() !== ""),
++    };
++    try {
++      const saved = id !== undefined ? await api.updateRecipe(id, input) : await api.createRecipe(input);
++      navigate(`/recipes/${saved.id}`);
++    } catch (err) {
++      if (err instanceof ApiError) {
++        setFieldErrors(err.fieldErrors);
++        setError(
++          err.status === 401
++            ? "Your session has expired. Please sign in again."
++            : Object.keys(err.fieldErrors).length
++              ? "Please fix the highlighted fields."
++              : err.message,
++        );
++      } else {
++        setError("Something went wrong.");
++      }
++      setSaving(false);
++    }
++  };
++
++  if (!username) {
++    return (
++      <div className="mx-auto max-w-md rounded-xl border border-stone-200 bg-white p-6 text-center shadow-sm">
++        <p className="mb-4 text-stone-700">You need to sign in to {editing ? "edit" : "add"} recipes.</p>
++        <Link to="/login" className={primaryButton}>
++          Sign in
++        </Link>
++      </div>
++    );
++  }
++
++  if (loading) return <Spinner />;
++
++  const errClass = (name: string) => (fieldErrors[name] ? " border-red-400" : "");
++
++  return (
++    <div className="mx-auto max-w-2xl">
++      <h1 className="mb-6 text-2xl font-semibold text-stone-900">
++        {editing ? "Edit recipe" : "Add a recipe"}
++      </h1>
++      <form
++        onSubmit={submit}
++        noValidate
++        className="space-y-5 rounded-xl border border-stone-200 bg-white p-6 shadow-sm"
++      >
++        <ErrorBanner message={error} />
++
++        <Field label="Title" htmlFor="title" error={fieldErrors.title}>
++          <input
++            id="title"
++            className={inputClass + errClass("title")}
++            value={title}
++            onChange={(e) => setTitle(e.target.value)}
++          />
++        </Field>
++
++        <div className="grid gap-4 sm:grid-cols-3">
++          <Field label="Category" htmlFor="category" error={fieldErrors.category}>
++            <input
++              id="category"
++              list="category-options"
++              className={inputClass + errClass("category")}
++              value={category}
++              onChange={(e) => setCategory(e.target.value)}
++              placeholder="e.g. Dessert"
++            />
++            <datalist id="category-options">
++              {categories.map((c) => (
++                <option key={c} value={c} />
++              ))}
++            </datalist>
++          </Field>
++          <Field label="Prep time (minutes)" htmlFor="prep" error={fieldErrors.prep_minutes}>
++            <input
++              id="prep"
++              type="number"
++              min={0}
++              step={1}
++              inputMode="numeric"
++              className={inputClass + errClass("prep_minutes")}
++              value={prep}
++              onChange={(e) => setPrep(e.target.value)}
++            />
++          </Field>
++          <Field label="Servings" htmlFor="servings" error={fieldErrors.servings}>
++            <input
++              id="servings"
++              type="number"
++              min={1}
++              step={1}
++              inputMode="numeric"
++              className={inputClass + errClass("servings")}
++              value={servings}
++              onChange={(e) => setServings(e.target.value)}
++            />
++          </Field>
++        </div>
++
++        <fieldset className="space-y-2">
++          <legend className="mb-1 block text-sm font-medium text-stone-700">Ingredients</legend>
++          <ol className="space-y-2">
++            {rows.map((row, i) => (
++              <li key={row.key} className="flex items-center gap-2">
++                <span className="w-6 text-right text-sm text-stone-400">{i + 1}.</span>
++                <input
++                  aria-label={`Ingredient ${i + 1}`}
++                  className={inputClass + errClass("ingredients")}
++                  value={row.text}
++                  onChange={(e) => updateRow(row.key, e.target.value)}
++                  placeholder="e.g. 200 g flour"
++                />
++                <button
++                  type="button"
++                  className="rounded-md px-2 py-1 text-stone-500 hover:bg-stone-100 disabled:opacity-30"
++                  onClick={() => moveRow(i, -1)}
++                  disabled={i === 0}
++                  aria-label={`Move ingredient ${i + 1} up`}
++                >
++                  ↑
++                </button>
++                <button
++                  type="button"
++                  className="rounded-md px-2 py-1 text-stone-500 hover:bg-stone-100 disabled:opacity-30"
++                  onClick={() => moveRow(i, 1)}
++                  disabled={i === rows.length - 1}
++                  aria-label={`Move ingredient ${i + 1} down`}
++                >
++                  ↓
++                </button>
++                <button
++                  type="button"
++                  className="rounded-md px-2 py-1 text-sm text-red-600 hover:bg-red-50"
++                  onClick={() => removeRow(row.key)}
++                  aria-label={`Remove ingredient ${i + 1}`}
++                >
++                  Remove
++                </button>
++              </li>
++            ))}
++          </ol>
++          <button type="button" className={secondaryButton} onClick={addRow}>
++            + Add ingredient
++          </button>
++          {fieldErrors.ingredients && (
++            <p className="text-sm text-red-600" role="alert">
++              {fieldErrors.ingredients}
++            </p>
++          )}
++        </fieldset>
++
++        <Field label="Instructions" htmlFor="instructions" error={fieldErrors.instructions}>
++          <textarea
++            id="instructions"
++            rows={8}
++            className={inputClass + errClass("instructions")}
++            value={instructions}
++            onChange={(e) => setInstructions(e.target.value)}
++            placeholder="One step per line"
++          />
++        </Field>
++
++        <div className="flex justify-end gap-2">
++          <Link to={editing ? `/recipes/${id}` : "/"} className={secondaryButton}>
++            Cancel
++          </Link>
++          <button type="submit" className={primaryButton} disabled={saving}>
++            {saving ? "Saving…" : editing ? "Save changes" : "Add recipe"}
++          </button>
++        </div>
++      </form>
++    </div>
++  );
++}
+diff --git a/frontend/src/pages/RecipeList.tsx b/frontend/src/pages/RecipeList.tsx
+new file mode 100644
+index 0000000..65c9c5f
+--- /dev/null
++++ b/frontend/src/pages/RecipeList.tsx
+@@ -0,0 +1,170 @@
++import { useEffect, useState } from "react";
++import { ApiError, api, type Page, type RecipeSummary } from "../api";
++import { Link, navigate } from "../router";
++import { Badge, ErrorBanner, Spinner, formatMinutes, inputClass, secondaryButton } from "../ui";
++
++const PAGE_SIZE = 9;
++
++function buildUrl(params: { category: string; q: string; page: number }) {
++  const qs = new URLSearchParams();
++  if (params.category) qs.set("category", params.category);
++  if (params.q) qs.set("q", params.q);
++  if (params.page > 1) qs.set("page", String(params.page));
++  const s = qs.toString();
++  return s ? `/?${s}` : "/";
++}
++
++export default function RecipeList({ search }: { search: string }) {
++  const params = new URLSearchParams(search);
++  const category = params.get("category") ?? "";
++  const q = params.get("q") ?? "";
++  const page = Math.max(1, Number.parseInt(params.get("page") ?? "1", 10) || 1);
++
++  const [data, setData] = useState<Page<RecipeSummary> | null>(null);
++  const [categories, setCategories] = useState<string[]>([]);
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(true);
++  const [query, setQuery] = useState(q);
++
++  useEffect(() => {
++    setQuery(q);
++  }, [q]);
++
++  useEffect(() => {
++    api
++      .categories()
++      .then((r) => setCategories(r.items))
++      .catch(() => {});
++  }, []);
++
++  useEffect(() => {
++    let cancelled = false;
++    setLoading(true);
++    setError(null);
++    api
++      .listRecipes({ category, q, page, page_size: PAGE_SIZE })
++      .then((r) => {
++        if (!cancelled) setData(r);
++      })
++      .catch((err) => {
++        if (!cancelled) setError(err instanceof ApiError ? err.message : "Could not load recipes.");
++      })
++      .finally(() => {
++        if (!cancelled) setLoading(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [category, q, page]);
++
++  useEffect(() => {
++    if (query.trim() === q) return;
++    const t = window.setTimeout(() => {
++      navigate(buildUrl({ category, q: query.trim(), page: 1 }), true);
++    }, 300);
++    return () => window.clearTimeout(t);
++  }, [query, q, category]);
++
++  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
++  const allCategories =
++    category && !categories.some((c) => c.toLowerCase() === category.toLowerCase())
++      ? [...categories, category]
++      : categories;
++
++  return (
++    <div className="space-y-6">
++      <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
++        <div className="flex-1">
++          <label htmlFor="search" className="mb-1 block text-sm font-medium text-stone-700">
++            Search by title
++          </label>
++          <input
++            id="search"
++            type="search"
++            placeholder="e.g. pancakes"
++            className={inputClass}
++            value={query}
++            onChange={(e) => setQuery(e.target.value)}
++          />
++        </div>
++        <div className="sm:w-56">
++          <label htmlFor="category" className="mb-1 block text-sm font-medium text-stone-700">
++            Category
++          </label>
++          <select
++            id="category"
++            className={inputClass}
++            value={category}
++            onChange={(e) => navigate(buildUrl({ category: e.target.value, q, page: 1 }))}
++          >
++            <option value="">All categories</option>
++            {allCategories.map((c) => (
++              <option key={c} value={c}>
++                {c}
++              </option>
++            ))}
++          </select>
++        </div>
++      </div>
++
++      <ErrorBanner message={error} />
++
++      {loading && !data ? (
++        <Spinner />
++      ) : data && data.items.length === 0 ? (
++        <div className="rounded-xl border border-dashed border-stone-300 bg-white py-16 text-center text-stone-500">
++          No recipes found.
++        </div>
++      ) : (
++        data && (
++          <ul
++            className={`grid gap-4 sm:grid-cols-2 lg:grid-cols-3 ${loading ? "opacity-60" : ""}`}
++          >
++            {data.items.map((r) => (
++              <li key={r.id}>
++                <Link
++                  to={`/recipes/${r.id}`}
++                  className="flex h-full flex-col rounded-xl border border-stone-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-amber-300 hover:shadow-md"
++                >
++                  <div className="mb-3">
++                    <Badge>{r.category}</Badge>
++                  </div>
++                  <h2 className="mb-4 text-lg font-semibold text-stone-900">{r.title}</h2>
++                  <div className="mt-auto flex items-center justify-between text-sm text-stone-500">
++                    <span>Prep: {formatMinutes(r.prep_minutes)}</span>
++                    <span>by {r.author}</span>
++                  </div>
++                </Link>
++              </li>
++            ))}
++          </ul>
++        )
++      )}
++
++      {data && data.total > 0 && (
++        <nav className="flex items-center justify-between" aria-label="Pagination">
++          <button
++            type="button"
++            className={secondaryButton}
++            disabled={page <= 1}
++            onClick={() => navigate(buildUrl({ category, q, page: page - 1 }))}
++          >
++            ← Previous
++          </button>
++          <span className="text-sm text-stone-600">
++            Page {Math.min(page, totalPages)} of {totalPages} · {data.total} recipe
++            {data.total === 1 ? "" : "s"}
++          </span>
++          <button
++            type="button"
++            className={secondaryButton}
++            disabled={page >= totalPages}
++            onClick={() => navigate(buildUrl({ category, q, page: page + 1 }))}
++          >
++            Next →
++          </button>
++        </nav>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/src/router.tsx b/frontend/src/router.tsx
+new file mode 100644
+index 0000000..17f9f43
+--- /dev/null
++++ b/frontend/src/router.tsx
+@@ -0,0 +1,44 @@
++import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
++
++export function navigate(to: string, replace = false) {
++  if (replace) window.history.replaceState(null, "", to);
++  else window.history.pushState(null, "", to);
++  window.dispatchEvent(new PopStateEvent("popstate"));
++}
++
++export function useLocation() {
++  const [loc, setLoc] = useState(() => ({
++    pathname: window.location.pathname,
++    search: window.location.search,
++  }));
++  useEffect(() => {
++    const handler = () =>
++      setLoc({ pathname: window.location.pathname, search: window.location.search });
++    window.addEventListener("popstate", handler);
++    return () => window.removeEventListener("popstate", handler);
++  }, []);
++  return loc;
++}
++
++export function Link({
++  to,
++  className,
++  children,
++}: {
++  to: string;
++  className?: string;
++  children: ReactNode;
++}) {
++  const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
++    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
++      return;
++    e.preventDefault();
++    navigate(to);
++    window.scrollTo(0, 0);
++  };
++  return (
++    <a href={to} className={className} onClick={onClick}>
++      {children}
++    </a>
++  );
++}
+diff --git a/frontend/src/ui.tsx b/frontend/src/ui.tsx
+new file mode 100644
+index 0000000..a2b31c8
+--- /dev/null
++++ b/frontend/src/ui.tsx
+@@ -0,0 +1,67 @@
++import type { ReactNode } from "react";
++
++export const inputClass =
++  "w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-200";
++
++export const primaryButton =
++  "inline-flex items-center justify-center rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-60";
++
++export const secondaryButton =
++  "inline-flex items-center justify-center rounded-md border border-stone-300 bg-white px-4 py-2 text-sm font-medium text-stone-700 shadow-sm hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-60";
++
++export const dangerButton =
++  "inline-flex items-center justify-center rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60";
++
++export function Field({
++  label,
++  htmlFor,
++  error,
++  children,
++}: {
++  label: string;
++  htmlFor?: string;
++  error?: string;
++  children: ReactNode;
++}) {
++  return (
++    <div className="space-y-1">
++      <label htmlFor={htmlFor} className="block text-sm font-medium text-stone-700">
++        {label}
++      </label>
++      {children}
++      {error && (
++        <p className="text-sm text-red-600" role="alert">
++          {error}
++        </p>
++      )}
++    </div>
++  );
++}
++
++export function ErrorBanner({ message }: { message: string | null }) {
++  if (!message) return null;
++  return (
++    <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700" role="alert">
++      {message}
++    </div>
++  );
++}
++
++export function Spinner() {
++  return <p className="py-10 text-center text-sm text-stone-500">Loading…</p>;
++}
++
++export function Badge({ children }: { children: ReactNode }) {
++  return (
++    <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800">
++      {children}
++    </span>
++  );
++}
++
++export function formatMinutes(m: number) {
++  if (m < 60) return `${m} min`;
++  const h = Math.floor(m / 60);
++  const rest = m % 60;
++  return rest ? `${h} h ${rest} min` : `${h} h`;
++}
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..75d5958
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,17 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "noEmit": true,
++    "isolatedModules": true,
++    "skipLibCheck": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "types": ["vite/client"]
++  },
++  "include": ["src"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..b1f1ff0 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
++import tailwindcss from "@tailwindcss/vite";
+ import react from "@vitejs/plugin-react";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

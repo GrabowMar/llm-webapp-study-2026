@@ -1,0 +1,2382 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..069be25
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,10 @@
++**/node_modules
++**/.venv
++**/venv
++**/__pycache__
++**/*.pyc
++**/.git
++frontend/dist
++data/*.db
++data/*.sqlite
++data/*.sqlite3
+diff --git a/backend/app.py b/backend/app.py
+index bc9e624..1129d4e 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -1,23 +1,424 @@
+-"""Flask entry point."""
++"""Recipe book Flask application."""
+ 
++import json
++import os
++import secrets
++import sqlite3
++from datetime import datetime, timezone
++from functools import wraps
+ from pathlib import Path
+ 
+-from flask import Flask
+-from flask import send_from_directory
++from flask import Flask, g, jsonify, request, send_from_directory
++from werkzeug.security import check_password_hash, generate_password_hash
+ 
+ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
++DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
++DATA_DIR.mkdir(parents=True, exist_ok=True)
++DB_PATH = DATA_DIR / "recipes.db"
+ 
+ app = Flask(__name__, static_folder=None)
+ 
++DEFAULT_CATEGORIES = ["Breakfast", "Main", "Dessert", "Soup", "Salad"]
++
++
++def get_db():
++    if "db" not in g:
++        g.db = sqlite3.connect(DB_PATH)
++        g.db.row_factory = sqlite3.Row
++        g.db.execute("PRAGMA foreign_keys = ON")
++    return g.db
++
++
++@app.teardown_appcontext
++def close_db(exc):
++    db = g.pop("db", None)
++    if db is not None:
++        db.close()
++
++
++def init_db():
++    db = sqlite3.connect(DB_PATH)
++    db.executescript(
++        """
++        CREATE TABLE IF NOT EXISTS users (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            username TEXT NOT NULL UNIQUE,
++            password_hash TEXT NOT NULL,
++            created_at TEXT NOT NULL
++        );
++
++        CREATE TABLE IF NOT EXISTS tokens (
++            token TEXT PRIMARY KEY,
++            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++            created_at TEXT NOT NULL
++        );
++
++        CREATE TABLE IF NOT EXISTS recipes (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            title TEXT NOT NULL,
++            ingredients TEXT NOT NULL,
++            instructions TEXT NOT NULL,
++            category TEXT NOT NULL,
++            prep_minutes INTEGER,
++            servings INTEGER,
++            created_at TEXT NOT NULL,
++            author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE
++        );
++        """
++    )
++    db.commit()
++    db.close()
++
++
++def now_iso():
++    return datetime.now(timezone.utc).isoformat()
++
++
++def seed():
++    db = get_db()
++    count = db.execute("SELECT COUNT(*) AS c FROM recipes").fetchone()["c"]
++    if count:
++        return
++    author_ids = []
++    for username in ["alice", "bob"]:
++        cur = db.execute(
++            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++            (username, generate_password_hash("password"), now_iso()),
++        )
++        author_ids.append(cur.lastrowid)
++    samples = [
++        {
++            "title": "Fluffy Pancakes",
++            "ingredients": ["2 cups flour", "2 eggs", "1 1/2 cups milk", "2 tbsp sugar", "1 tsp baking powder"],
++            "instructions": "Whisk the dry ingredients together.\nAdd the eggs and milk and stir until smooth.\nCook on a buttered griddle until golden.",
++            "category": "Breakfast",
++            "prep_minutes": 25,
++            "servings": 4,
++            "author_id": author_ids[0],
++        },
++        {
++            "title": "Tomato Basil Soup",
++            "ingredients": ["6 ripe tomatoes", "1 onion", "2 cloves garlic", "1 cup vegetable stock", "fresh basil"],
++            "instructions": "Saute the onion and garlic until soft.\nAdd tomatoes and stock, then simmer for 20 minutes.\nBlend and finish with basil.",
++            "category": "Soup",
++            "prep_minutes": 35,
++            "servings": 4,
++            "author_id": author_ids[1],
++        },
++        {
++            "title": "Classic Caesar Salad",
++            "ingredients": ["1 romaine lettuce", "croutons", "parmesan", "caesar dressing"],
++            "instructions": "Tear the lettuce into bite-size pieces.\nToss with dressing and top with croutons and parmesan.",
++            "category": "Salad",
++            "prep_minutes": 15,
++            "servings": 2,
++            "author_id": author_ids[0],
++        },
++        {
++            "title": "Chocolate Brownies",
++            "ingredients": ["200 g dark chocolate", "150 g butter", "3 eggs", "200 g sugar", "100 g flour"],
++            "instructions": "Melt the chocolate and butter together.\nBeat in the eggs and sugar, then fold in the flour.\nBake at 180 C for 25 minutes.",
++            "category": "Dessert",
++            "prep_minutes": 45,
++            "servings": 9,
++            "author_id": author_ids[1],
++        },
++    ]
++    for r in samples:
++        db.execute(
++            "INSERT INTO recipes (title, ingredients, instructions, category, prep_minutes, servings, created_at, author_id)"
++            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
++            (
++                r["title"],
++                json.dumps(r["ingredients"]),
++                r["instructions"],
++                r["category"],
++                r["prep_minutes"],
++                r["servings"],
++                now_iso(),
++                r["author_id"],
++            ),
++        )
++    db.commit()
++
++
++def recipe_to_dict(row, full=True):
++    author = get_db().execute(
++        "SELECT username FROM users WHERE id = ?", (row["author_id"],)
++    ).fetchone()
++    data = {
++        "id": row["id"],
++        "title": row["title"],
++        "category": row["category"],
++        "prep_minutes": row["prep_minutes"],
++        "servings": row["servings"],
++        "created_at": row["created_at"],
++        "author": author["username"] if author else "unknown",
++    }
++    if full:
++        data["ingredients"] = json.loads(row["ingredients"])
++        data["instructions"] = row["instructions"]
++    return data
++
++
++def get_current_user():
++    auth = request.headers.get("Authorization", "")
++    if not auth.startswith("Bearer "):
++        return None
++    token = auth[len("Bearer "):].strip()
++    if not token:
++        return None
++    row = get_db().execute(
++        "SELECT u.id, u.username FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?",
++        (token,),
++    ).fetchone()
++    return row if row else None
++
++
++def auth_required(fn):
++    @wraps(fn)
++    def wrapper(*args, **kwargs):
++        user = get_current_user()
++        if user is None:
++            return jsonify({"error": "Authentication required."}), 401
++        g.user = user
++        return fn(*args, **kwargs)
++
++    return wrapper
++
++
++def error(message, status=400):
++    return jsonify({"error": message}), status
++
+ 
+ @app.get("/api/health")
+ def health():
+     return {"status": "ok"}
+ 
+ 
++@app.post("/api/auth/register")
++def register():
++    data = request.get_json(silent=True) or {}
++    username = (data.get("username") or "").strip()
++    password = data.get("password") or ""
++    if not username:
++        return error("Username is required.")
++    if not password:
++        return error("Password is required.")
++    if len(username) > 64:
++        return error("Username must be 64 characters or fewer.")
++    db = get_db()
++    exists = db.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone()
++    if exists:
++        return error("Username is already taken.", 409)
++    db.execute(
++        "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
++        (username, generate_password_hash(password), now_iso()),
++    )
++    db.commit()
++    return jsonify({"username": username}), 201
++
++
++@app.post("/api/auth/login")
++def login():
++    data = request.get_json(silent=True) or {}
++    username = (data.get("username") or "").strip()
++    password = data.get("password") or ""
++    db = get_db()
++    user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
++    if user is None or not check_password_hash(user["password_hash"], password):
++        return error("Invalid username or password.", 401)
++    token = secrets.token_hex(32)
++    db.execute(
++        "INSERT INTO tokens (token, user_id, created_at) VALUES (?, ?, ?)",
++        (token, user["id"], now_iso()),
++    )
++    db.commit()
++    return jsonify({"token": token})
++
++
++def validate_recipe(data):
++    if not isinstance(data, dict):
++        return "Invalid JSON body."
++    title = (data.get("title") or "").strip()
++    ingredients = data.get("ingredients")
++    instructions = data.get("instructions")
++    category = (data.get("category") or "").strip()
++    if not title:
++        return "Title is required."
++    if not category:
++        return "Category is required."
++    if not instructions or not str(instructions).strip():
++        return "Instructions are required."
++    if not isinstance(ingredients, list):
++        return "Ingredients must be a list."
++    if not all(isinstance(i, str) and i.strip() for i in ingredients):
++        return "Each ingredient must be a non-empty string."
++    prep_minutes = data.get("prep_minutes")
++    if prep_minutes is not None:
++        if not isinstance(prep_minutes, int) or isinstance(prep_minutes, bool) or prep_minutes < 0:
++            return "prep_minutes must be a non-negative integer."
++    servings = data.get("servings")
++    if servings is not None:
++        if not isinstance(servings, int) or isinstance(servings, bool) or servings < 0:
++            return "servings must be a non-negative integer."
++    return None
++
++
++@app.post("/api/recipes")
++@auth_required
++def create_recipe():
++    data = request.get_json(silent=True) or {}
++    err = validate_recipe(data)
++    if err:
++        return error(err)
++    db = get_db()
++    cur = db.execute(
++        "INSERT INTO recipes (title, ingredients, instructions, category, prep_minutes, servings, created_at, author_id)"
++        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
++        (
++            data["title"].strip(),
++            json.dumps(data.get("ingredients") or []),
++            str(data["instructions"]),
++            data["category"].strip(),
++            data.get("prep_minutes"),
++            data.get("servings"),
++            now_iso(),
++            g.user["id"],
++        ),
++    )
++    db.commit()
++    row = db.execute("SELECT * FROM recipes WHERE id = ?", (cur.lastrowid,)).fetchone()
++    return jsonify(recipe_to_dict(row)), 201
++
++
++@app.get("/api/recipes")
++def list_recipes():
++    db = get_db()
++    category = (request.args.get("category") or "").strip()
++    q = (request.args.get("q") or "").strip()
++
++    try:
++        page = max(1, int(request.args.get("page", "1")))
++    except ValueError:
++        page = 1
++    try:
++        page_size = int(request.args.get("page_size", "10"))
++    except ValueError:
++        page_size = 10
++    page_size = max(1, min(100, page_size))
++
++    where = []
++    params = []
++    if category:
++        where.append("category = ?")
++        params.append(category)
++    if q:
++        where.append("(title LIKE ? OR instructions LIKE ?)")
++        like = f"%{q}%"
++        params.extend([like, like])
++
++    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
++    total = db.execute(
++        f"SELECT COUNT(*) AS c FROM recipes {where_sql}", params
++    ).fetchone()["c"]
++
++    offset = (page - 1) * page_size
++    rows = db.execute(
++        f"SELECT * FROM recipes {where_sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
++        params + [page_size, offset],
++    ).fetchall()
++
++    items = [
++        {
++            "id": r["id"],
++            "title": r["title"],
++            "category": r["category"],
++            "prep_minutes": r["prep_minutes"],
++            "author": recipe_to_dict(r, full=False)["author"],
++        }
++        for r in rows
++    ]
++    return jsonify(
++        {"items": items, "total": total, "page": page, "page_size": page_size}
++    )
++
++
++@app.get("/api/categories")
++def list_categories():
++    db = get_db()
++    rows = db.execute(
++        "SELECT DISTINCT category FROM recipes ORDER BY category"
++    ).fetchall()
++    cats = [r["category"] for r in rows]
++    for c in DEFAULT_CATEGORIES:
++        if c not in cats:
++            cats.append(c)
++    return jsonify({"categories": sorted(set(cats))})
++
++
++@app.get("/api/recipes/<int:recipe_id>")
++def get_recipe(recipe_id):
++    db = get_db()
++    row = db.execute("SELECT * FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
++    if row is None:
++        return error("Recipe not found.", 404)
++    return jsonify(recipe_to_dict(row))
++
++
++@app.put("/api/recipes/<int:recipe_id>")
++@auth_required
++def update_recipe(recipe_id):
++    db = get_db()
++    row = db.execute("SELECT * FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
++    if row is None:
++        return error("Recipe not found.", 404)
++    if row["author_id"] != g.user["id"]:
++        return error("You may only edit your own recipes.", 403)
++    data = request.get_json(silent=True) or {}
++    err = validate_recipe(data)
++    if err:
++        return error(err)
++    db.execute(
++        "UPDATE recipes SET title = ?, ingredients = ?, instructions = ?, category = ?, prep_minutes = ?, servings = ?"
++        " WHERE id = ?",
++        (
++            data["title"].strip(),
++            json.dumps(data.get("ingredients") or []),
++            str(data["instructions"]),
++            data["category"].strip(),
++            data.get("prep_minutes"),
++            data.get("servings"),
++            recipe_id,
++        ),
++    )
++    db.commit()
++    row = db.execute("SELECT * FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
++    return jsonify(recipe_to_dict(row))
++
++
++@app.delete("/api/recipes/<int:recipe_id>")
++@auth_required
++def delete_recipe(recipe_id):
++    db = get_db()
++    row = db.execute("SELECT * FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
++    if row is None:
++        return error("Recipe not found.", 404)
++    if row["author_id"] != g.user["id"]:
++        return error("You may only delete your own recipes.", 403)
++    db.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
++    db.commit()
++    return "", 204
++
++
+ @app.get("/")
+ @app.get("/<path:path>")
+ def frontend(path: str = "index.html"):
+     if (DIST / path).is_file():
+         return send_from_directory(DIST, path)
+     return send_from_directory(DIST, "index.html")
++
++
++init_db()
++with app.app_context():
++    seed()
+diff --git a/frontend/index.html b/frontend/index.html
+index 8f6108f..943443a 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="utf-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1" />
+-    <title>App</title>
++    <title>Recipe Book</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 338a17a..d011ce3 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -6,19 +6,69 @@
+     "": {
+       "name": "app-frontend",
+       "dependencies": {
++        "@tailwindcss/vite": "^4.3.5",
++        "@types/react": "^19.3.0",
++        "@types/react-dom": "^19.3.0",
+         "react": "19.3.1",
+-        "react-dom": "19.3.1"
++        "react-dom": "19.3.1",
++        "react-router-dom": "^7.18.5",
++        "tailwindcss": "^4.3.5"
+       },
+       "devDependencies": {
+         "@vitejs/plugin-react": "6.2.1",
++        "typescript": "^5.9.3",
+         "vite": "8.3.5"
+       }
+     },
++    "node_modules/@jridgewell/gen-mapping": {
++      "version": "0.3.13",
++      "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
++      "integrity": "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.5.0",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/remapping": {
++      "version": "2.3.5",
++      "resolved": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz",
++      "integrity": "sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/gen-mapping": "^0.3.5",
++        "@jridgewell/trace-mapping": "^0.3.24"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.31",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
++      "integrity": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.1.0",
++        "@jridgewell/sourcemap-codec": "^1.4.14"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.156.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.156.0.tgz",
+       "integrity": "sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==",
+-      "dev": true,
+       "license": "MIT",
+       "funding": {
+         "url": "https://github.com/sponsors/oxc-project"
+@@ -31,7 +81,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -48,7 +97,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -65,7 +113,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -82,7 +129,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -99,7 +145,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -116,7 +161,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -133,7 +177,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -153,7 +196,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -173,7 +215,6 @@
+       "cpu": [
+         "ppc64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -193,7 +234,6 @@
+       "cpu": [
+         "s390x"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -213,7 +253,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -233,7 +272,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -253,7 +291,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -270,7 +307,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -287,7 +323,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -301,9 +336,355 @@
+       "version": "1.0.1",
+       "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
+       "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
+-      "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@tailwindcss/node": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.5.tgz",
++      "integrity": "sha512-yT53FzV4ke0cr/BguDxhWMpm5MJu1O2muzk+tKw6lKHjODAsYArBbWwFbJiaksfzFv1tpkO9QHGzmfs1hJT66g==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/remapping": "^2.3.5",
++        "enhanced-resolve": "^5.24.5",
++        "jiti": "^2.7.0",
++        "lightningcss": "1.33.0",
++        "magic-string": "^1.1.0",
++        "source-map-js": "^1.2.1",
++        "tailwindcss": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.3.5.tgz",
++      "integrity": "sha512-PynqGLZsZvwM9tqD/CUxkOIfyd6K5elZ2MooauzJryP/UqXYgi3yYbtt3N0Xe+MHV/eFKPFQCEfIKAqlAS1CBg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20"
++      },
++      "optionalDependencies": {
++        "@tailwindcss/oxide-android-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-arm64": "4.3.5",
++        "@tailwindcss/oxide-darwin-x64": "4.3.5",
++        "@tailwindcss/oxide-freebsd-x64": "4.3.5",
++        "@tailwindcss/oxide-linux-arm-gnueabihf": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-arm64-musl": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-gnu": "4.3.5",
++        "@tailwindcss/oxide-linux-x64-musl": "4.3.5",
++        "@tailwindcss/oxide-wasm32-wasi": "4.3.5",
++        "@tailwindcss/oxide-win32-arm64-msvc": "4.3.5",
++        "@tailwindcss/oxide-win32-x64-msvc": "4.3.5"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-android-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-android-arm64/-/oxide-android-arm64-4.3.5.tgz",
++      "integrity": "sha512-Se0z5xMqcSQanJD1IYmO0cGpK3iv0fp3ZsIT7xRJZ1Da5PghvNoc46zz4jIQn+aan3dV9T8AermFNN9QPmsh0Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-arm64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.3.5.tgz",
++      "integrity": "sha512-UPrgTDuUbvmqGMZuCnmI3FKee/tYKzKdp00/kuB4oSGB213VYg8QTdF7lVhnPoBXq/mIfJ+ILoBFqNOboWcMwQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-darwin-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-darwin-x64/-/oxide-darwin-x64-4.3.5.tgz",
++      "integrity": "sha512-E+p7HEtjI0b8D7kbbWxH067cGui6d4c79COGko9fAPVE3rwc1E7ld2HFCbaG86AOGWS5VKQYqZOaf38ya4uxTQ==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-freebsd-x64": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-freebsd-x64/-/oxide-freebsd-x64-4.3.5.tgz",
++      "integrity": "sha512-yWEWcWyAG7rWOcTpJTjdhQ3pcaFY2h+0bqTRfgU3G2fz87ZU3AKdvdZKhslD+kyHnjBUWKvNdRYwIYC5dI1tIg==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm-gnueabihf": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm-gnueabihf/-/oxide-linux-arm-gnueabihf-4.3.5.tgz",
++      "integrity": "sha512-WmeVjtJhZlr+smpqcdR2kQkkn6arHIJnUIBxTO2EJcTLGY1ecVXNo2hbSn8xc0IH2aEtys936iMWKGyj0GaKnA==",
++      "cpu": [
++        "arm"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-gnu/-/oxide-linux-arm64-gnu-4.3.5.tgz",
++      "integrity": "sha512-DTCSyucc6ShMp1QMqV5R94Z7xlgNgUzkGmFF1rL5HH2Qjy4eSmEqy+YLGkqqYvWa4sILtgrBt1JjRKbneQtiFQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-arm64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-arm64-musl/-/oxide-linux-arm64-musl-4.3.5.tgz",
++      "integrity": "sha512-H9lsvO4x9E4nE4Hi8h7NHHw0O/kcVSu+iOyFHNGdYzazGgDjFHZbE6S3hQ8kMcbNXSBlMdNi67LV5EVqtpaJtw==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-gnu": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-gnu/-/oxide-linux-x64-gnu-4.3.5.tgz",
++      "integrity": "sha512-4uxQvtBvPuIdl13WfUBj9xMZHH14PtHZ8OZdtLmdyDtG66sCa1t599NZT+jagkUzRtWhuul1qRZQ1nAJscXN5g==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-linux-x64-musl": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-linux-x64-musl/-/oxide-linux-x64-musl-4.3.5.tgz",
++      "integrity": "sha512-0JQAzs7jwbA7O6+z/adU+Jk3AXwsu3npAhtr5escXS7TqEqWcaDV7qHuI+0Vy/KQRuVGnLQREcSJWYauyV3oqg==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.5.tgz",
++      "integrity": "sha512-OJhFmlEfdzMr+avACdi40RPtnkW0B6hXyxL/8r+tnEHBWZji36CYRjEXrrvgBmaYsD3oEOBqwYFRKsYvzFe7Bw==",
++      "bundleDependencies": [
++        "@napi-rs/wasm-runtime",
++        "@emnapi/core",
++        "@emnapi/runtime",
++        "@tybys/wasm-util",
++        "@emnapi/wasi-threads",
++        "tslib"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/core": "^1.11.3",
++        "@emnapi/runtime": "^1.11.3",
++        "@emnapi/wasi-threads": "^1.2.3",
++        "@napi-rs/wasm-runtime": "^1.2.2",
++        "@tybys/wasm-util": "^0.10.3",
++        "tslib": "^2.8.1"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.3",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.2.2",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.3"
++      },
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || >=23.5.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.3",
++        "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.3"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.3",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.5.tgz",
++      "integrity": "sha512-9o8jgthi+QE5eandnboiJT64VQfnIArfZzSTdgbhEK5aafdiu2jTW9Honi/mwYHxBZuH1vAC57IFyrh+0iK5Gg==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-win32-x64-msvc": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-x64-msvc/-/oxide-win32-x64-msvc-4.3.5.tgz",
++      "integrity": "sha512-XiKFfIy1RWe7qK4WqByxNW7Oz1/nkOy8o/BWhHminyV1PmpUd8Eedj5v2A8h2kpqeVlz6xRnwk9Fr/ZXNLcZfg==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 20"
++      }
++    },
++    "node_modules/@tailwindcss/vite": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/@tailwindcss/vite/-/vite-4.3.5.tgz",
++      "integrity": "sha512-BCNiY0a1ZjdOHVqw7kyb7U72BwfMF3dfUuN+tQsLWky/J5JOI/r7abibglXfygrZhVO/3u3V+E25kkKTeMkXaQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@tailwindcss/node": "4.3.5",
++        "@tailwindcss/oxide": "4.3.5",
++        "tailwindcss": "4.3.5"
++      },
++      "peerDependencies": {
++        "vite": "^5.2.0 || ^6 || ^7 || ^8"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "6.2.1",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.2.1.tgz",
+@@ -334,21 +715,51 @@
+         }
+       }
+     },
++    "node_modules/cookie": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/cookie/-/cookie-1.1.1.tgz",
++      "integrity": "sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/express"
++      }
++    },
++    "node_modules/csstype": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
++      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
++      "license": "MIT"
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+       "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
+-      "dev": true,
+       "license": "Apache-2.0",
+       "engines": {
+         "node": ">=8"
+       }
+     },
++    "node_modules/enhanced-resolve": {
++      "version": "5.26.1",
++      "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.1.tgz",
++      "integrity": "sha512-PPnnSJq3azKOIewXR/uppBV/6h98dprBJ/WaQ9Qgj10xX1lJLNfg+XShpbsrSqcDSy2yYYyhfXM1wWhftqgyzw==",
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "tapable": "^2.3.3"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/fdir": {
+       "version": "6.5.0",
+       "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+       "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
+-      "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=12.0.0"
+@@ -366,7 +777,6 @@
+       "version": "2.3.3",
+       "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+       "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+-      "dev": true,
+       "hasInstallScript": true,
+       "license": "MIT",
+       "optional": true,
+@@ -377,11 +787,25 @@
+         "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.11",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz",
++      "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
+     "node_modules/lightningcss": {
+       "version": "1.33.0",
+       "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+       "integrity": "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+-      "dev": true,
+       "license": "MPL-2.0",
+       "dependencies": {
+         "detect-libc": "^2.0.3"
+@@ -414,7 +838,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -435,7 +858,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -456,7 +878,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -477,7 +898,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -498,7 +918,6 @@
+       "cpu": [
+         "arm"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -519,7 +938,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -543,7 +961,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -567,7 +984,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "glibc"
+       ],
+@@ -591,7 +1007,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "libc": [
+         "musl"
+       ],
+@@ -615,7 +1030,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -636,7 +1050,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "dev": true,
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -650,11 +1063,19 @@
+         "url": "https://opencollective.com/parcel"
+       }
+     },
++    "node_modules/magic-string": {
++      "version": "1.4.5",
++      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.5.tgz",
++      "integrity": "sha512-oLLC2+YvQUfAa+vxoufE/yc1icb87M9iXIRqAoR/2EhE/8cb3SF/+Gi0c2By1B+5Vz2e2vQtUvHiu1+63Znh+w==",
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/sourcemap-codec": "^1.6.0"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+       "integrity": "sha512-uKdg2G3GNCKQn9byYOpxbGqrT2fGO5KRt5J/8b3pok8rT6qxGWF6hxMyJiEYtAf+FVyYuD9hRaDqX5uPFYJ4ZQ==",
+-      "dev": true,
+       "funding": [
+         {
+           "type": "github",
+@@ -673,14 +1094,12 @@
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
+       "integrity": "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==",
+-      "dev": true,
+       "license": "ISC"
+     },
+     "node_modules/picomatch": {
+       "version": "4.0.7",
+       "resolved": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz",
+       "integrity": "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==",
+-      "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=12"
+@@ -693,7 +1112,6 @@
+       "version": "8.5.32",
+       "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.32.tgz",
+       "integrity": "sha512-LJlKCCAUFKOuZxipUdYw1NzIITEsPcgyOG9LkvRJvuKj/bRzbuRY0ARXvL0pWGpsZvn8jku+LMep2eU0seHp8g==",
+-      "dev": true,
+       "funding": [
+         {
+           "type": "opencollective",
+@@ -739,11 +1157,48 @@
+         "react": "^19.3.1"
+       }
+     },
++    "node_modules/react-router": {
++      "version": "7.18.5",
++      "resolved": "https://registry.npmjs.org/react-router/-/react-router-7.18.5.tgz",
++      "integrity": "sha512-dTgvcXDOrLPrlLHrcZAqWveiK1hMSqN+rGAJzegP8HtmNkfRxOoshGWBNX3ZJ0cZjOHkRdlUJtaIhZMLLyGyPw==",
++      "license": "MIT",
++      "dependencies": {
++        "cookie": "^1.0.1",
++        "set-cookie-parser": "^2.6.0"
++      },
++      "engines": {
++        "node": ">=20.0.0"
++      },
++      "peerDependencies": {
++        "react": ">=18",
++        "react-dom": ">=18"
++      },
++      "peerDependenciesMeta": {
++        "react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/react-router-dom": {
++      "version": "7.18.5",
++      "resolved": "https://registry.npmjs.org/react-router-dom/-/react-router-dom-7.18.5.tgz",
++      "integrity": "sha512-9HcfDMU6JJ/fp6gJZYGwNE6RknVGS4kBjH1HkNw959mCJi70TVwdipQWv2FEol9uGpi+SZTFtVpJPtEQfayeOw==",
++      "license": "MIT",
++      "dependencies": {
++        "react-router": "7.18.5"
++      },
++      "engines": {
++        "node": ">=20.0.0"
++      },
++      "peerDependencies": {
++        "react": ">=18",
++        "react-dom": ">=18"
++      }
++    },
+     "node_modules/rolldown": {
+       "version": "1.2.16",
+       "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz",
+       "integrity": "sha512-bWvlMpFKiTfDKfnK7FC2MPgPeWCf/Kpwsq49ApdW+FQaBZb6O6dZ4MAPbPUjp7hYQrw/RobqCzn64BRrQecGHw==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "@oxc-project/types": "=0.156.0",
+@@ -779,21 +1234,44 @@
+       "integrity": "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==",
+       "license": "MIT"
+     },
++    "node_modules/set-cookie-parser": {
++      "version": "2.7.3",
++      "resolved": "https://registry.npmjs.org/set-cookie-parser/-/set-cookie-parser-2.7.3.tgz",
++      "integrity": "sha512-irZHtTqurLna57KQG/s+fzOwv/J6XSH4cs8M/vsrY3uCaQ3S6+QJguAH0WdN47SXlk82voMZ4naWMQf8fdEoIg==",
++      "license": "MIT"
++    },
+     "node_modules/source-map-js": {
+       "version": "1.2.2",
+       "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz",
+       "integrity": "sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==",
+-      "dev": true,
+       "license": "BSD-3-Clause",
+       "engines": {
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/tailwindcss": {
++      "version": "4.3.5",
++      "resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.3.5.tgz",
++      "integrity": "sha512-FcQk9BuffmEHJP2G0XmB2SplU1aLTI7j07Kunk+U74Ny+XiWOtzXz9aujFZ/avntw1e2cOv/3PkgzflQ7gX2vQ==",
++      "license": "MIT"
++    },
++    "node_modules/tapable": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/tapable/-/tapable-2.3.3.tgz",
++      "integrity": "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/webpack"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+       "integrity": "sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "fdir": "^6.5.0",
+@@ -806,11 +1284,24 @@
+         "url": "https://github.com/sponsors/SuperchupuDev"
+       }
+     },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
+     "node_modules/vite": {
+       "version": "8.3.5",
+       "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.5.tgz",
+       "integrity": "sha512-z1YpjieJ9g0ebTmQpLBv/oq9E3F9EIlOe+7LahW8SrE3LTiG3udBRUXQOlYXP9b+IC2q2phHeVxj9xGlw34OEQ==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "lightningcss": "^1.33.0",
+diff --git a/frontend/package.json b/frontend/package.json
+index 95015c2..cb39151 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -7,11 +7,17 @@
+     "build": "vite build"
+   },
+   "dependencies": {
++    "@tailwindcss/vite": "^4.3.5",
++    "@types/react": "^19.3.0",
++    "@types/react-dom": "^19.3.0",
+     "react": "19.3.1",
+-    "react-dom": "19.3.1"
++    "react-dom": "19.3.1",
++    "react-router-dom": "^7.18.5",
++    "tailwindcss": "^4.3.5"
+   },
+   "devDependencies": {
+     "@vitejs/plugin-react": "6.2.1",
++    "typescript": "^5.9.3",
+     "vite": "8.3.5"
+   }
+ }
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index fee9f48..1b4c8af 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,3 +1,25 @@
++import { Navigate, Route, Routes } from "react-router-dom";
++import { AuthProvider } from "./auth";
++import { AuthForm } from "./components/AuthForm";
++import Layout from "./components/Layout";
++import RecipeDetail from "./components/RecipeDetail";
++import RecipeForm from "./components/RecipeForm";
++import RecipeList from "./components/RecipeList";
++
+ export default function App() {
+-  return <h1>App</h1>;
++  return (
++    <AuthProvider>
++      <Layout>
++        <Routes>
++          <Route path="/" element={<RecipeList />} />
++          <Route path="/login" element={<AuthForm mode="login" />} />
++          <Route path="/register" element={<AuthForm mode="register" />} />
++          <Route path="/recipes/new" element={<RecipeForm />} />
++          <Route path="/recipes/:id" element={<RecipeDetail />} />
++          <Route path="/recipes/:id/edit" element={<RecipeForm />} />
++          <Route path="*" element={<Navigate to="/" replace />} />
++        </Routes>
++      </Layout>
++    </AuthProvider>
++  );
+ }
+diff --git a/frontend/src/api.ts b/frontend/src/api.ts
+new file mode 100644
+index 0000000..2c7a3ed
+--- /dev/null
++++ b/frontend/src/api.ts
+@@ -0,0 +1,116 @@
++export interface RecipeListItem {
++  id: number;
++  title: string;
++  category: string;
++  prep_minutes: number | null;
++  author: string;
++}
++
++export interface Recipe extends RecipeListItem {
++  ingredients: string[];
++  instructions: string;
++  servings: number | null;
++  created_at: string;
++}
++
++export interface RecipeListResponse {
++  items: RecipeListItem[];
++  total: number;
++  page: number;
++  page_size: number;
++}
++
++export interface RecipeInput {
++  title: string;
++  ingredients: string[];
++  instructions: string;
++  category: string;
++  prep_minutes: number | null;
++  servings: number | null;
++}
++
++const TOKEN_KEY = "recipebook_token";
++const USER_KEY = "recipebook_username";
++
++export function getToken(): string | null {
++  return localStorage.getItem(TOKEN_KEY);
++}
++
++export function getStoredUser(): string | null {
++  return localStorage.getItem(USER_KEY);
++}
++
++export function setSession(token: string, username: string) {
++  localStorage.setItem(TOKEN_KEY, token);
++  localStorage.setItem(USER_KEY, username);
++}
++
++export function clearSession() {
++  localStorage.removeItem(TOKEN_KEY);
++  localStorage.removeItem(USER_KEY);
++}
++
++async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
++  const headers: Record<string, string> = {
++    ...(options.headers as Record<string, string> | undefined),
++  };
++  if (options.body !== undefined) {
++    headers["Content-Type"] = "application/json";
++  }
++  const token = getToken();
++  if (token) {
++    headers["Authorization"] = `Bearer ${token}`;
++  }
++  const res = await fetch(`/api${path}`, { ...options, headers });
++  if (res.status === 204) {
++    return undefined as T;
++  }
++  const data = await res.json().catch(() => ({}));
++  if (!res.ok) {
++    throw new ApiError((data as { error?: string }).error ?? "Request failed.", res.status);
++  }
++  return data as T;
++}
++
++export class ApiError extends Error {
++  status: number;
++  constructor(message: string, status: number) {
++    super(message);
++    this.status = status;
++  }
++}
++
++export const api = {
++  register: (username: string, password: string) =>
++    request<{ username: string }>("/auth/register", {
++      method: "POST",
++      body: JSON.stringify({ username, password }),
++    }),
++  login: (username: string, password: string) =>
++    request<{ token: string }>("/auth/login", {
++      method: "POST",
++      body: JSON.stringify({ username, password }),
++    }),
++  listRecipes: (params: {
++    category?: string;
++    q?: string;
++    page?: number;
++    page_size?: number;
++  }) => {
++    const sp = new URLSearchParams();
++    if (params.category) sp.set("category", params.category);
++    if (params.q) sp.set("q", params.q);
++    if (params.page) sp.set("page", String(params.page));
++    if (params.page_size) sp.set("page_size", String(params.page_size));
++    const qs = sp.toString();
++    return request<RecipeListResponse>(`/recipes${qs ? `?${qs}` : ""}`);
++  },
++  getRecipe: (id: number) => request<Recipe>(`/recipes/${id}`),
++  createRecipe: (input: RecipeInput) =>
++    request<Recipe>("/recipes", { method: "POST", body: JSON.stringify(input) }),
++  updateRecipe: (id: number, input: RecipeInput) =>
++    request<Recipe>(`/recipes/${id}`, { method: "PUT", body: JSON.stringify(input) }),
++  deleteRecipe: (id: number) =>
++    request<void>(`/recipes/${id}`, { method: "DELETE" }),
++  categories: () => request<{ categories: string[] }>("/categories"),
++};
+diff --git a/frontend/src/auth.tsx b/frontend/src/auth.tsx
+new file mode 100644
+index 0000000..a121522
+--- /dev/null
++++ b/frontend/src/auth.tsx
+@@ -0,0 +1,52 @@
++import {
++  createContext,
++  useCallback,
++  useContext,
++  useEffect,
++  useState,
++  type ReactNode,
++} from "react";
++import { clearSession, getStoredUser, getToken, setSession } from "./api";
++
++interface AuthContextValue {
++  username: string | null;
++  isAuthed: boolean;
++  signIn: (token: string, username: string) => void;
++  signOut: () => void;
++}
++
++const AuthContext = createContext<AuthContextValue | undefined>(undefined);
++
++export function AuthProvider({ children }: { children: ReactNode }) {
++  const [username, setUsername] = useState<string | null>(() => {
++    return getToken() ? getStoredUser() : null;
++  });
++
++  const signIn = useCallback((token: string, username: string) => {
++    setSession(token, username);
++    setUsername(username);
++  }, []);
++
++  const signOut = useCallback(() => {
++    clearSession();
++    setUsername(null);
++  }, []);
++
++  useEffect(() => {
++    if (!getToken()) setUsername(null);
++  }, []);
++
++  return (
++    <AuthContext.Provider
++      value={{ username, isAuthed: username !== null, signIn, signOut }}
++    >
++      {children}
++    </AuthContext.Provider>
++  );
++}
++
++export function useAuth(): AuthContextValue {
++  const ctx = useContext(AuthContext);
++  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
++  return ctx;
++}
+diff --git a/frontend/src/components/AuthForm.tsx b/frontend/src/components/AuthForm.tsx
+new file mode 100644
+index 0000000..af742dd
+--- /dev/null
++++ b/frontend/src/components/AuthForm.tsx
+@@ -0,0 +1,105 @@
++import { useEffect, useState, type FormEvent } from "react";
++import { Link, useNavigate } from "react-router-dom";
++import { api, ApiError } from "../api";
++import { useAuth } from "../auth";
++
++export function AuthForm({ mode }: { mode: "login" | "register" }) {
++  const isLogin = mode === "login";
++  const { signIn } = useAuth();
++  const navigate = useNavigate();
++  const [username, setUsername] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(false);
++
++  useEffect(() => setError(null), [mode]);
++
++  async function handleSubmit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setLoading(true);
++    try {
++      if (isLogin) {
++        const { token } = await api.login(username, password);
++        signIn(token, username);
++        navigate("/");
++      } else {
++        await api.register(username, password);
++        const { token } = await api.login(username, password);
++        signIn(token, username);
++        navigate("/");
++      }
++    } catch (err) {
++      setError(err instanceof ApiError ? err.message : "Something went wrong.");
++    } finally {
++      setLoading(false);
++    }
++  }
++
++  return (
++    <div className="mx-auto max-w-sm">
++      <h1 className="mb-6 text-2xl font-bold">
++        {isLogin ? "Sign in" : "Create account"}
++      </h1>
++      <form
++        onSubmit={handleSubmit}
++        className="space-y-4 rounded-lg border border-stone-200 bg-white p-6 shadow-sm"
++      >
++        <div>
++          <label className="mb-1 block text-sm font-medium" htmlFor="username">
++            Username
++          </label>
++          <input
++            id="username"
++            className="w-full rounded-md border border-stone-300 px-3 py-2 focus:border-amber-500 focus:outline-none"
++            value={username}
++            onChange={(e) => setUsername(e.target.value)}
++            autoComplete="username"
++          />
++        </div>
++        <div>
++          <label className="mb-1 block text-sm font-medium" htmlFor="password">
++            Password
++          </label>
++          <input
++            id="password"
++            type="password"
++            className="w-full rounded-md border border-stone-300 px-3 py-2 focus:border-amber-500 focus:outline-none"
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            autoComplete={isLogin ? "current-password" : "new-password"}
++          />
++        </div>
++        {error && (
++          <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++            {error}
++          </p>
++        )}
++        <button
++          type="submit"
++          disabled={loading}
++          className="w-full rounded-md bg-amber-600 px-4 py-2 font-medium text-white hover:bg-amber-700 disabled:opacity-50"
++        >
++          {loading ? "Please wait…" : isLogin ? "Sign in" : "Register"}
++        </button>
++        <p className="text-center text-sm text-stone-600">
++          {isLogin ? (
++            <>
++              No account?{" "}
++              <Link to="/register" className="text-amber-700 hover:underline">
++                Register
++              </Link>
++            </>
++          ) : (
++            <>
++              Already have an account?{" "}
++              <Link to="/login" className="text-amber-700 hover:underline">
++                Sign in
++              </Link>
++            </>
++          )}
++        </p>
++      </form>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/Layout.tsx b/frontend/src/components/Layout.tsx
+new file mode 100644
+index 0000000..d542bee
+--- /dev/null
++++ b/frontend/src/components/Layout.tsx
+@@ -0,0 +1,59 @@
++import { Link, useNavigate } from "react-router-dom";
++import { useAuth } from "../auth";
++
++export default function Layout({ children }: { children: React.ReactNode }) {
++  const { username, signOut } = useAuth();
++  const navigate = useNavigate();
++
++  return (
++    <div className="min-h-screen bg-stone-100 text-stone-900">
++      <header className="bg-amber-600 text-white shadow">
++        <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
++          <Link to="/" className="text-xl font-bold tracking-tight">
++            Recipe Book
++          </Link>
++          <div className="flex items-center gap-3">
++            {username ? (
++              <>
++                <span className="text-sm text-amber-100">
++                  Signed in as <strong className="text-white">{username}</strong>
++                </span>
++                <Link
++                  to="/recipes/new"
++                  className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-amber-700 hover:bg-amber-50"
++                >
++                  Add recipe
++                </Link>
++                <button
++                  onClick={() => {
++                    signOut();
++                    navigate("/");
++                  }}
++                  className="rounded-md border border-amber-300 px-3 py-1.5 text-sm font-medium hover:bg-amber-500"
++                >
++                  Sign out
++                </button>
++              </>
++            ) : (
++              <>
++                <Link
++                  to="/login"
++                  className="rounded-md px-3 py-1.5 text-sm font-medium hover:bg-amber-500"
++                >
++                  Sign in
++                </Link>
++                <Link
++                  to="/register"
++                  className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-amber-700 hover:bg-amber-50"
++                >
++                  Register
++                </Link>
++              </>
++            )}
++          </div>
++        </div>
++      </header>
++      <main className="mx-auto max-w-5xl px-4 py-8">{children}</main>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/RecipeDetail.tsx b/frontend/src/components/RecipeDetail.tsx
+new file mode 100644
+index 0000000..148d5f9
+--- /dev/null
++++ b/frontend/src/components/RecipeDetail.tsx
+@@ -0,0 +1,135 @@
++import { useEffect, useState } from "react";
++import { Link, useNavigate, useParams } from "react-router-dom";
++import { api, type Recipe } from "../api";
++import { useAuth } from "../auth";
++
++export default function RecipeDetail() {
++  const { id } = useParams();
++  const { username } = useAuth();
++  const navigate = useNavigate();
++  const [recipe, setRecipe] = useState<Recipe | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [confirming, setConfirming] = useState(false);
++  const [deleting, setDeleting] = useState(false);
++
++  useEffect(() => {
++    let cancelled = false;
++    api
++      .getRecipe(Number(id))
++      .then((r) => {
++        if (!cancelled) setRecipe(r);
++      })
++      .catch(() => {
++        if (!cancelled) setError("Recipe not found.");
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [id]);
++
++  if (error) {
++    return <p className="text-stone-500">{error}</p>;
++  }
++  if (!recipe) {
++    return <p className="text-stone-500">Loading…</p>;
++  }
++
++  const isAuthor = username !== null && username === recipe.author;
++
++  async function handleDelete() {
++    setDeleting(true);
++    try {
++      await api.deleteRecipe(recipe!.id);
++      navigate("/");
++    } catch {
++      setError("Could not delete the recipe.");
++      setDeleting(false);
++    }
++  }
++
++  return (
++    <div>
++      <Link to="/" className="text-sm text-amber-700 hover:underline">
++        ← Back to recipes
++      </Link>
++      <div className="mt-4 rounded-lg border border-stone-200 bg-white p-6 shadow-sm">
++        <div className="flex items-start justify-between gap-4">
++          <div>
++            <h1 className="text-3xl font-bold">{recipe.title}</h1>
++            <p className="mt-2 text-sm text-stone-600">
++              <span className="mr-2 rounded bg-amber-100 px-2 py-0.5 text-amber-800">
++                {recipe.category}
++              </span>
++              {recipe.prep_minutes != null && (
++                <span className="mr-2">Prep: {recipe.prep_minutes} min</span>
++              )}
++              {recipe.servings != null && <span>Serves {recipe.servings}</span>}
++            </p>
++            <p className="mt-1 text-sm text-stone-500">by {recipe.author}</p>
++          </div>
++          {isAuthor && (
++            <div className="flex gap-2">
++              <Link
++                to={`/recipes/${recipe.id}/edit`}
++                className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
++              >
++                Edit
++              </Link>
++              <button
++                onClick={() => setConfirming(true)}
++                className="rounded-md border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50"
++              >
++                Delete
++              </button>
++            </div>
++          )}
++        </div>
++
++        <div className="mt-6 grid grid-cols-1 gap-8 md:grid-cols-2">
++          <section>
++            <h2 className="mb-3 text-lg font-semibold">Ingredients</h2>
++            <ul className="list-inside list-disc space-y-1">
++              {recipe.ingredients.map((ing, i) => (
++                <li key={i}>{ing}</li>
++              ))}
++            </ul>
++          </section>
++          <section>
++            <h2 className="mb-3 text-lg font-semibold">Instructions</h2>
++            <p className="whitespace-pre-line">{recipe.instructions}</p>
++          </section>
++        </div>
++      </div>
++
++      {confirming && (
++        <div className="fixed inset-0 flex items-center justify-center bg-black/40 p-4">
++          <div className="w-full max-w-sm rounded-lg bg-white p-6 shadow">
++            <h3 className="text-lg font-semibold">Delete recipe?</h3>
++            <p className="mt-2 text-sm text-stone-600">
++              This will permanently delete “{recipe.title}”. This cannot be undone.
++            </p>
++            {error && <p className="mt-2 text-sm text-red-700">{error}</p>}
++            <div className="mt-4 flex justify-end gap-2">
++              <button
++                onClick={() => {
++                  setConfirming(false);
++                  setError(null);
++                }}
++                className="rounded-md border border-stone-300 px-3 py-1.5 text-sm"
++              >
++                Cancel
++              </button>
++              <button
++                onClick={handleDelete}
++                disabled={deleting}
++                className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
++              >
++                {deleting ? "Deleting…" : "Delete"}
++              </button>
++            </div>
++          </div>
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/src/components/RecipeForm.tsx b/frontend/src/components/RecipeForm.tsx
+new file mode 100644
+index 0000000..7129f46
+--- /dev/null
++++ b/frontend/src/components/RecipeForm.tsx
+@@ -0,0 +1,262 @@
++import { useEffect, useState, type FormEvent } from "react";
++import { useNavigate, useParams } from "react-router-dom";
++import { api, ApiError, type RecipeInput } from "../api";
++import { useAuth } from "../auth";
++
++interface FormState {
++  title: string;
++  category: string;
++  prep_minutes: string;
++  servings: string;
++  instructions: string;
++  ingredients: string[];
++}
++
++function toInput(state: FormState): RecipeInput {
++  return {
++    title: state.title,
++    category: state.category,
++    prep_minutes: state.prep_minutes.trim() === "" ? null : Number(state.prep_minutes),
++    servings: state.servings.trim() === "" ? null : Number(state.servings),
++    instructions: state.instructions,
++    ingredients: state.ingredients.map((s) => s.trim()).filter((s) => s !== ""),
++  };
++}
++
++export default function RecipeForm() {
++  const { id } = useParams();
++  const editing = id !== undefined;
++  const { username } = useAuth();
++  const navigate = useNavigate();
++
++  const [categories, setCategories] = useState<string[]>([
++    "Breakfast",
++    "Main",
++    "Dessert",
++    "Soup",
++    "Salad",
++  ]);
++  const [state, setState] = useState<FormState>({
++    title: "",
++    category: "",
++    prep_minutes: "",
++    servings: "",
++    instructions: "",
++    ingredients: [""],
++  });
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(false);
++  const [ready, setReady] = useState(!editing);
++
++  useEffect(() => {
++    api.categories().then((r) => {
++      if (r.categories.length) setCategories(r.categories);
++    });
++  }, []);
++
++  useEffect(() => {
++    if (!editing) return;
++    let cancelled = false;
++    api
++      .getRecipe(Number(id))
++      .then((r) => {
++        if (cancelled) return;
++        if (username === null || r.author !== username) {
++          setError("You may only edit your own recipes.");
++          return;
++        }
++        setState({
++          title: r.title,
++          category: r.category,
++          prep_minutes: r.prep_minutes != null ? String(r.prep_minutes) : "",
++          servings: r.servings != null ? String(r.servings) : "",
++          instructions: r.instructions,
++          ingredients: r.ingredients.length ? r.ingredients : [""],
++        });
++        setReady(true);
++      })
++      .catch(() => {
++        if (!cancelled) setError("Recipe not found.");
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [id, editing, username]);
++
++  function setField<K extends keyof FormState>(key: K, value: FormState[K]) {
++    setState((s) => ({ ...s, [key]: value }));
++  }
++
++  function setIngredient(index: number, value: string) {
++    setState((s) => {
++      const next = [...s.ingredients];
++      next[index] = value;
++      return { ...s, ingredients: next };
++    });
++  }
++
++  function addIngredient() {
++    setState((s) => ({ ...s, ingredients: [...s.ingredients, ""] }));
++  }
++
++  function removeIngredient(index: number) {
++    setState((s) => ({
++      ...s,
++      ingredients: s.ingredients.filter((_, i) => i !== index),
++    }));
++  }
++
++  async function handleSubmit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setLoading(true);
++    const input = toInput(state);
++    try {
++      if (editing) {
++        await api.updateRecipe(Number(id), input);
++      } else {
++        await api.createRecipe(input);
++      }
++      navigate("/");
++    } catch (err) {
++      setError(err instanceof ApiError ? err.message : "Something went wrong.");
++      setLoading(false);
++    }
++  }
++
++  if (!username) {
++    return (
++      <p className="text-stone-600">
++        You must <span className="font-medium">sign in</span> to{" "}
++        {editing ? "edit" : "add"} recipes.
++      </p>
++    );
++  }
++
++  if (error && !ready) {
++    return <p className="text-red-700">{error}</p>;
++  }
++
++  if (!ready) {
++    return <p className="text-stone-500">Loading…</p>;
++  }
++
++  return (
++    <div className="mx-auto max-w-2xl">
++      <h1 className="mb-6 text-2xl font-bold">
++        {editing ? "Edit recipe" : "Add a recipe"}
++      </h1>
++      <form onSubmit={handleSubmit} className="space-y-4">
++        <div>
++          <label className="mb-1 block text-sm font-medium">Title</label>
++          <input
++            value={state.title}
++            onChange={(e) => setField("title", e.target.value)}
++            className="w-full rounded-md border border-stone-300 px-3 py-2 focus:border-amber-500 focus:outline-none"
++          />
++        </div>
++
++        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
++          <div>
++            <label className="mb-1 block text-sm font-medium">Category</label>
++            <input
++              list="category-options"
++              value={state.category}
++              onChange={(e) => setField("category", e.target.value)}
++              className="w-full rounded-md border border-stone-300 px-3 py-2 focus:border-amber-500 focus:outline-none"
++            />
++            <datalist id="category-options">
++              {categories.map((c) => (
++                <option key={c} value={c} />
++              ))}
++            </datalist>
++          </div>
++          <div>
++            <label className="mb-1 block text-sm font-medium">Prep (minutes)</label>
++            <input
++              type="number"
++              min="0"
++              value={state.prep_minutes}
++              onChange={(e) => setField("prep_minutes", e.target.value)}
++              className="w-full rounded-md border border-stone-300 px-3 py-2 focus:border-amber-500 focus:outline-none"
++            />
++          </div>
++          <div>
++            <label className="mb-1 block text-sm font-medium">Servings</label>
++            <input
++              type="number"
++              min="0"
++              value={state.servings}
++              onChange={(e) => setField("servings", e.target.value)}
++              className="w-full rounded-md border border-stone-300 px-3 py-2 focus:border-amber-500 focus:outline-none"
++            />
++          </div>
++        </div>
++
++        <div>
++          <label className="mb-1 block text-sm font-medium">Ingredients</label>
++          <div className="space-y-2">
++            {state.ingredients.map((ing, i) => (
++              <div key={i} className="flex gap-2">
++                <input
++                  value={ing}
++                  onChange={(e) => setIngredient(i, e.target.value)}
++                  placeholder="Ingredient"
++                  className="flex-1 rounded-md border border-stone-300 px-3 py-2 focus:border-amber-500 focus:outline-none"
++                />
++                <button
++                  type="button"
++                  onClick={() => removeIngredient(i)}
++                  disabled={state.ingredients.length === 1}
++                  className="rounded-md border border-stone-300 px-3 text-stone-600 hover:bg-stone-100 disabled:opacity-40"
++                >
++                  Remove
++                </button>
++              </div>
++            ))}
++          </div>
++          <button
++            type="button"
++            onClick={addIngredient}
++            className="mt-2 text-sm text-amber-700 hover:underline"
++          >
++            + Add ingredient
++          </button>
++        </div>
++
++        <div>
++          <label className="mb-1 block text-sm font-medium">Instructions</label>
++          <textarea
++            value={state.instructions}
++            onChange={(e) => setField("instructions", e.target.value)}
++            rows={6}
++            className="w-full rounded-md border border-stone-300 px-3 py-2 focus:border-amber-500 focus:outline-none"
++          />
++        </div>
++
++        {error && (
++          <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
++            {error}
++          </p>
++        )}
++
++        <div className="flex gap-2">
++          <button
++            type="submit"
++            disabled={loading}
++            className="rounded-md bg-amber-600 px-4 py-2 font-medium text-white hover:bg-amber-700 disabled:opacity-50"
++          >
++            {loading ? "Saving…" : editing ? "Save changes" : "Add recipe"}
++          </button>
++          <button
++            type="button"
++            onClick={() => navigate(-1)}
++            className="rounded-md border border-stone-300 px-4 py-2 text-stone-700 hover:bg-stone-100"
++          >
++            Cancel
++          </button>
++        </div>
++      </form>
++    </div>
++  );
++}
+diff --git a/frontend/src/components/RecipeList.tsx b/frontend/src/components/RecipeList.tsx
+new file mode 100644
+index 0000000..c8c6c6c
+--- /dev/null
++++ b/frontend/src/components/RecipeList.tsx
+@@ -0,0 +1,140 @@
++import { useEffect, useState } from "react";
++import { Link, useSearchParams } from "react-router-dom";
++import { api, type RecipeListItem } from "../api";
++
++const PAGE_SIZE = 8;
++
++export default function RecipeList() {
++  const [searchParams, setSearchParams] = useSearchParams();
++  const category = searchParams.get("category") ?? "";
++  const q = searchParams.get("q") ?? "";
++  const page = Number(searchParams.get("page") ?? "1") || 1;
++
++  const [items, setItems] = useState<RecipeListItem[]>([]);
++  const [total, setTotal] = useState(0);
++  const [categories, setCategories] = useState<string[]>([]);
++  const [searchInput, setSearchInput] = useState(q);
++  const [loading, setLoading] = useState(true);
++
++  useEffect(() => {
++    api.categories().then((r) => setCategories(r.categories)).catch(() => {});
++  }, []);
++
++  useEffect(() => {
++    let cancelled = false;
++    setLoading(true);
++    api
++      .listRecipes({ category, q, page, page_size: PAGE_SIZE })
++      .then((res) => {
++        if (cancelled) return;
++        setItems(res.items);
++        setTotal(res.total);
++      })
++      .finally(() => {
++        if (!cancelled) setLoading(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [category, q, page]);
++
++  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
++
++  function updateParams(next: Record<string, string | null>) {
++    const sp = new URLSearchParams(searchParams);
++    for (const [key, value] of Object.entries(next)) {
++      if (value === null || value === "") sp.delete(key);
++      else sp.set(key, value);
++    }
++    setSearchParams(sp);
++  }
++
++  return (
++    <div>
++      <div className="mb-6 flex flex-wrap items-center gap-3">
++        <h1 className="mr-auto text-2xl font-bold">Recipes</h1>
++        <select
++          value={category}
++          onChange={(e) => updateParams({ category: e.target.value, page: null })}
++          className="rounded-md border border-stone-300 bg-white px-3 py-2"
++        >
++          <option value="">All categories</option>
++          {categories.map((c) => (
++            <option key={c} value={c}>
++              {c}
++            </option>
++          ))}
++        </select>
++        <form
++          onSubmit={(e) => {
++            e.preventDefault();
++            updateParams({ q: searchInput, page: null });
++          }}
++          className="flex gap-2"
++        >
++          <input
++            value={searchInput}
++            onChange={(e) => setSearchInput(e.target.value)}
++            placeholder="Search titles…"
++            className="rounded-md border border-stone-300 px-3 py-2"
++          />
++          <button
++            type="submit"
++            className="rounded-md bg-amber-600 px-4 py-2 font-medium text-white hover:bg-amber-700"
++          >
++            Search
++          </button>
++        </form>
++      </div>
++
++      {loading ? (
++        <p className="text-stone-500">Loading…</p>
++      ) : items.length === 0 ? (
++        <p className="text-stone-500">No recipes found.</p>
++      ) : (
++        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
++          {items.map((r) => (
++            <Link
++              key={r.id}
++              to={`/recipes/${r.id}`}
++              className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm transition hover:shadow-md"
++            >
++              <h2 className="text-lg font-semibold">{r.title}</h2>
++              <p className="mt-1 text-sm text-stone-600">
++                <span className="mr-2 inline-block rounded bg-amber-100 px-2 py-0.5 text-amber-800">
++                  {r.category}
++                </span>
++                {r.prep_minutes != null && (
++                  <span className="mr-2">{r.prep_minutes} min</span>
++                )}
++              </p>
++              <p className="mt-2 text-sm text-stone-500">by {r.author}</p>
++            </Link>
++          ))}
++        </div>
++      )}
++
++      {totalPages > 1 && (
++        <div className="mt-8 flex items-center justify-center gap-3">
++          <button
++            disabled={page <= 1}
++            onClick={() => updateParams({ page: String(page - 1) })}
++            className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm disabled:opacity-40"
++          >
++            Previous
++          </button>
++          <span className="text-sm text-stone-600">
++            Page {page} of {totalPages}
++          </span>
++          <button
++            disabled={page >= totalPages}
++            onClick={() => updateParams({ page: String(page + 1) })}
++            className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm disabled:opacity-40"
++          >
++            Next
++          </button>
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+new file mode 100644
+index 0000000..f1d8c73
+--- /dev/null
++++ b/frontend/src/index.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+diff --git a/frontend/src/main.tsx b/frontend/src/main.tsx
+index 7384c17..b1e2aee 100644
+--- a/frontend/src/main.tsx
++++ b/frontend/src/main.tsx
+@@ -1,4 +1,10 @@
+ import { createRoot } from "react-dom/client";
++import { BrowserRouter } from "react-router-dom";
+ import App from "./App";
++import "./index.css";
+ 
+-createRoot(document.getElementById("root")!).render(<App />);
++createRoot(document.getElementById("root")!).render(
++  <BrowserRouter>
++    <App />
++  </BrowserRouter>
++);
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..2253e4a
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,16 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "jsx": "react-jsx",
++    "strict": true,
++    "skipLibCheck": true,
++    "noEmit": true,
++    "esModuleInterop": true,
++    "forceConsistentCasingInFileNames": true,
++    "isolatedModules": true
++  },
++  "include": ["src"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4e2c81e..775ad4a 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,7 +1,8 @@
+ import react from "@vitejs/plugin-react";
++import tailwindcss from "@tailwindcss/vite";
+ import { defineConfig } from "vite";
+ 
+ export default defineConfig({
+-  plugins: [react()],
++  plugins: [react(), tailwindcss()],
+   server: { proxy: { "/api": "http://localhost:8000" } },
+ });

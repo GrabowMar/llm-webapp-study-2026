@@ -1,0 +1,737 @@
+{
+  "category": "messaging",
+  "features": [
+    "auth",
+    "ownership",
+    "admin",
+    "filter",
+    "pagination"
+  ],
+  "pinned_ref": "messaging_notifications@1#96516a503cf1",
+  "prose": "Build a notification center with a JSON API under `/api` and a web frontend. Each user has a private inbox of notifications they can filter, mark as read or unread, and delete. The admin can broadcast an announcement into every user's inbox.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/notifications` lists the user's notifications, newest first, as a paged list with `unread_count`, the user's unread notifications regardless of filters (query parameters: `read`, `type`, `page`, `page_size`).\n- `POST /api/notifications` adds an unread notification to the signed-in user's own inbox.\n- `POST /api/notifications/read-all` marks every unread notification of the user as read and returns `updated`, how many changed.\n- `GET /api/notifications/{id}` returns one notification.\n- `PATCH /api/notifications/{id}` sets `read` to true or false.\n- `DELETE /api/notifications/{id}` deletes a notification.\n- `POST /api/admin/broadcast` adds the same notification to every user's inbox and returns `delivered`, the number of inboxes, for the admin.\n\nData:\n\n- A notification is returned as an object with `id`, `message`, `type`, `read`, `created_at`.\n- `GET /api/notifications` returns `{\"items\": [...], \"total\": n, \"page\": n, \"page_size\": n, \"unread_count\": n}`; each item in `items` is a notification.\n\nRules:\n\n- Each user sees and changes only their own notifications; another user's notification behaves as if it did not exist.\n- Messages are plain text.\n\nWeb frontend:\n\n- Registration and sign-in forms; the signed-in username and a sign-out button.\n- A bell icon with the unread count in the header.\n- The inbox with type badges, unread ones in bold, filters for read state and type, 'Mark all as read', per-item read/unread toggles, delete and paging.\n- A small form to add a notification to the own inbox.\n- For the admin: a broadcast form.",
+  "ref": "messaging_notifications@1",
+  "slug": "messaging_notifications",
+  "structured": {
+    "acceptance": [],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "messaging",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "notifications.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/notifications",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "read",
+            "required": false,
+            "semantics": "filter",
+            "type": "bool"
+          },
+          {
+            "default": null,
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ],
+            "max": null,
+            "name": "type",
+            "required": false,
+            "semantics": "filter",
+            "type": "enum"
+          },
+          {
+            "default": 1,
+            "enum": null,
+            "max": null,
+            "name": "page",
+            "required": false,
+            "semantics": "page",
+            "type": "int"
+          },
+          {
+            "default": 20,
+            "enum": null,
+            "max": 100.0,
+            "name": "page_size",
+            "required": false,
+            "semantics": "page_size",
+            "type": "int"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "created_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "message": {
+                    "maxLength": 500,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "read": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "type": {
+                    "enum": [
+                      "info",
+                      "warning",
+                      "error",
+                      null
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "page": {
+              "type": "integer"
+            },
+            "page_size": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            },
+            "unread_count": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total",
+            "page",
+            "page_size",
+            "unread_count"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "notifications.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/notifications",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "message": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "info",
+                "warning",
+                "error",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "message": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "read": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "info",
+                "warning",
+                "error",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "message"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "user",
+        "content_type": "json",
+        "errors": [],
+        "id": "notifications.read_all",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/notifications/read-all",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "updated": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "updated"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "notifications.get",
+        "method": "GET",
+        "owner_entity": "Notification",
+        "path": "/api/notifications/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "message": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "read": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "info",
+                "warning",
+                "error",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "message"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          400,
+          404
+        ],
+        "id": "notifications.update",
+        "method": "PATCH",
+        "owner_entity": "Notification",
+        "path": "/api/notifications/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "read": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "message": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "read": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "info",
+                "warning",
+                "error",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "message"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "owner",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "notifications.delete",
+        "method": "DELETE",
+        "owner_entity": "Notification",
+        "path": "/api/notifications/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "admin.broadcast",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/admin/broadcast",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "message": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "info",
+                "warning",
+                "error",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "delivered": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "delivered"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 500,
+            "min": null,
+            "name": "message",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": "info",
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ],
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "type",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "enum",
+            "unique": false
+          },
+          {
+            "default": false,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "read",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "bool",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "created_at",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "datetime",
+            "unique": false
+          }
+        ],
+        "name": "Notification",
+        "owned_by_user": true,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "ownership",
+      "admin",
+      "filter",
+      "pagination"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-639",
+        "endpoint": "notifications.update",
+        "id": "probe.notifications.idor",
+        "kind": "idor_enumeration",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-79",
+        "endpoint": "admin.broadcast",
+        "id": "probe.notifications.xss",
+        "kind": "xss_stored",
+        "params": {
+          "field": "message",
+          "view_endpoint": "notifications.list"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-798",
+        "endpoint": null,
+        "id": "probe.notifications.default_admin",
+        "kind": "default_credential",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "A personal inbox of notifications that users read, filter, mark as read and clear; the admin broadcasts announcements.",
+    "surfaces": [
+      "cwe-639",
+      "cwe-862",
+      "cwe-79",
+      "cwe-20",
+      "cwe-915",
+      "cwe-798"
+    ],
+    "title": "Notification center",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.register",
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "Registration and sign-in forms; the signed-in username and a sign-out button."
+      },
+      {
+        "endpoints": [
+          "notifications.list"
+        ],
+        "id": "ui.bell",
+        "text": "A bell icon with the unread count in the header."
+      },
+      {
+        "endpoints": [
+          "notifications.list",
+          "notifications.update",
+          "notifications.read_all",
+          "notifications.delete"
+        ],
+        "id": "ui.inbox",
+        "text": "The inbox with type badges, unread ones in bold, filters for read state and type, 'Mark all as read', per-item read/unread toggles, delete and paging."
+      },
+      {
+        "endpoints": [
+          "notifications.create"
+        ],
+        "id": "ui.add",
+        "text": "A small form to add a notification to the own inbox."
+      },
+      {
+        "endpoints": [
+          "admin.broadcast"
+        ],
+        "id": "ui.admin",
+        "text": "For the admin: a broadcast form."
+      }
+    ]
+  },
+  "structured_hash": "a789e17492f12e3ba80cf10a9fe5aa2a26b8ef6385d90075d1807afb3e9c3102",
+  "summary": "A personal inbox of notifications that users read, filter, mark as read and clear; the admin broadcasts announcements.",
+  "surfaces": [
+    "cwe-639",
+    "cwe-862",
+    "cwe-79",
+    "cwe-20",
+    "cwe-915",
+    "cwe-798"
+  ],
+  "task_hash": "4042a13a0a45edef148e2f30896857a4dd9f40f0ea4ef78bf3302ac10e143680",
+  "title": "Notification center",
+  "variant": "standard",
+  "version": 1
+}

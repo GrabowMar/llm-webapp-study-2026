@@ -1,0 +1,775 @@
+{
+  "category": "geolocation",
+  "features": [
+    "auth",
+    "admin",
+    "search",
+    "geo"
+  ],
+  "pinned_ref": "geolocation_store_list@1#be4da50837a8",
+  "prose": "Build a store finder with a JSON API under `/api` and a web frontend. Anyone can browse stores and search near a location; the admin maintains the store directory.\n\nAPI:\n\n- `POST /api/auth/register` creates an account from a `username` and a `password`; `POST /api/auth/login` signs in with the `username` and `password`. How a signed-in user is recognised on later requests is described in the account section.\n- `GET /api/stores` lists stores sorted by name; with `lat` and `lng` it keeps the stores within `radius` kilometres, nearest first, with their `distance_km` (query parameters: `q`, `lat`, `lng`, `radius`).\n- `GET /api/stores/{id}` returns one store.\n- `POST /api/admin/stores` adds a store, for the admin.\n- `PUT /api/admin/stores/{id}` replaces a store's fields, for the admin; an omitted `phone` is cleared.\n- `DELETE /api/admin/stores/{id}` deletes a store, for the admin.\n\nData:\n\n- A store is returned as an object with `id`, `name`, `address`, `phone`, `latitude`, `longitude`, `distance_km`.\n- `GET /api/stores` returns `{\"items\": [...]}`; each item in `items` is a store.\n\nRules:\n\n- Only the admin changes the directory; everyone may read it.\n- On first start the directory holds 8 sample stores across a few cities.\n\nWeb frontend:\n\n- A sign-in form for the admin.\n- The store list with name, address and phone and a search box.\n- A 'Use my location' button that lists nearby stores with their distance and a radius selector; if permission is denied the plain list stays with a short note.\n- A simple plot that places the listed stores (and the visitor, when known) by latitude and longitude, drawn by the page itself without external map tiles.\n- For the admin: add and edit forms that show the API's validation messages, and delete after confirmation.",
+  "ref": "geolocation_store_list@1",
+  "slug": "geolocation_store_list",
+  "structured": {
+    "acceptance": [
+      {
+        "actor": "user_a",
+        "category": "filter",
+        "depends_on": [],
+        "endpoint": "stores.list",
+        "expect": {
+          "header_contains": null,
+          "json_contains": {
+            "items": [
+              {
+                "name": "zz Near"
+              },
+              {
+                "name": "zz Far"
+              }
+            ]
+          },
+          "json_schema": null,
+          "max_ms": null,
+          "status": 200
+        },
+        "id": "stores.near.sorted",
+        "request": {
+          "files": null,
+          "form": null,
+          "json": null,
+          "method": "GET",
+          "path": "/api/stores",
+          "query": {
+            "lat": 10,
+            "lng": 10,
+            "radius": 100
+          }
+        },
+        "restart_before": false,
+        "setup": [
+          {
+            "actor": "admin",
+            "capture": {},
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "address": "x",
+                "latitude": 10.5,
+                "longitude": 10.5,
+                "name": "zz Far"
+              },
+              "method": "POST",
+              "path": "/api/admin/stores",
+              "query": {}
+            }
+          },
+          {
+            "actor": "admin",
+            "capture": {},
+            "expect_status": 201,
+            "request": {
+              "files": null,
+              "form": null,
+              "json": {
+                "address": "y",
+                "latitude": 10.01,
+                "longitude": 10.01,
+                "name": "zz Near"
+              },
+              "method": "POST",
+              "path": "/api/admin/stores",
+              "query": {}
+            }
+          }
+        ],
+        "stated_in": [
+          "standard",
+          "exhaustive"
+        ]
+      }
+    ],
+    "auth_flow": {
+      "credential": "bearer",
+      "csrf": "none",
+      "csrf_endpoint": null,
+      "login": "auth.login",
+      "logout": null,
+      "register": "auth.register",
+      "token_json_path": "token"
+    },
+    "category": "geolocation",
+    "endpoints": [
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400,
+          409
+        ],
+        "id": "auth.register",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/register",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "username": {
+              "maxLength": 50,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          401
+        ],
+        "id": "auth.login",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/auth/login",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "password": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        "response_schema": null,
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "stores.list",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/stores",
+        "query": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "q",
+            "required": false,
+            "semantics": "search",
+            "type": "string"
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "lat",
+            "required": false,
+            "semantics": "filter",
+            "type": "float"
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "name": "lng",
+            "required": false,
+            "semantics": "filter",
+            "type": "float"
+          },
+          {
+            "default": 25,
+            "enum": null,
+            "max": 500.0,
+            "name": "radius",
+            "required": false,
+            "semantics": "filter",
+            "type": "float"
+          }
+        ],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "address": {
+                    "maxLength": 255,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "distance_km": [
+                    "number",
+                    "null"
+                  ],
+                  "id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "latitude": {
+                    "maximum": 90,
+                    "minimum": -90,
+                    "type": "number"
+                  },
+                  "longitude": {
+                    "maximum": 180,
+                    "minimum": -180,
+                    "type": "number"
+                  },
+                  "name": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "phone": {
+                    "maxLength": 30,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "address",
+                  "latitude",
+                  "longitude",
+                  "distance_km"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "public",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "stores.get",
+        "method": "GET",
+        "owner_entity": null,
+        "path": "/api/stores/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": {
+          "properties": {
+            "address": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "distance_km": [
+              "number",
+              "null"
+            ],
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "latitude": {
+              "maximum": 90,
+              "minimum": -90,
+              "type": "number"
+            },
+            "longitude": {
+              "maximum": 180,
+              "minimum": -180,
+              "type": "number"
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "phone": {
+              "maxLength": 30,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "address",
+            "latitude",
+            "longitude",
+            "distance_km"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [
+          400
+        ],
+        "id": "admin.stores.create",
+        "method": "POST",
+        "owner_entity": null,
+        "path": "/api/admin/stores",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "address": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "latitude": {
+              "maximum": 90,
+              "minimum": -90,
+              "type": "number"
+            },
+            "longitude": {
+              "maximum": 180,
+              "minimum": -180,
+              "type": "number"
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "phone": {
+              "maxLength": 30,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "address",
+            "latitude",
+            "longitude"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "address": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "distance_km": [
+              "number",
+              "null"
+            ],
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "latitude": {
+              "maximum": 90,
+              "minimum": -90,
+              "type": "number"
+            },
+            "longitude": {
+              "maximum": 180,
+              "minimum": -180,
+              "type": "number"
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "phone": {
+              "maxLength": 30,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "address",
+            "latitude",
+            "longitude",
+            "distance_km"
+          ],
+          "type": "object"
+        },
+        "success_status": 201,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [
+          400,
+          404
+        ],
+        "id": "admin.stores.replace",
+        "method": "PUT",
+        "owner_entity": null,
+        "path": "/api/admin/stores/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": {
+          "properties": {
+            "address": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "latitude": {
+              "maximum": 90,
+              "minimum": -90,
+              "type": "number"
+            },
+            "longitude": {
+              "maximum": 180,
+              "minimum": -180,
+              "type": "number"
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "phone": {
+              "maxLength": 30,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "address",
+            "latitude",
+            "longitude"
+          ],
+          "type": "object"
+        },
+        "response_schema": {
+          "properties": {
+            "address": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "distance_km": [
+              "number",
+              "null"
+            ],
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "latitude": {
+              "maximum": 90,
+              "minimum": -90,
+              "type": "number"
+            },
+            "longitude": {
+              "maximum": 180,
+              "minimum": -180,
+              "type": "number"
+            },
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "phone": {
+              "maxLength": 30,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "address",
+            "latitude",
+            "longitude",
+            "distance_km"
+          ],
+          "type": "object"
+        },
+        "success_status": 200,
+        "tags": []
+      },
+      {
+        "auth": "admin",
+        "content_type": "json",
+        "errors": [
+          404
+        ],
+        "id": "admin.stores.delete",
+        "method": "DELETE",
+        "owner_entity": null,
+        "path": "/api/admin/stores/{id}",
+        "query": [],
+        "realtime": "none",
+        "request_schema": null,
+        "response_schema": null,
+        "success_status": 204,
+        "tags": []
+      }
+    ],
+    "entities": [
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 50,
+            "min": null,
+            "name": "username",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": true
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": null,
+            "min": null,
+            "name": "password",
+            "ref": null,
+            "required": true,
+            "secret": true,
+            "type": "string",
+            "unique": false
+          }
+        ],
+        "name": "User",
+        "owned_by_user": false,
+        "soft_delete": false
+      },
+      {
+        "fields": [
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 100,
+            "min": null,
+            "name": "name",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 255,
+            "min": null,
+            "name": "address",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": null,
+            "max_length": 30,
+            "min": null,
+            "name": "phone",
+            "ref": null,
+            "required": false,
+            "secret": false,
+            "type": "string",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 90.0,
+            "max_length": null,
+            "min": -90.0,
+            "name": "latitude",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "float",
+            "unique": false
+          },
+          {
+            "default": null,
+            "enum": null,
+            "max": 180.0,
+            "max_length": null,
+            "min": -180.0,
+            "name": "longitude",
+            "ref": null,
+            "required": true,
+            "secret": false,
+            "type": "float",
+            "unique": false
+          }
+        ],
+        "name": "Store",
+        "owned_by_user": false,
+        "soft_delete": false
+      }
+    ],
+    "features": [
+      "auth",
+      "admin",
+      "search",
+      "geo"
+    ],
+    "has_frontend": true,
+    "probes": [
+      {
+        "cwe": "cwe-89",
+        "endpoint": "stores.list",
+        "id": "probe.stores.sqli",
+        "kind": "sqli_boolean",
+        "params": {
+          "param": "q"
+        },
+        "positive_control": null,
+        "requires_checks": null
+      },
+      {
+        "cwe": "cwe-798",
+        "endpoint": null,
+        "id": "probe.stores.default_admin",
+        "kind": "default_credential",
+        "params": {},
+        "positive_control": null,
+        "requires_checks": null
+      }
+    ],
+    "seed_data": {},
+    "summary": "Browse a directory of store locations and find the ones nearest to you.",
+    "surfaces": [
+      "cwe-89",
+      "cwe-20",
+      "cwe-862",
+      "cwe-79",
+      "cwe-798"
+    ],
+    "title": "Store finder",
+    "ui": [
+      {
+        "endpoints": [
+          "auth.login"
+        ],
+        "id": "ui.auth",
+        "text": "A sign-in form for the admin."
+      },
+      {
+        "endpoints": [
+          "stores.list"
+        ],
+        "id": "ui.list",
+        "text": "The store list with name, address and phone and a search box."
+      },
+      {
+        "endpoints": [
+          "stores.list"
+        ],
+        "id": "ui.near",
+        "text": "A 'Use my location' button that lists nearby stores with their distance and a radius selector; if permission is denied the plain list stays with a short note."
+      },
+      {
+        "endpoints": [
+          "stores.list"
+        ],
+        "id": "ui.plot",
+        "text": "A simple plot that places the listed stores (and the visitor, when known) by latitude and longitude, drawn by the page itself without external map tiles."
+      },
+      {
+        "endpoints": [
+          "admin.stores.create",
+          "admin.stores.replace",
+          "admin.stores.delete"
+        ],
+        "id": "ui.admin",
+        "text": "For the admin: add and edit forms that show the API's validation messages, and delete after confirmation."
+      }
+    ]
+  },
+  "structured_hash": "e82547d5050efcf402dd5bb022bed92d81bcfc37fe13dbc976066b90a8e35b6c",
+  "summary": "Browse a directory of store locations and find the ones nearest to you.",
+  "surfaces": [
+    "cwe-89",
+    "cwe-20",
+    "cwe-862",
+    "cwe-79",
+    "cwe-798"
+  ],
+  "task_hash": "7c86412b996aa7ec63257b2240eb986ec2bc0af232341ba5809fd5625fae305b",
+  "title": "Store finder",
+  "variant": "standard",
+  "version": 1
+}
