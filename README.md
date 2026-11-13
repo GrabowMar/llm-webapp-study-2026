@@ -123,5 +123,6 @@ zstd -dc runs/<model>/<task>__<id>/transcript/calls.jsonl.zst | head -1 | python
 
 ## License
 
-No license has been chosen yet. Until a `LICENSE` file is added, the contents are provided for
-inspection only.
+MIT, see `LICENSE`. It covers the data, tables and documentation in this repository, including the
+generated application code. Third-party material quoted in the transcripts (package manager output,
+library source excerpts) remains under its own terms.
